@@ -3,8 +3,8 @@ package policy
 import (
 	"fmt"
 
-	"github.com/typesafe-ai/jev-guard/pkg/evaluator"
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/evaluator"
+	"jev-guard/pkg/harness"
 )
 
 // Policy evaluates combined local boundary facts and semantic judgments.

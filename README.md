@@ -25,16 +25,18 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 
 ## Installation
 
-### One-Line Install
+### Local Installation
+
+Build and install directly to your local user binary directory:
 
 #### Linux / macOS:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/typesafe-ai/jev-guard/main/install.sh | bash
+./install.sh
 ```
 
 #### Windows (PowerShell):
 ```powershell
-irm https://raw.githubusercontent.com/typesafe-ai/jev-guard/main/install.ps1 | iex
+.\install.ps1
 ```
 
 ---

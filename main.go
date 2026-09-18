@@ -6,12 +6,12 @@ import (
 	"io"
 	"os"
 
-	"github.com/typesafe-ai/jev-guard/pkg/boundary"
-	"github.com/typesafe-ai/jev-guard/pkg/config"
-	"github.com/typesafe-ai/jev-guard/pkg/evaluator"
-	"github.com/typesafe-ai/jev-guard/pkg/fastpath"
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
-	"github.com/typesafe-ai/jev-guard/pkg/policy"
+	"jev-guard/pkg/boundary"
+	"jev-guard/pkg/config"
+	"jev-guard/pkg/evaluator"
+	"jev-guard/pkg/fastpath"
+	"jev-guard/pkg/harness"
+	"jev-guard/pkg/policy"
 )
 
 func main() {

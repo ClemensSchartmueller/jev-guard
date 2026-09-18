@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 // Config encapsulates runtime parameters loaded from environment and configuration files.

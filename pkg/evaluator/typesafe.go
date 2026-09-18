@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 const (

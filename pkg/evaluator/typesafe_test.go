@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 func TestClient_Evaluate_Success(t *testing.T) {

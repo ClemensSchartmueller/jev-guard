@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 // Filter provides sub-millisecond static gating before external AI evaluation.

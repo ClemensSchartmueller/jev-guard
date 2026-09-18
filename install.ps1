@@ -16,12 +16,12 @@ if (!(Test-Path $InstallDir)) {
 $BinaryTarget = Join-Path $InstallDir "jev-guard.exe"
 
 # If go is installed and source is available locally, build directly
-if (Get-Command go -ErrorAction SilentlyContinue -and (Test-Path ".\main.go")) {
+if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go")) {
     Write-Host "Building jev-guard from local source with Go..." -ForegroundColor Yellow
     go build -ldflags="-s -w" -o $BinaryTarget .\main.go
 } else {
     $Arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
-    $Repo = "typesafe-ai/jev-guard"
+    $Repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "user/jev-guard" }
     $DownloadUrl = if ($Version -eq "latest") {
         "https://github.com/$Repo/releases/latest/download/jev-guard-windows-$Arch.exe"
     } else {

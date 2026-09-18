@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/typesafe-ai/jev-guard/pkg/evaluator"
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/evaluator"
+	"jev-guard/pkg/harness"
 )
 
 func TestPolicy_Resolve_Allow(t *testing.T) {

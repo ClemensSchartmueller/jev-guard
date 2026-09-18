@@ -3,7 +3,7 @@ package fastpath
 import (
 	"testing"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 func TestFastPath_Catastrophic(t *testing.T) {

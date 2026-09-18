@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/typesafe-ai/jev-guard/pkg/harness"
+	"jev-guard/pkg/harness"
 )
 
 func TestConfig_Defaults(t *testing.T) {
