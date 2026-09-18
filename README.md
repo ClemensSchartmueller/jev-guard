@@ -17,11 +17,11 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`).
   - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass.
   - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
-- **Antigravity Protocol Integration**:
-  - **Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by bypassing Antigravity's auto-execution and turbo cache.
-  - **Permission Overrides**: Emits `permissionOverrides: ["command(...)"]` on approved (`ALLOW`) and user-confirmed (`force_ask`) commands, eliminating redundant permission prompts in the Antigravity UI.
+- **Platform-Specific Safety Enforcement**:
+  - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
+  - **Claude Code & Codex Fail-Safe Blocking**: In Claude Code and Codex, autonomous/bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) disable interactive prompts. `jev-guard` enforces safety by defaulting all `ASK` and `force_ask` escalations to **exit code 2** (rejection with feedback to `stderr`), preventing sensitive files or boundary escapes from silently executing.
 - **Flexible Operating Modes**:
-  - **`enforcing`** (default): Actively enforces policy verdicts—blocking catastrophic commands (`DENY`), prompting confirmation for sensitive or moderate operations (`ASK` / `force_ask`), and approving verified actions (`ALLOW`).
+  - **`enforcing`** (default): Actively enforces policy verdicts—blocking catastrophic commands (`DENY`), prompting confirmation for sensitive or moderate operations (`force_ask` in Antigravity, exit code 2 in Claude/Codex), and approving verified actions (`ALLOW`).
   - **`audit`**: Passive monitoring dry-run. Logs every tool call and evaluation result to `.jevguard.log`, but rewrites blocking decisions to `ALLOW` (`[AUDIT-MODE: <decision>]`) so agent workflows are never interrupted.
 - **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
   - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
@@ -93,9 +93,11 @@ Relative audit log paths (such as `"audit_log_path": ".jevguard.log"`) are autom
 `jev-guard` supports two operational modes configured via `"mode"` in `.jevguard.json` or the `JEV_GUARD_MODE` environment variable:
 
 - **`enforcing`** (default): Active safety gating.
-  - Catastrophic operations or security violations are blocked (`DENY`).
-  - Sensitive file accesses, boundary escapes, or moderate risk operations require user confirmation (`force_ask` for Antigravity, `ask` for Claude/Codex).
-  - Safe, contained operations are permitted (`ALLOW`).
+  - Catastrophic operations or security violations are blocked (`DENY` / exit code 2).
+  - Sensitive file accesses, boundary escapes, or moderate risk operations trigger safety escalation:
+    - **Antigravity**: Emits `"force_ask"` on stdout with `permissionOverrides`, guaranteeing an interactive approval modal even in Turbo Mode.
+    - **Claude Code & Codex**: Exits with **code 2** (hard block with reason on `stderr`), preventing bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) from silently executing unconfirmed actions.
+  - Safe, contained operations are permitted (`ALLOW` / exit code 0).
 - **`audit`**: Passive evaluation and dry-run monitoring.
   - All operations are processed through fastpath and TypeSafe AI semantic evaluation.
   - Full evaluation telemetry is written to `.jevguard.log`.
@@ -131,6 +133,18 @@ Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) 
 
 > [!TIP]
 > If you embed `typesafe_api_key` inside `.jevguard.json`, remember to add `.jevguard.json` and `.jevguard.log` to your `.gitignore`, or configure `TYPESAFE_API_KEY` globally as an environment variable instead.
+
+### Recommended `.gitignore` Entries
+
+To protect your TypeSafe AI credentials and prevent committing local telemetry logs, add the following to your project's `.gitignore`:
+
+```gitignore
+# jev-guard configuration (contains private API key) & audit logs
+.jevguard.json
+jevguard.json
+.jevguard.log
+*.jevguard.log
+```
 
 ### Settings & Environment Variables Reference
 
@@ -219,6 +233,16 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
   }
 }
 ```
+
+### Platform Safety & Autonomous Matrix
+
+When running agents in autonomous, turbo, or bypass modes, `jev-guard` maintains strict invariants according to each harness's hook protocol:
+
+| Verdict | Antigravity (Turbo / `always-proceed`) | Claude Code (`--dangerously-skip-permissions`) | Codex CLI (`--yolo` / `approval_policy = "never"`) |
+| :--- | :--- | :--- | :--- |
+| **`ALLOW`** | Auto-proceeds (`"allow"`) | Auto-proceeds (Exit `0`) | Auto-proceeds (Exit `0`) |
+| **`ASK` / Sensitive / Escape** | **Halts & Prompts User** (`"force_ask"` overrides cache) | **Fails Safe & Blocks** (Exit `2` with `stderr` feedback) | **Fails Safe & Blocks** (Exit `2` with `stderr` feedback) |
+| **`DENY` / Catastrophic** | **Hard Block** (`"deny"`) | **Hard Block** (Exit `2`) | **Hard Block** (Exit `2`) |
 
 ---
 

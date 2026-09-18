@@ -6,16 +6,11 @@
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
-    ".env.*",
     "*.pem",
-    "*.key",
-    "id_rsa",
-    "id_ed25519",
-    "credentials.json"
+    "id_rsa"
   ],
   "trusted_commands": [
     "git status",
-    "git diff",
     "git log"
   ]
 }
