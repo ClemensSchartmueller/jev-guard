@@ -2,18 +2,22 @@
 
 High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, and **Antigravity**.
 
-`jev-guard` intercepts tool calls (shell executions, file writes, patch applications) before execution, performs sub-millisecond local boundary and sensitive file checks, and utilizes **TypeSafe AI's System One (Jev)** model to evaluate blast radius, reversibility, and destructive potential.
+`jev-guard` intercepts tool calls (shell executions, file writes, patch applications, file reads, and directory inspections) before execution, performs sub-millisecond local boundary and sensitive file checks, and utilizes **TypeSafe AI's System One (Jev)** model to evaluate blast radius, reversibility, and destructive potential.
 
 ---
 
 ## Key Features
 
-- **Multi-Agent Interception**: Automatically detects and handles payload structures from Claude Code (`Bash`, `Edit`, `Write`), Codex CLI, and Antigravity (`run_command`, `write_to_file`, `replace_file_content`).
+- **Multi-Agent Interception**: Automatically detects and handles payload structures from:
+  - **Claude Code**: `Bash`, `Edit`, `Write`, `View`, `ReadLocalFile`, `LS`, `Grep`, `Glob`
+  - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
+  - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
   - **Sensitive File Protection**: Immediately prompts confirmation (`ASK`) for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
-  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally.
-  - **Trusted Command Cache**: Zero-latency approval (`ALLOW`) for unambiguous read inspection commands (`git status`, `git diff`, `ls`, `dir`, `pwd`, `view_file`, `grep_search`).
+  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`).
+  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass.
   - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
+- **Antigravity Permission Overrides**: Returns `permissionOverrides: ["command(...)"]` on approved (`ALLOW`) and user-confirmed (`ASK`) command executions, eliminating redundant permission prompts in the Antigravity UI.
 - **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
   - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
   - Evaluates 3 primitives:
@@ -42,20 +46,42 @@ Build and install directly to your local user binary directory:
 
 ---
 
+## CLI Usage & Verification
+
+`jev-guard` includes built-in flags for diagnostics and supports manual payload testing via standard input:
+
+```bash
+# Display version and build information
+jev-guard --version
+
+# Show help and usage details
+jev-guard --help
+
+# Test evaluation manually by piping a tool call payload JSON
+cat payload.json | jev-guard
+```
+
+> [!NOTE]
+> When executed directly in an interactive terminal without piped input or flags, `jev-guard` displays help and usage guidance instead of blocking on stdin.
+
+---
+
 ## Configuration
 
-### File Location
+### Hierarchical Configuration Discovery
 
-Place `.jevguard.json` directly in the **root of your project or workspace** (the working directory `cwd` where your AI agent—Claude Code, Codex, or Antigravity—is launched and runs commands):
+`jev-guard` searches for `.jevguard.json` or `jevguard.json` by inspecting the tool call's working directory (`cwd`), workspace roots, and target file directory, automatically traversing up ancestor directories until a configuration file is found. This allows subdirectories and monorepo packages to automatically inherit the workspace root configuration without duplicate config files.
 
 ```text
 my-project/
-├── .jevguard.json          # Project-specific safety policy & settings
-├── .jevguard.log           # Generated audit log (if audit_log_path is configured)
-├── ...
+├── .jevguard.json          # Root safety policy & settings (inherited by subdirectories)
+├── .jevguard.log           # Anchored audit log (if audit_log_path is configured)
+├── packages/
+│   └── app/                # Commands run here automatically inherit root .jevguard.json
+└── ...
 ```
 
-`jev-guard` dynamically checks for `.jevguard.json` inside the tool call's working directory (`cwd`) for each intercepted action.
+Relative audit log paths (such as `"audit_log_path": ".jevguard.log"`) are automatically anchored to the directory containing the resolved configuration file, ensuring audit entries are centralized in a single log rather than split across child directories.
 
 ### Configuration Options
 
@@ -64,7 +90,7 @@ You can configure your TypeSafe AI API key either via environment variable:
 export TYPESAFE_API_KEY="your-typesafe-api-key"
 ```
 
-Or directly inside `.jevguard.json` along with optional policy parameters:
+Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) along with optional policy parameters:
 ```json
 {
   "mode": "enforcing",
@@ -91,8 +117,8 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
 ### Configuration Precedence
 
 1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`) override file settings.
-2. **Project Configuration** (`.jevguard.json` located in the project root / `cwd`).
-3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`).
+2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered in `cwd` or nearest ancestor directory).
+3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, standard sensitive file patterns and read commands).
 
 ---
 
@@ -115,11 +141,16 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
 ### Antigravity (`.agents/hooks.json`)
 ```json
 {
-  "hooks": {
+  "jev-guard": {
     "PreToolUse": [
       {
         "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }
@@ -157,3 +188,4 @@ go build -o jev-guard main.go
 ## License
 
 MIT
+
