@@ -43,17 +43,18 @@ Build and install directly to your local user binary directory:
 
 ## Configuration
 
-Set your TypeSafe AI API key:
+You can configure your TypeSafe AI API key either via environment variable:
 ```bash
 export TYPESAFE_API_KEY="your-typesafe-api-key"
 ```
 
-Optional configuration via `.jevguard.json`:
+Or directly inside `.jevguard.json` along with optional policy parameters:
 ```json
 {
-  "$schema": "https://typesafe.ai/schemas/jevguard.v1.json",
   "mode": "enforcing",
+  "typesafe_api_key": "your-typesafe-api-key",
   "timeout_ms": 1500,
+  "model": "jev-latest",
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
