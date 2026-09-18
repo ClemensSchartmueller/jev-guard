@@ -1,9 +1,14 @@
 {
-  "hooks": {
+  "jev-guard": {
     "PreToolUse": [
       {
         "matcher": "run_command|write_to_file|replace_file_content",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }

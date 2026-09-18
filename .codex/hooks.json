@@ -3,7 +3,12 @@
     "PreToolUse": [
       {
         "matcher": "Bash|exec_command|apply_patch",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }

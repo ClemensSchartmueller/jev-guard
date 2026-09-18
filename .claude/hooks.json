@@ -3,7 +3,12 @@
     "PreToolUse": [
       {
         "matcher": "Bash|Edit|Write",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }
