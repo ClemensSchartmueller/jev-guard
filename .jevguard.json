@@ -1,6 +1,6 @@
 {
-  "$schema": "https://typesafe.ai/schemas/jevguard.v1.json",
   "mode": "enforcing",
+  "typesafe_api_key": "",
   "timeout_ms": 1500,
   "model": "jev-latest",
   "audit_log_path": ".jevguard.log",

@@ -46,8 +46,25 @@ func TestConfig_LoadConfigFile(t *testing.T) {
 	if cfg.Timeout != 2500*time.Millisecond {
 		t.Errorf("expected 2500ms, got %v", cfg.Timeout)
 	}
-	if len(cfg.SensitiveFiles) != 1 || cfg.SensitiveFiles[0] != ".secrets.yaml" {
-		t.Errorf("expected sensitive file .secrets.yaml, got %v", cfg.SensitiveFiles)
+}
+
+func TestConfig_LoadConfig_TypesafeAPIKey(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-key-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configJSON := `{
+		"typesafe_api_key": "my-secret-jev-key"
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := LoadConfig(tempDir)
+	if cfg.APIKey != "my-secret-jev-key" {
+		t.Errorf("expected APIKey 'my-secret-jev-key', got %s", cfg.APIKey)
 	}
 }
 

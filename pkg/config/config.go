@@ -13,10 +13,11 @@ import (
 
 // Config encapsulates runtime parameters loaded from environment and configuration files.
 type Config struct {
-	Mode             string        `json:"mode"`               // "enforcing" or "audit"
-	APIKey           string        `json:"api_key,omitempty"`  // from TYPESAFE_API_KEY or file
-	BaseURL          string        `json:"base_url,omitempty"` // API endpoint
-	Model            string        `json:"model,omitempty"`    // e.g. "jev-latest"
+	Mode             string        `json:"mode"`                         // "enforcing" or "audit"
+	APIKey           string        `json:"api_key,omitempty"`            // from TYPESAFE_API_KEY or file
+	TypesafeAPIKey   string        `json:"typesafe_api_key,omitempty"`   // alias for api_key in config file
+	BaseURL          string        `json:"base_url,omitempty"`           // API endpoint
+	Model            string        `json:"model,omitempty"`              // e.g. "jev-latest"
 	Timeout          time.Duration `json:"-"`
 	TimeoutMs        int           `json:"timeout_ms,omitempty"`
 	AuditLogPath     string        `json:"audit_log_path,omitempty"`
@@ -58,6 +59,8 @@ func loadConfigFile(cfg *Config, dir string) {
 		}
 		if fileCfg.APIKey != "" {
 			cfg.APIKey = fileCfg.APIKey
+		} else if fileCfg.TypesafeAPIKey != "" {
+			cfg.APIKey = fileCfg.TypesafeAPIKey
 		}
 		if fileCfg.BaseURL != "" {
 			cfg.BaseURL = fileCfg.BaseURL

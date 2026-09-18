@@ -194,3 +194,7 @@
   - Updated all internal package imports (`jev-guard/pkg/...`).
   - Successfully built and installed standalone binary into local user path (`~/.local/bin/jev-guard.exe`).
   - Verified live hook integration in Antigravity.
+- **2026-09-18 - Config Schema Cleanup & In-File API Key Support**:
+  - Removed external domain `$schema` URL from `.jevguard.json`.
+  - Added support for configuring the TypeSafe AI API key directly in `.jevguard.json` via `typesafe_api_key` (or `api_key`).
+  - Added unit test `TestConfig_LoadConfig_TypesafeAPIKey` and updated binary in `~/.local/bin/`.
