@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"jev-guard/pkg/boundary"
+	"jev-guard/pkg/cli"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/evaluator"
 	"jev-guard/pkg/fastpath"
@@ -15,7 +16,13 @@ import (
 )
 
 func main() {
-	exitCode := runGate()
+	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
+	action, exitCode := runner.EvaluateArgs(os.Args[1:])
+	if action == cli.ActionHandled {
+		os.Exit(exitCode)
+	}
+
+	exitCode = runGate()
 	os.Exit(exitCode)
 }
 
