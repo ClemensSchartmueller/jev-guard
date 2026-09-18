@@ -258,6 +258,18 @@ go build -o jev-guard main.go
 
 ---
 
+## Contributing
+
+Contributions are welcome! Whether it is extending harness support, refining detection heuristics, improving TypeSafe System One prompt templates, or reporting issues, community feedback and pull requests are greatly appreciated.
+
+---
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied. Neither TypeSafe AI (`typesafe.ai`), the `jev-guard` project, nor its contributors or maintainers are liable for any damages, losses, or claims arising from the use or performance of this hook (including, but not limited to, damages caused by misclassifications, false positives, or false negatives from Jev AI / TypeSafe AI). Users are responsible for evaluating and supervising automated agent tool calls in their own environments.
+
+---
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
