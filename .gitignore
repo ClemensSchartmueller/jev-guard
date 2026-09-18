@@ -1,0 +1,19 @@
+# Binaries
+/jev-guard
+/jev-guard.exe
+/bin/
+/dist/
+
+# Logs and local state
+*.log
+.jevguard.log
+
+# Test coverage
+*.out
+coverage.html
+
+# OS and IDE artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
