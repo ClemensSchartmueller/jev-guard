@@ -168,7 +168,7 @@ func FormatResponseForCall(call *NormalizedToolCall, result EvaluationResult) (i
 
 func formatAntigravityResponse(call *NormalizedToolCall, result EvaluationResult) (int, []byte, error) {
 	out := AntigravityDecisionOutput{
-		Decision: string(result.Decision),
+		Decision: resolveAntigravityDecision(result.Decision),
 		Reason:   result.Reason,
 	}
 
@@ -183,11 +183,20 @@ func formatAntigravityResponse(call *NormalizedToolCall, result EvaluationResult
 	return 0, bytes, nil
 }
 
+// resolveAntigravityDecision maps decisions to Antigravity's expected protocol enum.
+// In Antigravity, "ask" respects auto-execution/turbo cache, so human escalation requires "force_ask".
+func resolveAntigravityDecision(decision Decision) string {
+	if decision == DecisionAsk || decision == DecisionForceAsk {
+		return "force_ask"
+	}
+	return string(decision)
+}
+
 func shouldApplyCommandOverride(call *NormalizedToolCall, decision Decision) bool {
 	if call == nil || strings.TrimSpace(call.Command) == "" {
 		return false
 	}
-	return decision == DecisionAllow || decision == DecisionAsk
+	return decision == DecisionAllow || decision == DecisionAsk || decision == DecisionForceAsk
 }
 
 func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {

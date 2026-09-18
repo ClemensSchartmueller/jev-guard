@@ -99,7 +99,7 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 		return result
 	}
 
-	if result.Decision == harness.DecisionDeny || result.Decision == harness.DecisionAsk {
+	if result.Decision == harness.DecisionDeny || result.Decision == harness.DecisionAsk || result.Decision == harness.DecisionForceAsk {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAllow,
 			Reason:     fmt.Sprintf("[AUDIT-MODE: %s] %s", result.Decision, result.Reason),

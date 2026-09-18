@@ -14,9 +14,10 @@ const (
 type Decision string
 
 const (
-	DecisionAllow Decision = "allow"
-	DecisionAsk   Decision = "ask"
-	DecisionDeny  Decision = "deny"
+	DecisionAllow    Decision = "allow"
+	DecisionAsk      Decision = "ask"
+	DecisionForceAsk Decision = "force_ask"
+	DecisionDeny     Decision = "deny"
 )
 
 // NormalizedToolCall provides a unified abstraction over varying agent input shapes.

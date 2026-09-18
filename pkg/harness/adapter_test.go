@@ -232,8 +232,39 @@ func TestFormatResponseForCall_AntigravityPermissionOverrides_Ask(t *testing.T) 
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("failed to unmarshal output: %v", err)
 	}
+	if parsed.Decision != "force_ask" {
+		t.Errorf("expected decision 'force_ask' for Antigravity ask escalation, got '%s'", parsed.Decision)
+	}
 	if len(parsed.PermissionOverrides) != 1 || parsed.PermissionOverrides[0] != "command(npm test)" {
 		t.Errorf("expected permission override 'command(npm test)', got %v", parsed.PermissionOverrides)
+	}
+}
+
+func TestFormatResponseForCall_AntigravityForceAsk(t *testing.T) {
+	call := &NormalizedToolCall{
+		Harness:  HarnessAntigravity,
+		ToolName: "run_command",
+		Command:  "git diff .env",
+	}
+	res := EvaluationResult{
+		Decision: DecisionForceAsk,
+		Reason:   "Sensitive environment file accessed",
+	}
+
+	exitCode, out, err := FormatResponseForCall(call, res)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected error or exitCode: err=%v, code=%d", err, exitCode)
+	}
+
+	var parsed AntigravityDecisionOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if parsed.Decision != "force_ask" {
+		t.Errorf("expected decision 'force_ask', got '%s'", parsed.Decision)
+	}
+	if len(parsed.PermissionOverrides) != 1 || parsed.PermissionOverrides[0] != "command(git diff .env)" {
+		t.Errorf("expected permission override 'command(git diff .env)', got %v", parsed.PermissionOverrides)
 	}
 }
 
