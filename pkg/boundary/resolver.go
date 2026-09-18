@@ -21,15 +21,21 @@ func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 		}
 	}
 
-	if len(roots) == 0 && cwd != "" {
-		gitRoot := findGitRoot(cwd)
-		if gitRoot != "" {
-			if cleanGit, err := canonicalizePath(gitRoot); err == nil {
-				roots = append(roots, cleanGit)
-			}
-		} else {
-			if cleanCwd, err := canonicalizePath(cwd); err == nil {
-				roots = append(roots, cleanCwd)
+	if len(roots) == 0 {
+		effectiveCwd := cwd
+		if effectiveCwd == "" {
+			effectiveCwd, _ = os.Getwd()
+		}
+		if effectiveCwd != "" {
+			gitRoot := findGitRoot(effectiveCwd)
+			if gitRoot != "" {
+				if cleanGit, err := canonicalizePath(gitRoot); err == nil {
+					roots = append(roots, cleanGit)
+				}
+			} else {
+				if cleanCwd, err := canonicalizePath(effectiveCwd); err == nil {
+					roots = append(roots, cleanCwd)
+				}
 			}
 		}
 	}
@@ -44,8 +50,12 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	absPath := targetPath
-	if !filepath.IsAbs(targetPath) {
-		absPath = filepath.Join(cwd, targetPath)
+	if !filepath.IsAbs(targetPath) && !isSlashRoot(targetPath) {
+		baseDir := cwd
+		if baseDir == "" {
+			baseDir, _ = os.Getwd()
+		}
+		absPath = filepath.Join(baseDir, targetPath)
 	}
 
 	cleanTarget, err := canonicalizePath(absPath)
@@ -60,6 +70,10 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	return false, nil
+}
+
+func isSlashRoot(p string) bool {
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\")
 }
 
 func canonicalizePath(path string) (string, error) {

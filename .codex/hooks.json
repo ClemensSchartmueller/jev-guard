@@ -2,13 +2,8 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|exec_command|apply_patch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard"
-          }
-        ]
+        "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
+        "command": "jev-guard"
       }
     ]
   }

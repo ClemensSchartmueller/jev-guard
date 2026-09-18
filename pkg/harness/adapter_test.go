@@ -62,6 +62,53 @@ func TestParsePayload_Claude(t *testing.T) {
 	}
 }
 
+func TestParsePayload_ClaudeView(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "View",
+		"tool_input": {
+			"file_path": "/etc/shadow"
+		},
+		"cwd": "/home/user/app"
+	}`)
+
+	normalized, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error parsing claude view payload: %v", err)
+	}
+
+	if normalized.Harness != HarnessClaudeCode {
+		t.Errorf("expected harness %s, got %s", HarnessClaudeCode, normalized.Harness)
+	}
+	if normalized.ToolName != "View" {
+		t.Errorf("expected toolName View, got %s", normalized.ToolName)
+	}
+	if normalized.TargetPath != "/etc/shadow" {
+		t.Errorf("expected targetPath '/etc/shadow', got '%s'", normalized.TargetPath)
+	}
+}
+
+func TestParsePayload_CodexReadFile(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "read_file",
+		"tool_input": {
+			"path": "C:\\Windows\\system.ini"
+		},
+		"cwd": "C:\\myproject"
+	}`)
+
+	normalized, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error parsing codex read_file payload: %v", err)
+	}
+
+	if normalized.ToolName != "read_file" {
+		t.Errorf("expected toolName read_file, got %s", normalized.ToolName)
+	}
+	if normalized.TargetPath != "C:\\Windows\\system.ini" {
+		t.Errorf("expected targetPath 'C:\\Windows\\system.ini', got '%s'", normalized.TargetPath)
+	}
+}
+
 func TestParsePayload_EmptyAndInvalid(t *testing.T) {
 	if _, err := ParsePayload([]byte("")); err != ErrEmptyPayload {
 		t.Errorf("expected ErrEmptyPayload, got %v", err)

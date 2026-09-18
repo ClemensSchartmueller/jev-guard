@@ -43,6 +43,21 @@ Build and install directly to your local user binary directory:
 
 ## Configuration
 
+### File Location
+
+Place `.jevguard.json` directly in the **root of your project or workspace** (the working directory `cwd` where your AI agent—Claude Code, Codex, or Antigravity—is launched and runs commands):
+
+```text
+my-project/
+├── .jevguard.json          # Project-specific safety policy & settings
+├── .jevguard.log           # Generated audit log (if audit_log_path is configured)
+├── ...
+```
+
+`jev-guard` dynamically checks for `.jevguard.json` inside the tool call's working directory (`cwd`) for each intercepted action.
+
+### Configuration Options
+
 You can configure your TypeSafe AI API key either via environment variable:
 ```bash
 export TYPESAFE_API_KEY="your-typesafe-api-key"
@@ -68,6 +83,15 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
 }
 ```
 
+> [!TIP]
+> If you embed `typesafe_api_key` inside `.jevguard.json`, remember to add `.jevguard.json` and `.jevguard.log` to your `.gitignore`, or configure `TYPESAFE_API_KEY` globally as an environment variable instead.
+
+### Configuration Precedence
+
+1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`) override file settings.
+2. **Project Configuration** (`.jevguard.json` located in the project root / `cwd`).
+3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`).
+
 ---
 
 ## Hook Setup
@@ -78,7 +102,7 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write",
+        "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
         "command": "jev-guard"
       }
     ]
@@ -92,7 +116,7 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command|write_to_file|replace_file_content",
+        "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource",
         "command": "jev-guard"
       }
     ]
@@ -106,7 +130,7 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|exec_command|apply_patch",
+        "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
         "command": "jev-guard"
       }
     ]

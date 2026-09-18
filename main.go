@@ -53,12 +53,18 @@ func readStandardInput() ([]byte, error) {
 }
 
 func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
-	fastFilter := fastpath.NewDefaultFilter()
+	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
+	var checker fastpath.BoundaryChecker
+	if resolver != nil {
+		checker = resolver
+	}
+
+	fastFilter := fastpath.NewFilter(checker)
 	if fastResult := fastFilter.Evaluate(call); fastResult != nil {
 		return applyAuditMode(fastResult, cfg.Mode)
 	}
 
-	contained := checkWorkspaceBoundary(call)
+	contained := checkWorkspaceBoundary(call, resolver)
 	judgments, evalErr := performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
@@ -67,10 +73,9 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 	return applyAuditMode(resolved, cfg.Mode)
 }
 
-func checkWorkspaceBoundary(call *harness.NormalizedToolCall) bool {
-	resolver, err := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
-	if err != nil {
-		return true // Fallback to allowing boundary evaluation to Jev
+func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
+	if resolver == nil {
+		return true
 	}
 	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {

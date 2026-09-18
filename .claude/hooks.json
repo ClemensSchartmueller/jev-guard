@@ -2,13 +2,8 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard"
-          }
-        ]
+        "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
+        "command": "jev-guard"
       }
     ]
   }
