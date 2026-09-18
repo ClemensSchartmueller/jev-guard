@@ -22,6 +22,7 @@ type Config struct {
 	Timeout          time.Duration `json:"-"`
 	TimeoutMs        int           `json:"timeout_ms,omitempty"`
 	AuditLogPath     string        `json:"audit_log_path,omitempty"`
+	FastpathEnabled  *bool         `json:"fastpath_enabled,omitempty"`  // whether local fastpath filter is active
 	SensitiveFiles   []string      `json:"sensitive_files,omitempty"`
 	TrustedCommands  []string      `json:"trusted_commands,omitempty"`
 }
@@ -31,10 +32,58 @@ var ConfigFileNames = []string{".jevguard.json", "jevguard.json"}
 
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
+	enabled := true
 	return &Config{
-		Mode:      "enforcing",
-		Timeout:   1500 * time.Millisecond,
-		TimeoutMs: 1500,
+		Mode:            "enforcing",
+		Timeout:         1500 * time.Millisecond,
+		TimeoutMs:       1500,
+		FastpathEnabled: &enabled,
+		SensitiveFiles:  DefaultSensitiveFiles(),
+		TrustedCommands: DefaultTrustedCommands(),
+	}
+}
+
+// IsFastpathEnabled reports whether local fastpath evaluation is enabled (defaults to true).
+func (c *Config) IsFastpathEnabled() bool {
+	if c.FastpathEnabled == nil {
+		return true
+	}
+	return *c.FastpathEnabled
+}
+
+// DefaultSensitiveFiles returns standard sensitive filename fragments protected by default.
+func DefaultSensitiveFiles() []string {
+	return []string{
+		".env",
+		"id_rsa",
+		"id_ed25519",
+		".ssh/",
+		".aws/",
+		"credentials.json",
+		".pem",
+		".key",
+		"serviceaccount.json",
+	}
+}
+
+// DefaultTrustedCommands returns baseline read-only inspection commands cached for zero latency.
+func DefaultTrustedCommands() []string {
+	return []string{
+		"git status",
+		"git diff",
+		"git log",
+		"git branch",
+		"git show",
+		"ls",
+		"dir",
+		"pwd",
+		"echo",
+		"whoami",
+		"which",
+		"where.exe",
+		"node -v",
+		"go version",
+		"python --version",
 	}
 }
 
@@ -147,8 +196,33 @@ func applyFileConfig(cfg *Config, fileCfg *Config) {
 	if fileCfg.AuditLogPath != "" {
 		cfg.AuditLogPath = fileCfg.AuditLogPath
 	}
-	cfg.SensitiveFiles = append(cfg.SensitiveFiles, fileCfg.SensitiveFiles...)
-	cfg.TrustedCommands = append(cfg.TrustedCommands, fileCfg.TrustedCommands...)
+	if fileCfg.FastpathEnabled != nil {
+		cfg.FastpathEnabled = fileCfg.FastpathEnabled
+	}
+	if len(fileCfg.SensitiveFiles) > 0 {
+		cfg.SensitiveFiles = mergeUniqueStrings(cfg.SensitiveFiles, fileCfg.SensitiveFiles)
+	}
+	if len(fileCfg.TrustedCommands) > 0 {
+		cfg.TrustedCommands = mergeUniqueStrings(cfg.TrustedCommands, fileCfg.TrustedCommands)
+	}
+}
+
+func mergeUniqueStrings(base []string, additional []string) []string {
+	seen := make(map[string]bool, len(base)+len(additional))
+	res := make([]string, 0, len(base)+len(additional))
+	for _, s := range base {
+		if !seen[s] {
+			seen[s] = true
+			res = append(res, s)
+		}
+	}
+	for _, s := range additional {
+		if !seen[s] {
+			seen[s] = true
+			res = append(res, s)
+		}
+	}
+	return res
 }
 
 func loadEnvironment(cfg *Config) {
@@ -169,6 +243,11 @@ func loadEnvironment(cfg *Config) {
 			cfg.TimeoutMs = ms
 			cfg.Timeout = time.Duration(ms) * time.Millisecond
 		}
+	}
+	if val := os.Getenv("JEV_GUARD_FASTPATH_ENABLED"); val != "" {
+		lower := strings.ToLower(strings.TrimSpace(val))
+		enabled := lower != "false" && lower != "0" && lower != "no" && lower != "off"
+		cfg.FastpathEnabled = &enabled
 	}
 }
 

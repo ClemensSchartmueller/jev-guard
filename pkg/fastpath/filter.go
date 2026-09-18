@@ -3,10 +3,10 @@ package fastpath
 import (
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"jev-guard/pkg/boundary"
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
@@ -15,45 +15,35 @@ type BoundaryChecker interface {
 	IsPathContained(targetPath string, cwd string) (bool, error)
 }
 
-// Filter provides sub-millisecond static gating before external AI evaluation.
+// Filter provides sub-millisecond local invariant enforcement (sensitive credentials, workspace boundaries)
+// and latency caching for trusted read-only inspection commands before external AI evaluation.
 type Filter struct {
-	catastrophicRegexes []*regexp.Regexp
-	sensitiveSubstrings []string
-	safeTools           map[string]bool
-	safeCommands        []string
-	boundaryChecker     BoundaryChecker
+	boundaryChecker BoundaryChecker
+	sensitiveFiles  []string
+	trustedCommands []string
 }
 
-// NewFilter constructs a fast-path filter with injected boundary checker.
-func NewFilter(checker BoundaryChecker) *Filter {
+// NewFilter constructs a fast-path filter with injected boundary checker and configuration.
+func NewFilter(checker BoundaryChecker, cfg *config.Config) *Filter {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
 	return &Filter{
-		catastrophicRegexes: compileCatastrophicPatterns(),
-		sensitiveSubstrings: defaultSensitiveSubstrings(),
-		safeTools:           defaultSafeTools(),
-		safeCommands:        defaultSafeCommands(),
-		boundaryChecker:     checker,
+		boundaryChecker: checker,
+		sensitiveFiles:  cfg.SensitiveFiles,
+		trustedCommands: cfg.TrustedCommands,
 	}
 }
 
-// NewDefaultFilter constructs a fast-path filter preloaded with standard safety rules.
+// NewDefaultFilter constructs a fast-path filter preloaded with default configuration.
 func NewDefaultFilter() *Filter {
-	return NewFilter(nil)
+	return NewFilter(nil, config.DefaultConfig())
 }
 
-// Evaluate checks the tool call against static rules. Returns nil if semantic analysis is needed.
+// Evaluate checks the tool call against local invariants and latency cache.
+// Returns nil if semantic analysis by TypeSafe AI (Jev) is needed.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
-	combined := strings.ToLower(call.Command + " " + call.TargetPath)
-
-	if reason := f.checkCatastrophic(combined); reason != "" {
-		return &harness.EvaluationResult{
-			Decision:   harness.DecisionDeny,
-			Reason:     reason,
-			Source:     "fastpath_catastrophic",
-			Confidence: 1.0,
-		}
-	}
-
-	if reason := f.checkSensitive(combined, call.TargetPath); reason != "" {
+	if reason := f.checkSensitive(call); reason != "" {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     reason,
@@ -71,16 +61,30 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
-	if f.isSafeRead(call) {
+	if f.isTrustedOperation(call) {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAllow,
-			Reason:     "Safe read-only operation verified by fast-path",
-			Source:     "fastpath_whitelist",
+			Reason:     "Trusted read-only operation verified by fast-path",
+			Source:     "fastpath_trusted",
 			Confidence: 1.0,
 		}
 	}
 
 	return nil
+}
+
+func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+	target := strings.ToLower(call.TargetPath)
+	cmd := strings.ToLower(call.Command)
+	baseName := strings.ToLower(filepath.Base(call.TargetPath))
+
+	for _, s := range f.sensitiveFiles {
+		lowerPattern := strings.ToLower(s)
+		if strings.Contains(target, lowerPattern) || strings.Contains(baseName, lowerPattern) || strings.Contains(cmd, lowerPattern) {
+			return "Access to sensitive file or credential pattern: " + s
+		}
+	}
+	return ""
 }
 
 func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
@@ -118,53 +122,45 @@ func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) Bounda
 	return resolver
 }
 
-func isURL(p string) bool {
-	lower := strings.ToLower(p)
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
-}
-
-func (f *Filter) checkCatastrophic(text string) string {
-	for _, re := range f.catastrophicRegexes {
-		if re.MatchString(text) {
-			return "Catastrophic command pattern detected: " + re.String()
-		}
-	}
-	return ""
-}
-
-func (f *Filter) checkSensitive(text, targetPath string) string {
-	baseName := strings.ToLower(filepath.Base(targetPath))
-	for _, s := range f.sensitiveSubstrings {
-		if strings.Contains(text, s) || strings.Contains(baseName, s) {
-			return "Access to sensitive file or credential pattern: " + s
-		}
-	}
-	return ""
-}
-
-func (f *Filter) isSafeRead(call *harness.NormalizedToolCall) bool {
-	if f.safeTools[strings.ToLower(call.ToolName)] {
+func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) bool {
+	if isSafeReadTool(call.ToolName) {
 		return true
 	}
+	return f.isTrustedCommand(call)
+}
 
+func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) bool {
 	trimmedCmd := strings.TrimSpace(strings.ToLower(call.Command))
 	if trimmedCmd == "" {
 		return false
 	}
 
-	for _, safeCmd := range f.safeCommands {
-		if trimmedCmd == safeCmd || strings.HasPrefix(trimmedCmd, safeCmd+" ") {
-			// Avoid allowing if piped or chained into mutators
-			if !containsChainingOperators(trimmedCmd) {
-				return true
-			}
+	if containsChainingOperators(trimmedCmd) {
+		return false
+	}
+
+	for _, trusted := range f.trustedCommands {
+		trustedLower := strings.ToLower(trusted)
+		if trimmedCmd == trustedLower || strings.HasPrefix(trimmedCmd, trustedLower+" ") {
+			return true
 		}
 	}
 	return false
 }
 
+func isSafeReadTool(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "view_file", "view", "read_file", "readlocalfile",
+		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob",
+		"read_url_content", "read_resource":
+		return true
+	default:
+		return false
+	}
+}
+
 func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&&", "||", "|", ">", ">>"}
+	operators := []string{";", "&&", "||", "|", ">", ">>", "`", "$("}
 	for _, op := range operators {
 		if strings.Contains(cmd, op) {
 			return true
@@ -173,77 +169,7 @@ func containsChainingOperators(cmd string) bool {
 	return false
 }
 
-func compileCatastrophicPatterns() []*regexp.Regexp {
-	patterns := []string{
-		`rm\s+(-[a-zA-Z0-9]*r[a-zA-Z0-9]*f[a-zA-Z0-9]*|-rf|-fr)\s+(/|/\*|~|~\*)(\s|$|;)`,
-		`rm\s+(-[a-zA-Z0-9]*r[a-zA-Z0-9]*f[a-zA-Z0-9]*|-rf|-fr)\s+--no-preserve-root`,
-		`:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`,
-		`format\s+[a-zA-Z]:`,
-		`mkfs\.[a-zA-Z0-9]+`,
-		`dd\s+if=/dev/zero\s+of=/dev/[a-zA-Z0-9]+`,
-		`rd\s+/s\s+/q\s+[c-zC-Z]:\\`,
-	}
-	var res []*regexp.Regexp
-	for _, p := range patterns {
-		if re, err := regexp.Compile(p); err == nil {
-			res = append(res, re)
-		}
-	}
-	return res
-}
-
-func defaultSensitiveSubstrings() []string {
-	return []string{
-		".env",
-		"id_rsa",
-		"id_ed25519",
-		".ssh/",
-		".aws/",
-		"credentials.json",
-		".pem",
-		".key",
-		"serviceaccount.json",
-	}
-}
-
-func defaultSafeTools() map[string]bool {
-	return map[string]bool{
-		// Antigravity tools
-		"view_file":        true,
-		"list_dir":         true,
-		"grep_search":      true,
-		"find_by_name":     true,
-		"read_url_content": true,
-		"read_resource":    true,
-
-		// Claude Code tools
-		"view":          true,
-		"readlocalfile": true,
-		"ls":            true,
-		"grep":          true,
-		"glob":          true,
-
-		// Codex CLI tools
-		"read_file": true,
-	}
-}
-
-func defaultSafeCommands() []string {
-	return []string{
-		"git status",
-		"git diff",
-		"git log",
-		"git branch",
-		"git show",
-		"ls",
-		"dir",
-		"pwd",
-		"echo",
-		"whoami",
-		"which",
-		"where.exe",
-		"node -v",
-		"go version",
-		"python --version",
-	}
+func isURL(p string) bool {
+	lower := strings.ToLower(p)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }

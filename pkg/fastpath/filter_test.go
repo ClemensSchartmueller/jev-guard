@@ -3,10 +3,11 @@ package fastpath
 import (
 	"testing"
 
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
-func TestFastPath_Catastrophic(t *testing.T) {
+func TestFastPath_CatastrophicDelegatesToSemantic(t *testing.T) {
 	filter := NewDefaultFilter()
 
 	cases := []string{
@@ -14,6 +15,7 @@ func TestFastPath_Catastrophic(t *testing.T) {
 		"rm -fr /*",
 		":(){ :|:& };:",
 		"format c:",
+		"dd if=/dev/zero of=/dev/sda",
 	}
 
 	for _, cmd := range cases {
@@ -22,11 +24,9 @@ func TestFastPath_Catastrophic(t *testing.T) {
 			Command:  cmd,
 		}
 		res := filter.Evaluate(call)
-		if res == nil {
-			t.Fatalf("expected catastrophic block for %q, got nil", cmd)
-		}
-		if res.Decision != harness.DecisionDeny {
-			t.Errorf("expected DENY for %q, got %v", cmd, res.Decision)
+		// Catastrophic commands must pass through (return nil) to Jev semantic evaluation
+		if res != nil {
+			t.Errorf("expected nil (delegation to Jev) for %q, got %+v", cmd, res)
 		}
 	}
 }
@@ -53,7 +53,7 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	}
 }
 
-func TestFastPath_SafeWhitelist(t *testing.T) {
+func TestFastPath_TrustedCommands(t *testing.T) {
 	filter := NewDefaultFilter()
 
 	call1 := &harness.NormalizedToolCall{
@@ -63,6 +63,9 @@ func TestFastPath_SafeWhitelist(t *testing.T) {
 	res1 := filter.Evaluate(call1)
 	if res1 == nil || res1.Decision != harness.DecisionAllow {
 		t.Errorf("expected ALLOW for 'git status', got %+v", res1)
+	}
+	if res1 != nil && res1.Source != "fastpath_trusted" {
+		t.Errorf("expected source fastpath_trusted, got %s", res1.Source)
 	}
 
 	call2 := &harness.NormalizedToolCall{
@@ -74,15 +77,14 @@ func TestFastPath_SafeWhitelist(t *testing.T) {
 		t.Errorf("expected ALLOW for view_file, got %+v", res2)
 	}
 
-	// Should NOT allow if chained with mutator
+	// Should NOT allow if chained with other commands
 	call3 := &harness.NormalizedToolCall{
 		ToolName: "run_command",
 		Command:  "git status; rm -rf /",
 	}
 	res3 := filter.Evaluate(call3)
-	// Because rm -rf / is present, it will hit catastrophic check and DENY
-	if res3 == nil || res3.Decision != harness.DecisionDeny {
-		t.Errorf("expected DENY for chained catastrophic, got %+v", res3)
+	if res3 != nil {
+		t.Errorf("expected nil (delegation to Jev) for chained command, got %+v", res3)
 	}
 }
 
@@ -163,6 +165,34 @@ func TestFastPath_ReadTools_OutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestFastPath_ConfigInjection(t *testing.T) {
+	cfg := &config.Config{
+		SensitiveFiles:  []string{".secret-token"},
+		TrustedCommands: []string{"cargo check"},
+	}
+	filter := NewFilter(nil, cfg)
+
+	// Test custom sensitive file
+	call1 := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".secret-token",
+	}
+	res1 := filter.Evaluate(call1)
+	if res1 == nil || res1.Decision != harness.DecisionAsk {
+		t.Errorf("expected ASK for custom sensitive file, got %+v", res1)
+	}
+
+	// Test custom trusted command
+	call2 := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "cargo check --all",
+	}
+	res2 := filter.Evaluate(call2)
+	if res2 == nil || res2.Decision != harness.DecisionAllow {
+		t.Errorf("expected ALLOW for custom trusted command, got %+v", res2)
+	}
+}
+
 type mockBoundaryChecker struct {
 	contained bool
 }
@@ -173,7 +203,7 @@ func (m *mockBoundaryChecker) IsPathContained(targetPath string, cwd string) (bo
 
 func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
 	checker := &mockBoundaryChecker{contained: false}
-	filter := NewFilter(checker)
+	filter := NewFilter(checker, nil)
 
 	call := &harness.NormalizedToolCall{
 		ToolName:   "view_file",

@@ -174,3 +174,72 @@ func TestConfig_LogAudit(t *testing.T) {
 		t.Errorf("audit log file was empty")
 	}
 }
+
+func TestConfig_FastpathEnabled_Default(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.IsFastpathEnabled() {
+		t.Errorf("expected FastpathEnabled to default to true")
+	}
+	if len(cfg.TrustedCommands) == 0 {
+		t.Errorf("expected default trusted commands to be populated")
+	}
+	if len(cfg.SensitiveFiles) == 0 {
+		t.Errorf("expected default sensitive files to be populated")
+	}
+}
+
+func TestConfig_FastpathEnabled_FromFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-fastpath-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configJSON := `{
+		"fastpath_enabled": false,
+		"trusted_commands": ["my-custom-check"],
+		"sensitive_files": [".custom-secret"]
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := LoadConfig(tempDir)
+	if cfg.IsFastpathEnabled() {
+		t.Errorf("expected FastpathEnabled to be false when set in config file")
+	}
+
+	// Verify custom entries were merged
+	foundTrusted := false
+	for _, cmd := range cfg.TrustedCommands {
+		if cmd == "my-custom-check" {
+			foundTrusted = true
+			break
+		}
+	}
+	if !foundTrusted {
+		t.Errorf("expected custom trusted command to be present")
+	}
+
+	foundSensitive := false
+	for _, f := range cfg.SensitiveFiles {
+		if f == ".custom-secret" {
+			foundSensitive = true
+			break
+		}
+	}
+	if !foundSensitive {
+		t.Errorf("expected custom sensitive file to be present")
+	}
+}
+
+func TestConfig_FastpathEnabled_FromEnv(t *testing.T) {
+	os.Setenv("JEV_GUARD_FASTPATH_ENABLED", "0")
+	defer os.Unsetenv("JEV_GUARD_FASTPATH_ENABLED")
+
+	cfg := DefaultConfig()
+	loadEnvironment(cfg)
+	if cfg.IsFastpathEnabled() {
+		t.Errorf("expected FastpathEnabled to be false when JEV_GUARD_FASTPATH_ENABLED=0")
+	}
+}

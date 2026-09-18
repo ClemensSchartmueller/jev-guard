@@ -59,9 +59,11 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 		checker = resolver
 	}
 
-	fastFilter := fastpath.NewFilter(checker)
-	if fastResult := fastFilter.Evaluate(call); fastResult != nil {
-		return applyAuditMode(fastResult, cfg.Mode)
+	if cfg.IsFastpathEnabled() {
+		fastFilter := fastpath.NewFilter(checker, cfg)
+		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
+			return applyAuditMode(fastResult, cfg.Mode)
+		}
 	}
 
 	contained := checkWorkspaceBoundary(call, resolver)

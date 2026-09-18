@@ -9,12 +9,13 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 ## Key Features
 
 - **Multi-Agent Interception**: Automatically detects and handles payload structures from Claude Code (`Bash`, `Edit`, `Write`), Codex CLI, and Antigravity (`run_command`, `write_to_file`, `replace_file_content`).
-- **Sub-3ms Local Fast-Path**:
-  - **Catastrophic Denylist**: Immediately rejects dangerous commands (`rm -rf /`, fork bombs, format disk).
-  - **Sensitive File Protection**: Immediately prompts confirmation (`ASK`) for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates.
-  - **Safe Whitelist**: Zero-latency approval (`ALLOW`) for benign inspection commands (`git status`, `git diff`, `ls`, `dir`, `pwd`, `view_file`, `grep_search`).
-- **TypeSafe AI (Jev) Semantic Evaluation**:
-  - Ambiguous or mutating actions are dispatched in parallel to TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
+- **Sub-1ms Local Invariant & Latency Gate**:
+  - **Sensitive File Protection**: Immediately prompts confirmation (`ASK`) for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
+  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally.
+  - **Trusted Command Cache**: Zero-latency approval (`ALLOW`) for unambiguous read inspection commands (`git status`, `git diff`, `ls`, `dir`, `pwd`, `view_file`, `grep_search`).
+  - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
+- **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
+  - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
   - Evaluates 3 primitives:
     1. `is_workspace_contained` (`Noul`): Probability the operation stays strictly inside workspace roots.
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
@@ -70,6 +71,7 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
   "typesafe_api_key": "your-typesafe-api-key",
   "timeout_ms": 1500,
   "model": "jev-latest",
+  "fastpath_enabled": true,
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
@@ -88,9 +90,9 @@ Or directly inside `.jevguard.json` along with optional policy parameters:
 
 ### Configuration Precedence
 
-1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`) override file settings.
+1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`) override file settings.
 2. **Project Configuration** (`.jevguard.json` located in the project root / `cwd`).
-3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`).
+3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`).
 
 ---
 
