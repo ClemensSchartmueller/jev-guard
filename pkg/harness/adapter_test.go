@@ -319,21 +319,53 @@ func TestFormatResponseForCall_AntigravityPermissionOverrides_NoCommand(t *testi
 }
 
 func TestFormatResponse_Claude(t *testing.T) {
-	resAsk := EvaluationResult{
-		Decision: DecisionAsk,
-		Reason:   "Sensitive file access",
+	resAllow := EvaluationResult{
+		Decision: DecisionAllow,
+		Reason:   "Safe read command",
 	}
-	exitCode, out, err := FormatResponse(HarnessClaudeCode, resAsk)
+	exitCode, out, err := FormatResponse(HarnessClaudeCode, resAllow)
 	if err != nil || exitCode != 0 {
-		t.Fatalf("unexpected ask formatting result: code=%d err=%v", exitCode, err)
+		t.Fatalf("unexpected allow formatting result: code=%d err=%v", exitCode, err)
 	}
 
 	var parsed ClaudeHookOutput
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("failed to parse claude hook output: %v", err)
 	}
-	if parsed.HookSpecificOutput.Action != "ask" || parsed.HookSpecificOutput.Message != "Sensitive file access" {
+	if parsed.HookSpecificOutput.Action != "allow" || parsed.HookSpecificOutput.Message != "Safe read command" {
 		t.Errorf("unexpected claude output: %+v", parsed)
+	}
+
+	// DecisionAsk must fail-safe to exit code 2 to prevent silent bypass in bypass/autonomous modes
+	resAsk := EvaluationResult{
+		Decision: DecisionAsk,
+		Reason:   "Sensitive file access",
+	}
+	exitCode, out, err = FormatResponse(HarnessClaudeCode, resAsk)
+	if err != nil {
+		t.Fatalf("unexpected error on ask: %v", err)
+	}
+	if exitCode != 2 {
+		t.Errorf("expected exit code 2 for ask escalation in Claude Code, got %d", exitCode)
+	}
+	if string(out) != "Sensitive file access" {
+		t.Errorf("expected error message in out, got %s", string(out))
+	}
+
+	// DecisionForceAsk must also fail-safe to exit code 2
+	resForceAsk := EvaluationResult{
+		Decision: DecisionForceAsk,
+		Reason:   "Forced prompt escalation",
+	}
+	exitCode, out, err = FormatResponse(HarnessCodex, resForceAsk)
+	if err != nil {
+		t.Fatalf("unexpected error on force_ask: %v", err)
+	}
+	if exitCode != 2 {
+		t.Errorf("expected exit code 2 for force_ask in Codex, got %d", exitCode)
+	}
+	if string(out) != "Forced prompt escalation" {
+		t.Errorf("expected error message in out, got %s", string(out))
 	}
 
 	resDeny := EvaluationResult{

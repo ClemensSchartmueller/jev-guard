@@ -200,19 +200,16 @@ func shouldApplyCommandOverride(call *NormalizedToolCall, decision Decision) boo
 }
 
 func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {
-	if result.Decision == DecisionDeny {
-		// Claude Code rejects tools when hook exits with non-zero (code 2) and prints message to stderr
+	if isBlockedDecision(result.Decision) {
+		// Claude Code and Codex reject tools when hook exits with non-zero (code 2) and prints message to stderr.
+		// Since Claude Code and Codex bypass interactive prompts in autonomous/headless modes (--dangerously-skip-permissions, --yolo, -p),
+		// any escalation (Ask / ForceAsk) defaults to a fail-safe block (exit code 2).
 		return 2, []byte(result.Reason), nil
-	}
-
-	action := "allow"
-	if result.Decision == DecisionAsk {
-		action = "ask"
 	}
 
 	out := ClaudeHookOutput{
 		HookSpecificOutput: ClaudeHookAction{
-			Action:  action,
+			Action:  "allow",
 			Message: result.Reason,
 		},
 	}
@@ -223,9 +220,13 @@ func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {
 	return 0, bytes, nil
 }
 
+func isBlockedDecision(decision Decision) bool {
+	return decision == DecisionDeny || decision == DecisionAsk || decision == DecisionForceAsk
+}
+
 func formatDefaultResponse(result EvaluationResult) (int, []byte, error) {
 	exitCode := 0
-	if result.Decision == DecisionDeny {
+	if isBlockedDecision(result.Decision) {
 		exitCode = 2
 	}
 	out := map[string]interface{}{
