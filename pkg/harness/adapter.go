@@ -1,0 +1,168 @@
+package harness
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+var (
+	ErrEmptyPayload   = errors.New("empty tool call payload received")
+	ErrUnknownPayload = errors.New("unable to determine harness type from payload")
+)
+
+// ParsePayload inspects raw JSON and normalizes it into a unified tool call representation.
+func ParsePayload(raw []byte) (*NormalizedToolCall, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, ErrEmptyPayload
+	}
+
+	var root map[string]interface{}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON payload: %w", err)
+	}
+
+	if _, ok := root["toolCall"]; ok {
+		return parseAntigravityPayload(raw)
+	}
+
+	if _, ok := root["tool_name"]; ok {
+		return parseClaudePayload(raw)
+	}
+
+	return nil, ErrUnknownPayload
+}
+
+func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
+	var payload AntigravityPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("invalid antigravity payload structure: %w", err)
+	}
+
+	cmd, target := extractCommandAndTarget(payload.ToolCall.Args)
+
+	return &NormalizedToolCall{
+		Harness:        HarnessAntigravity,
+		ToolName:       payload.ToolCall.Name,
+		Command:        cmd,
+		TargetPath:     target,
+		Cwd:            payload.Cwd,
+		WorkspaceRoots: payload.WorkspacePaths,
+		RawArgs:        payload.ToolCall.Args,
+	}, nil
+}
+
+func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
+	var payload ClaudePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("invalid claude/codex payload structure: %w", err)
+	}
+
+	cmd, target := extractCommandAndTarget(payload.ToolInput)
+
+	return &NormalizedToolCall{
+		Harness:        HarnessClaudeCode,
+		ToolName:       payload.ToolName,
+		Command:        cmd,
+		TargetPath:     target,
+		Cwd:            payload.Cwd,
+		WorkspaceRoots: nil,
+		RawArgs:        payload.ToolInput,
+	}, nil
+}
+
+func extractCommandAndTarget(args map[string]interface{}) (string, string) {
+	if args == nil {
+		return "", ""
+	}
+
+	var cmd string
+	cmdKeys := []string{"CommandLine", "command", "cmd", "script"}
+	for _, key := range cmdKeys {
+		if val, exists := args[key]; exists {
+			if strVal, ok := val.(string); ok {
+				cmd = strVal
+				break
+			}
+		}
+	}
+
+	var target string
+	pathKeys := []string{"TargetFile", "AbsolutePath", "file_path", "path", "SearchDirectory", "DirectoryPath"}
+	for _, key := range pathKeys {
+		if val, exists := args[key]; exists {
+			if strVal, ok := val.(string); ok {
+				target = strVal
+				break
+			}
+		}
+	}
+
+	return cmd, target
+}
+
+// FormatResponse serializes the verdict into the schema expected by the calling harness.
+func FormatResponse(harness HarnessType, result EvaluationResult) (int, []byte, error) {
+	switch harness {
+	case HarnessAntigravity:
+		return formatAntigravityResponse(result)
+	case HarnessClaudeCode, HarnessCodex:
+		return formatClaudeResponse(result)
+	default:
+		return formatDefaultResponse(result)
+	}
+}
+
+func formatAntigravityResponse(result EvaluationResult) (int, []byte, error) {
+	out := AntigravityDecisionOutput{
+		Decision: string(result.Decision),
+		Reason:   result.Reason,
+	}
+	bytes, err := json.Marshal(out)
+	if err != nil {
+		return 1, nil, fmt.Errorf("failed to marshal antigravity response: %w", err)
+	}
+	return 0, bytes, nil
+}
+
+func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {
+	if result.Decision == DecisionDeny {
+		// Claude Code rejects tools when hook exits with non-zero (code 2) and prints message to stderr
+		return 2, []byte(result.Reason), nil
+	}
+
+	action := "allow"
+	if result.Decision == DecisionAsk {
+		action = "ask"
+	}
+
+	out := ClaudeHookOutput{
+		HookSpecificOutput: ClaudeHookAction{
+			Action:  action,
+			Message: result.Reason,
+		},
+	}
+	bytes, err := json.Marshal(out)
+	if err != nil {
+		return 1, nil, fmt.Errorf("failed to marshal claude hook response: %w", err)
+	}
+	return 0, bytes, nil
+}
+
+func formatDefaultResponse(result EvaluationResult) (int, []byte, error) {
+	exitCode := 0
+	if result.Decision == DecisionDeny {
+		exitCode = 2
+	}
+	out := map[string]interface{}{
+		"decision": string(result.Decision),
+		"reason":   result.Reason,
+		"source":   result.Source,
+	}
+	bytes, err := json.Marshal(out)
+	if err != nil {
+		return 1, nil, fmt.Errorf("failed to marshal default response: %w", err)
+	}
+	return exitCode, bytes, nil
+}
