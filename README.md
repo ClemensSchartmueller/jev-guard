@@ -13,18 +13,23 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
   - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
-  - **Sensitive File Protection**: Immediately prompts confirmation (`ASK`) for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
+  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`).
   - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass.
   - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
-- **Antigravity Permission Overrides**: Returns `permissionOverrides: ["command(...)"]` on approved (`ALLOW`) and user-confirmed (`ASK`) command executions, eliminating redundant permission prompts in the Antigravity UI.
+- **Antigravity Protocol Integration**:
+  - **Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by bypassing Antigravity's auto-execution and turbo cache.
+  - **Permission Overrides**: Emits `permissionOverrides: ["command(...)"]` on approved (`ALLOW`) and user-confirmed (`force_ask`) commands, eliminating redundant permission prompts in the Antigravity UI.
+- **Flexible Operating Modes**:
+  - **`enforcing`** (default): Actively enforces policy verdicts—blocking catastrophic commands (`DENY`), prompting confirmation for sensitive or moderate operations (`ASK` / `force_ask`), and approving verified actions (`ALLOW`).
+  - **`audit`**: Passive monitoring dry-run. Logs every tool call and evaluation result to `.jevguard.log`, but rewrites blocking decisions to `ALLOW` (`[AUDIT-MODE: <decision>]`) so agent workflows are never interrupted.
 - **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
   - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
   - Evaluates 3 primitives:
     1. `is_workspace_contained` (`Noul`): Probability the operation stays strictly inside workspace roots.
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
-- **Fail-Safe Operation**: If TypeSafe AI is unavailable or network times out, safely falls back to interactive confirmation (`ASK`).
+- **Fail-Safe Operation**: If TypeSafe AI is unavailable or network times out, safely falls back to interactive confirmation (`ASK` / `force_ask`).
 
 ---
 
@@ -83,6 +88,19 @@ my-project/
 
 Relative audit log paths (such as `"audit_log_path": ".jevguard.log"`) are automatically anchored to the directory containing the resolved configuration file, ensuring audit entries are centralized in a single log rather than split across child directories.
 
+### Operating Modes
+
+`jev-guard` supports two operational modes configured via `"mode"` in `.jevguard.json` or the `JEV_GUARD_MODE` environment variable:
+
+- **`enforcing`** (default): Active safety gating.
+  - Catastrophic operations or security violations are blocked (`DENY`).
+  - Sensitive file accesses, boundary escapes, or moderate risk operations require user confirmation (`force_ask` for Antigravity, `ask` for Claude/Codex).
+  - Safe, contained operations are permitted (`ALLOW`).
+- **`audit`**: Passive evaluation and dry-run monitoring.
+  - All operations are processed through fastpath and TypeSafe AI semantic evaluation.
+  - Full evaluation telemetry is written to `.jevguard.log`.
+  - All `DENY`, `ASK`, and `force_ask` decisions are converted to `ALLOW` with an `[AUDIT-MODE: <decision>]` reason prefix, ensuring zero interruption to agent workflows while capturing telemetry.
+
 ### Configuration Options
 
 You can configure your TypeSafe AI API key either via environment variable:
@@ -114,11 +132,42 @@ Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) 
 > [!TIP]
 > If you embed `typesafe_api_key` inside `.jevguard.json`, remember to add `.jevguard.json` and `.jevguard.log` to your `.gitignore`, or configure `TYPESAFE_API_KEY` globally as an environment variable instead.
 
+### Settings & Environment Variables Reference
+
+| Setting | Configuration Key | Environment Variable | Default | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| **Mode** | `mode` | `JEV_GUARD_MODE` | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
+| **API Key** | `typesafe_api_key` / `api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
+| **Base URL** | `base_url` | `TYPESAFE_API_URL` | `"https://api.typesafe.ai"` | TypeSafe API endpoint URL |
+| **Model** | `model` | `TYPESAFE_MODEL` | `"jev-latest"` | System One evaluation model |
+| **Timeout** | `timeout_ms` | `JEV_GUARD_TIMEOUT_MS` | `1500` | Evaluation HTTP timeout in milliseconds |
+| **Fastpath** | `fastpath_enabled` | `JEV_GUARD_FASTPATH_ENABLED` | `true` | Enable sub-1ms local fastpath filter |
+| **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
+| **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | Array of substrings/globs to prompt confirmation on |
+| **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | Array of command prefixes cached for zero-latency approval |
+
 ### Configuration Precedence
 
 1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`) override file settings.
 2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered in `cwd` or nearest ancestor directory).
 3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, standard sensitive file patterns and read commands).
+
+### Audit Log Schema
+
+When `"audit_log_path"` is configured, every tool evaluation produces a JSONL entry:
+
+```json
+{
+  "timestamp": "2026-09-18T12:00:00Z",
+  "tool_name": "run_command",
+  "command": "git diff .env",
+  "target_path": "",
+  "decision": "force_ask",
+  "reason": "Access to sensitive file or credential pattern: .env",
+  "source": "fastpath_sensitive",
+  "confidence": 1.0
+}
+```
 
 ---
 
