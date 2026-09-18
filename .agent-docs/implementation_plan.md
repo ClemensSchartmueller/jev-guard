@@ -189,3 +189,8 @@
   - `main.go`: Implemented main CLI entry point orchestrating payload parsing, fastpath rules, boundary checks, TypeSafe evaluation, and harness-specific exit codes / output formats.
   - Manifests & Templates: Added `.claude/hooks.json`, `.agents/hooks.json`, `.codex/hooks.json`, and `.jevguard.json`.
   - Distribution & CI: Created cross-platform installer scripts `install.sh` and `install.ps1`, GitHub Actions release workflow `.github/workflows/release.yml`, and `README.md`.
+- **2026-09-18 - Local Module Refactor (`152f34e`)**:
+  - Refactored Go module to clean local name `jev-guard`.
+  - Updated all internal package imports (`jev-guard/pkg/...`).
+  - Successfully built and installed standalone binary into local user path (`~/.local/bin/jev-guard.exe`).
+  - Verified live hook integration in Antigravity.
