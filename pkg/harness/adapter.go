@@ -41,16 +41,30 @@ func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
 	}
 
 	cmd, target := extractCommandAndTarget(payload.ToolCall.Args)
+	cwd := resolveAntigravityCwd(&payload)
 
 	return &NormalizedToolCall{
 		Harness:        HarnessAntigravity,
 		ToolName:       payload.ToolCall.Name,
 		Command:        cmd,
 		TargetPath:     target,
-		Cwd:            payload.Cwd,
+		Cwd:            cwd,
 		WorkspaceRoots: payload.WorkspacePaths,
 		RawArgs:        payload.ToolCall.Args,
 	}, nil
+}
+
+func resolveAntigravityCwd(payload *AntigravityPayload) string {
+	if cwd := extractCwd(payload.ToolCall.Args); cwd != "" {
+		return cwd
+	}
+	if payload.Cwd != "" {
+		return payload.Cwd
+	}
+	if len(payload.WorkspacePaths) > 0 && payload.WorkspacePaths[0] != "" {
+		return payload.WorkspacePaths[0]
+	}
+	return ""
 }
 
 func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
@@ -60,16 +74,40 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 	}
 
 	cmd, target := extractCommandAndTarget(payload.ToolInput)
+	cwd := resolveClaudeCwd(&payload)
 
 	return &NormalizedToolCall{
 		Harness:        HarnessClaudeCode,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
-		Cwd:            payload.Cwd,
+		Cwd:            cwd,
 		WorkspaceRoots: nil,
 		RawArgs:        payload.ToolInput,
 	}, nil
+}
+
+func resolveClaudeCwd(payload *ClaudePayload) string {
+	if payload.Cwd != "" {
+		return payload.Cwd
+	}
+	return extractCwd(payload.ToolInput)
+}
+
+func extractCwd(args map[string]interface{}) string {
+	if args == nil {
+		return ""
+	}
+
+	cwdKeys := []string{"Cwd", "cwd", "working_dir", "workingDir", "workdir", "directory"}
+	for _, key := range cwdKeys {
+		if val, exists := args[key]; exists {
+			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
+				return strings.TrimSpace(strVal)
+			}
+		}
+	}
+	return ""
 }
 
 func extractCommandAndTarget(args map[string]interface{}) (string, string) {

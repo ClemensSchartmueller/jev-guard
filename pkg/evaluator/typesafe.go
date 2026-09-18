@@ -20,7 +20,7 @@ const (
 )
 
 var (
-	ErrMissingAPIKey = errors.New("TYPESAFE_API_KEY environment variable is not configured")
+	ErrMissingAPIKey = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY environment variable or typesafe_api_key in .jevguard.json)")
 	ErrAPIFailure    = errors.New("typesafe system one api returned error")
 )
 

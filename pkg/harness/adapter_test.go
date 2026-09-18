@@ -32,8 +32,54 @@ func TestParsePayload_Antigravity(t *testing.T) {
 	if normalized.Command != "git status" {
 		t.Errorf("expected command 'git status', got '%s'", normalized.Command)
 	}
+	if normalized.Cwd != "C:\\project" {
+		t.Errorf("expected cwd 'C:\\project', got '%s'", normalized.Cwd)
+	}
 	if len(normalized.WorkspaceRoots) != 1 || normalized.WorkspaceRoots[0] != "C:\\project" {
 		t.Errorf("expected workspace root C:\\project, got %v", normalized.WorkspaceRoots)
+	}
+}
+
+func TestParsePayload_AntigravityFallback(t *testing.T) {
+	raw := []byte(`{
+		"toolCall": {
+			"name": "write_to_file",
+			"args": {
+				"TargetFile": "C:\\project\\file.txt",
+				"CodeContent": "hello"
+			}
+		},
+		"workspacePaths": ["C:\\project"],
+		"conversationId": "conv-456"
+	}`)
+
+	normalized, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if normalized.Cwd != "C:\\project" {
+		t.Errorf("expected cwd to fallback to workspace path 'C:\\project', got '%s'", normalized.Cwd)
+	}
+	if normalized.TargetPath != "C:\\project\\file.txt" {
+		t.Errorf("expected target path 'C:\\project\\file.txt', got '%s'", normalized.TargetPath)
+	}
+}
+
+func TestParsePayload_ClaudeInputCwd(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "Bash",
+		"tool_input": {
+			"command": "go test ./...",
+			"cwd": "/repo/subfolder"
+		}
+	}`)
+
+	normalized, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if normalized.Cwd != "/repo/subfolder" {
+		t.Errorf("expected cwd from tool_input '/repo/subfolder', got '%s'", normalized.Cwd)
 	}
 }
 

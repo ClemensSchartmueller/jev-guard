@@ -68,6 +68,78 @@ func TestConfig_LoadConfig_TypesafeAPIKey(t *testing.T) {
 	}
 }
 
+func TestConfig_LoadConfig_AncestorHierarchy(t *testing.T) {
+	tempRoot, err := os.MkdirTemp("", "jev-config-ancestor-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempRoot)
+
+	// Create root/.jevguard.json
+	configJSON := `{"typesafe_api_key": "ancestor-key", "mode": "audit"}`
+	if err := os.WriteFile(filepath.Join(tempRoot, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// Create a nested subfolder root/sub/child
+	subChild := filepath.Join(tempRoot, "sub", "child")
+	if err := os.MkdirAll(subChild, 0755); err != nil {
+		t.Fatalf("failed to create subdirectories: %v", err)
+	}
+
+	// Load config from the deep child directory
+	cfg := LoadConfig(subChild)
+	if cfg.APIKey != "ancestor-key" {
+		t.Errorf("expected APIKey 'ancestor-key' from ancestor traversal, got %s", cfg.APIKey)
+	}
+	if cfg.Mode != "audit" {
+		t.Errorf("expected Mode 'audit', got %s", cfg.Mode)
+	}
+}
+
+func TestConfig_LoadConfig_AlternateFilename(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-altname-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Write jevguard.json (without leading dot)
+	configJSON := `{"typesafe_api_key": "alt-filename-key"}`
+	if err := os.WriteFile(filepath.Join(tempDir, "jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := LoadConfig(tempDir)
+	if cfg.APIKey != "alt-filename-key" {
+		t.Errorf("expected APIKey 'alt-filename-key', got %s", cfg.APIKey)
+	}
+}
+
+func TestConfig_LoadConfigForCall_WorkspaceRootsFallback(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-ws-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configJSON := `{"typesafe_api_key": "ws-key"}`
+	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	// NormalizedToolCall with empty Cwd but workspace root pointing to tempDir
+	call := &harness.NormalizedToolCall{
+		Cwd:            "",
+		WorkspaceRoots: []string{tempDir},
+	}
+
+	cfg := LoadConfigForCall(call)
+	if cfg.APIKey != "ws-key" {
+		t.Errorf("expected APIKey 'ws-key' from WorkspaceRoots fallback, got %s", cfg.APIKey)
+	}
+}
+
 func TestConfig_LogAudit(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "jev-audit-test-*")
 	if err != nil {

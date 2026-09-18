@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"jev-guard/pkg/harness"
@@ -25,6 +26,9 @@ type Config struct {
 	TrustedCommands  []string      `json:"trusted_commands,omitempty"`
 }
 
+// ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
+var ConfigFileNames = []string{".jevguard.json", "jevguard.json"}
+
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	return &Config{
@@ -34,19 +38,82 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig merges environment variables and optional .jevguard.json into a unified Config.
-func LoadConfig(searchDir string) *Config {
+// LoadConfigForCall collects candidate directories from a normalized tool call and loads configuration.
+func LoadConfigForCall(call *harness.NormalizedToolCall) *Config {
+	candidates := collectCandidates(call)
+	return LoadConfig(candidates...)
+}
+
+func collectCandidates(call *harness.NormalizedToolCall) []string {
+	var candidates []string
+	if call != nil {
+		if call.Cwd != "" {
+			candidates = append(candidates, call.Cwd)
+		}
+		for _, root := range call.WorkspaceRoots {
+			if root != "" {
+				candidates = append(candidates, root)
+			}
+		}
+		if call.TargetPath != "" {
+			candidates = append(candidates, filepath.Dir(call.TargetPath))
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		candidates = append(candidates, cwd)
+	}
+	return candidates
+}
+
+// LoadConfig merges environment variables and optional jevguard configuration into a unified Config.
+// It searches candidate directories and their ancestor trees for .jevguard.json or jevguard.json.
+func LoadConfig(candidateDirs ...string) *Config {
 	cfg := DefaultConfig()
-	loadConfigFile(cfg, searchDir)
+	if filePath := FindConfigFile(candidateDirs...); filePath != "" {
+		loadConfigFile(cfg, filePath)
+	}
 	loadEnvironment(cfg)
 	return cfg
 }
 
-func loadConfigFile(cfg *Config, dir string) {
-	if dir == "" {
-		return
+// FindConfigFile searches candidate directories and their parent hierarchies for a jevguard config file.
+func FindConfigFile(candidateDirs ...string) string {
+	for _, dir := range candidateDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if filePath := searchDirectoryHierarchy(dir); filePath != "" {
+			return filePath
+		}
 	}
-	filePath := filepath.Join(dir, ".jevguard.json")
+	return ""
+}
+
+func searchDirectoryHierarchy(startDir string) string {
+	absDir, err := filepath.Abs(startDir)
+	if err != nil {
+		absDir = filepath.Clean(startDir)
+	}
+
+	curr := absDir
+	for {
+		for _, name := range ConfigFileNames {
+			target := filepath.Join(curr, name)
+			if info, err := os.Stat(target); err == nil && !info.IsDir() {
+				return target
+			}
+		}
+
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		curr = parent
+	}
+	return ""
+}
+
+func loadConfigFile(cfg *Config, filePath string) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return
@@ -54,30 +121,34 @@ func loadConfigFile(cfg *Config, dir string) {
 
 	var fileCfg Config
 	if err := json.Unmarshal(data, &fileCfg); err == nil {
-		if fileCfg.Mode != "" {
-			cfg.Mode = fileCfg.Mode
-		}
-		if fileCfg.APIKey != "" {
-			cfg.APIKey = fileCfg.APIKey
-		} else if fileCfg.TypesafeAPIKey != "" {
-			cfg.APIKey = fileCfg.TypesafeAPIKey
-		}
-		if fileCfg.BaseURL != "" {
-			cfg.BaseURL = fileCfg.BaseURL
-		}
-		if fileCfg.Model != "" {
-			cfg.Model = fileCfg.Model
-		}
-		if fileCfg.TimeoutMs > 0 {
-			cfg.TimeoutMs = fileCfg.TimeoutMs
-			cfg.Timeout = time.Duration(fileCfg.TimeoutMs) * time.Millisecond
-		}
-		if fileCfg.AuditLogPath != "" {
-			cfg.AuditLogPath = fileCfg.AuditLogPath
-		}
-		cfg.SensitiveFiles = append(cfg.SensitiveFiles, fileCfg.SensitiveFiles...)
-		cfg.TrustedCommands = append(cfg.TrustedCommands, fileCfg.TrustedCommands...)
+		applyFileConfig(cfg, &fileCfg)
 	}
+}
+
+func applyFileConfig(cfg *Config, fileCfg *Config) {
+	if fileCfg.Mode != "" {
+		cfg.Mode = fileCfg.Mode
+	}
+	if fileCfg.APIKey != "" {
+		cfg.APIKey = fileCfg.APIKey
+	} else if fileCfg.TypesafeAPIKey != "" {
+		cfg.APIKey = fileCfg.TypesafeAPIKey
+	}
+	if fileCfg.BaseURL != "" {
+		cfg.BaseURL = fileCfg.BaseURL
+	}
+	if fileCfg.Model != "" {
+		cfg.Model = fileCfg.Model
+	}
+	if fileCfg.TimeoutMs > 0 {
+		cfg.TimeoutMs = fileCfg.TimeoutMs
+		cfg.Timeout = time.Duration(fileCfg.TimeoutMs) * time.Millisecond
+	}
+	if fileCfg.AuditLogPath != "" {
+		cfg.AuditLogPath = fileCfg.AuditLogPath
+	}
+	cfg.SensitiveFiles = append(cfg.SensitiveFiles, fileCfg.SensitiveFiles...)
+	cfg.TrustedCommands = append(cfg.TrustedCommands, fileCfg.TrustedCommands...)
 }
 
 func loadEnvironment(cfg *Config) {

@@ -38,7 +38,7 @@ func runGate() int {
 		return handleFatalError(harness.HarnessUnknown, "Failed to parse tool call payload", err)
 	}
 
-	cfg := config.LoadConfig(call.Cwd)
+	cfg := config.LoadConfigForCall(call)
 	result := executeGateEvaluation(call, cfg)
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
