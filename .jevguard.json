@@ -1,0 +1,21 @@
+{
+  "$schema": "https://typesafe.ai/schemas/jevguard.v1.json",
+  "mode": "enforcing",
+  "timeout_ms": 1500,
+  "model": "jev-latest",
+  "audit_log_path": ".jevguard.log",
+  "sensitive_files": [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "id_rsa",
+    "id_ed25519",
+    "credentials.json"
+  ],
+  "trusted_commands": [
+    "git status",
+    "git diff",
+    "git log"
+  ]
+}

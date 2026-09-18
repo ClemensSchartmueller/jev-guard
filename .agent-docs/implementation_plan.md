@@ -171,3 +171,21 @@
 ### Manual Verification
 - Test running `jev-guard` with piped JSON from CLI simulating each agent.
 - Test in Antigravity by triggering a simulated command through `.agents/hooks.json`.
+
+---
+
+## Implementation Milestones & Changelog
+
+- **2026-09-18 - Init Repository (`767f242`)**: Initialized Git repository, configured `.gitignore`, imported agent documentation and skill definitions.
+- **2026-09-18 - Milestone 1-4 (`e895068`)**:
+  - `go.mod`: Initialized Go module `github.com/typesafe-ai/jev-guard`.
+  - `pkg/harness`: Implemented type structures (`types.go`), payload normalization, and multi-agent output adapters (`adapter.go`) for Claude Code, Codex, and Antigravity. Unit tested in `adapter_test.go`.
+  - `pkg/boundary`: Implemented canonical workspace boundary resolver with automatic `.git` detection and path-traversal protection (`resolver.go`). Unit tested in `resolver_test.go`.
+  - `pkg/fastpath`: Implemented zero-latency (< 2ms) static safety filter covering sensitive credential blacklists, catastrophic command patterns, and benign command whitelists (`filter.go`). Unit tested in `filter_test.go`.
+- **2026-09-18 - Milestone 5-10**:
+  - `pkg/evaluator`: Implemented TypeSafe AI System One client (`typesafe.go`) integrating `noul`, `score`, and `choice` judgments against `https://api.typesafe.ai/v1/systemone` with mock HTTP unit tests (`typesafe_test.go`).
+  - `pkg/policy`: Implemented deterministic decision policy engine (`evaluator.go`) resolving blast radius, containment probability, and security attack vectors with unit tests (`evaluator_test.go`).
+  - `pkg/config`: Implemented configuration loader (`config.go`) supporting `.jevguard.json`, environment variables, and audit logging with unit tests (`config_test.go`).
+  - `main.go`: Implemented main CLI entry point orchestrating payload parsing, fastpath rules, boundary checks, TypeSafe evaluation, and harness-specific exit codes / output formats.
+  - Manifests & Templates: Added `.claude/hooks.json`, `.agents/hooks.json`, `.codex/hooks.json`, and `.jevguard.json`.
+  - Distribution & CI: Created cross-platform installer scripts `install.sh` and `install.ps1`, GitHub Actions release workflow `.github/workflows/release.yml`, and `README.md`.
