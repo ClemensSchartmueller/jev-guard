@@ -30,12 +30,12 @@ func main() {
 func runGate() int {
 	inputBytes, err := readStandardInput()
 	if err != nil {
-		return handleFatalError(harness.HarnessUnknown, "Failed to read standard input", err)
+		return handleFatalError(nil, "Failed to read standard input", err)
 	}
 
 	call, err := harness.ParsePayload(inputBytes)
 	if err != nil {
-		return handleFatalError(harness.HarnessUnknown, "Failed to parse tool call payload", err)
+		return handleFatalError(nil, "Failed to parse tool call payload", err)
 	}
 
 	cfg := config.LoadConfigForCall(call)
@@ -45,7 +45,7 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 	}
 
-	return outputHarnessVerdict(call.Harness, *result)
+	return outputHarnessVerdict(call, *result)
 }
 
 func readStandardInput() ([]byte, error) {
@@ -111,8 +111,8 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 	return result
 }
 
-func outputHarnessVerdict(harnessType harness.HarnessType, result harness.EvaluationResult) int {
-	exitCode, output, err := harness.FormatResponse(harnessType, result)
+func outputHarnessVerdict(call *harness.NormalizedToolCall, result harness.EvaluationResult) int {
+	exitCode, output, err := harness.FormatResponseForCall(call, result)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error formatting harness response: %v\n", err)
 		return 1
@@ -127,11 +127,11 @@ func outputHarnessVerdict(harnessType harness.HarnessType, result harness.Evalua
 	return exitCode
 }
 
-func handleFatalError(harnessType harness.HarnessType, msg string, err error) int {
+func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) int {
 	res := harness.EvaluationResult{
 		Decision: harness.DecisionAsk,
 		Reason:   fmt.Sprintf("%s: %v", msg, err),
 		Source:   "fatal_error",
 	}
-	return outputHarnessVerdict(harnessType, res)
+	return outputHarnessVerdict(call, res)
 }

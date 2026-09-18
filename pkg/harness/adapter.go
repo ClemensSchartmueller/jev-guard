@@ -146,9 +146,19 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 
 // FormatResponse serializes the verdict into the schema expected by the calling harness.
 func FormatResponse(harness HarnessType, result EvaluationResult) (int, []byte, error) {
-	switch harness {
+	return FormatResponseForCall(&NormalizedToolCall{Harness: harness}, result)
+}
+
+// FormatResponseForCall serializes the verdict taking full normalized tool call context into account.
+func FormatResponseForCall(call *NormalizedToolCall, result EvaluationResult) (int, []byte, error) {
+	harnessType := HarnessUnknown
+	if call != nil {
+		harnessType = call.Harness
+	}
+
+	switch harnessType {
 	case HarnessAntigravity:
-		return formatAntigravityResponse(result)
+		return formatAntigravityResponse(call, result)
 	case HarnessClaudeCode, HarnessCodex:
 		return formatClaudeResponse(result)
 	default:
@@ -156,16 +166,28 @@ func FormatResponse(harness HarnessType, result EvaluationResult) (int, []byte, 
 	}
 }
 
-func formatAntigravityResponse(result EvaluationResult) (int, []byte, error) {
+func formatAntigravityResponse(call *NormalizedToolCall, result EvaluationResult) (int, []byte, error) {
 	out := AntigravityDecisionOutput{
 		Decision: string(result.Decision),
 		Reason:   result.Reason,
 	}
+
+	if shouldApplyCommandOverride(call, result.Decision) {
+		out.PermissionOverrides = []string{fmt.Sprintf("command(%s)", call.Command)}
+	}
+
 	bytes, err := json.Marshal(out)
 	if err != nil {
 		return 1, nil, fmt.Errorf("failed to marshal antigravity response: %w", err)
 	}
 	return 0, bytes, nil
+}
+
+func shouldApplyCommandOverride(call *NormalizedToolCall, decision Decision) bool {
+	if call == nil || strings.TrimSpace(call.Command) == "" {
+		return false
+	}
+	return decision == DecisionAllow || decision == DecisionAsk
 }
 
 func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {

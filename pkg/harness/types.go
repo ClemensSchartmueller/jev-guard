@@ -64,8 +64,9 @@ type ClaudeHookAction struct {
 
 // AntigravityDecisionOutput shapes the stdout for Antigravity pre-tool responses.
 type AntigravityDecisionOutput struct {
-	Decision string `json:"decision"` // "allow", "ask", or "deny"
-	Reason   string `json:"reason,omitempty"`
+	Decision            string   `json:"decision"` // "allow", "ask", or "deny"
+	Reason              string   `json:"reason,omitempty"`
+	PermissionOverrides []string `json:"permissionOverrides,omitempty"`
 }
 
 // EvaluationResult contains the decision, reason, and telemetry for the invocation.

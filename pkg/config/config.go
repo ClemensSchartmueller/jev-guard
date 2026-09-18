@@ -170,19 +170,28 @@ func loadConfigFile(cfg *Config, filePath string) {
 
 	var fileCfg Config
 	if err := json.Unmarshal(data, &fileCfg); err == nil {
-		applyFileConfig(cfg, &fileCfg)
+		applyFileConfig(cfg, &fileCfg, filepath.Dir(filePath))
 	}
 }
 
-func applyFileConfig(cfg *Config, fileCfg *Config) {
+func applyFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 	if fileCfg.Mode != "" {
 		cfg.Mode = fileCfg.Mode
 	}
+	applyFileAPIKeys(cfg, fileCfg)
+	applyFileNetworkingAndLogging(cfg, fileCfg, configDir)
+	applyFilePolicies(cfg, fileCfg)
+}
+
+func applyFileAPIKeys(cfg *Config, fileCfg *Config) {
 	if fileCfg.APIKey != "" {
 		cfg.APIKey = fileCfg.APIKey
 	} else if fileCfg.TypesafeAPIKey != "" {
 		cfg.APIKey = fileCfg.TypesafeAPIKey
 	}
+}
+
+func applyFileNetworkingAndLogging(cfg *Config, fileCfg *Config, configDir string) {
 	if fileCfg.BaseURL != "" {
 		cfg.BaseURL = fileCfg.BaseURL
 	}
@@ -194,8 +203,18 @@ func applyFileConfig(cfg *Config, fileCfg *Config) {
 		cfg.Timeout = time.Duration(fileCfg.TimeoutMs) * time.Millisecond
 	}
 	if fileCfg.AuditLogPath != "" {
-		cfg.AuditLogPath = fileCfg.AuditLogPath
+		cfg.AuditLogPath = anchorRelativePath(fileCfg.AuditLogPath, configDir)
 	}
+}
+
+func anchorRelativePath(targetPath, baseDir string) string {
+	if filepath.IsAbs(targetPath) || baseDir == "" {
+		return targetPath
+	}
+	return filepath.Join(baseDir, targetPath)
+}
+
+func applyFilePolicies(cfg *Config, fileCfg *Config) {
 	if fileCfg.FastpathEnabled != nil {
 		cfg.FastpathEnabled = fileCfg.FastpathEnabled
 	}
@@ -285,12 +304,28 @@ func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.Evaluat
 		return fmt.Errorf("failed to marshal audit entry: %w", err)
 	}
 
-	f, err := os.OpenFile(c.AuditLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	targetPath := c.resolveAuditLogPath(call)
+	f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open audit log file %s: %w", c.AuditLogPath, err)
+		return fmt.Errorf("failed to open audit log file %s: %w", targetPath, err)
 	}
 	defer f.Close()
 
 	_, err = f.Write(append(data, '\n'))
 	return err
+}
+
+func (c *Config) resolveAuditLogPath(call *harness.NormalizedToolCall) string {
+	if filepath.IsAbs(c.AuditLogPath) {
+		return c.AuditLogPath
+	}
+	if call != nil {
+		if call.Cwd != "" {
+			return filepath.Join(call.Cwd, c.AuditLogPath)
+		}
+		if len(call.WorkspaceRoots) > 0 && call.WorkspaceRoots[0] != "" {
+			return filepath.Join(call.WorkspaceRoots[0], c.AuditLogPath)
+		}
+	}
+	return c.AuditLogPath
 }

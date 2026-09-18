@@ -243,3 +243,60 @@ func TestConfig_FastpathEnabled_FromEnv(t *testing.T) {
 		t.Errorf("expected FastpathEnabled to be false when JEV_GUARD_FASTPATH_ENABLED=0")
 	}
 }
+
+func TestConfig_AuditLogPath_AnchoredToConfigDir(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-audit-anchor-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configJSON := `{
+		"audit_log_path": ".custom_audit.log"
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := LoadConfig(tempDir)
+	expectedPath := filepath.Join(tempDir, ".custom_audit.log")
+	if cfg.AuditLogPath != expectedPath {
+		t.Errorf("expected AuditLogPath %q, got %q", expectedPath, cfg.AuditLogPath)
+	}
+}
+
+func TestConfig_LogAudit_RelativeResolvedWithCallCwd(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-audit-call-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &Config{
+		AuditLogPath: "call_audit.log",
+	}
+
+	call := &harness.NormalizedToolCall{
+		Cwd:      tempDir,
+		ToolName: "run_command",
+		Command:  "go test ./...",
+	}
+	res := &harness.EvaluationResult{
+		Decision: harness.DecisionAllow,
+		Reason:   "Safe test execution",
+		Source:   "policy_jev_allow",
+	}
+
+	if err := cfg.LogAudit(call, res); err != nil {
+		t.Fatalf("failed to log audit: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "call_audit.log")
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("failed to read audit log at expected path %q: %v", expectedPath, err)
+	}
+	if len(data) == 0 {
+		t.Errorf("expected audit log content, got empty file")
+	}
+}

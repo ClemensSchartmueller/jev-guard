@@ -187,6 +187,106 @@ func TestFormatResponse_Antigravity(t *testing.T) {
 	}
 }
 
+func TestFormatResponseForCall_AntigravityPermissionOverrides_Allow(t *testing.T) {
+	call := &NormalizedToolCall{
+		Harness:  HarnessAntigravity,
+		ToolName: "run_command",
+		Command:  "go test -v ./pkg/fastpath",
+	}
+	res := EvaluationResult{
+		Decision: DecisionAllow,
+		Reason:   "Verified safe by TypeSafe AI",
+	}
+
+	exitCode, out, err := FormatResponseForCall(call, res)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected error or exitCode: err=%v, code=%d", err, exitCode)
+	}
+
+	var parsed AntigravityDecisionOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if len(parsed.PermissionOverrides) != 1 || parsed.PermissionOverrides[0] != "command(go test -v ./pkg/fastpath)" {
+		t.Errorf("expected permission override 'command(go test -v ./pkg/fastpath)', got %v", parsed.PermissionOverrides)
+	}
+}
+
+func TestFormatResponseForCall_AntigravityPermissionOverrides_Ask(t *testing.T) {
+	call := &NormalizedToolCall{
+		Harness:  HarnessAntigravity,
+		ToolName: "run_command",
+		Command:  "npm test",
+	}
+	res := EvaluationResult{
+		Decision: DecisionAsk,
+		Reason:   "Requires user confirmation",
+	}
+
+	exitCode, out, err := FormatResponseForCall(call, res)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected error or exitCode: err=%v, code=%d", err, exitCode)
+	}
+
+	var parsed AntigravityDecisionOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if len(parsed.PermissionOverrides) != 1 || parsed.PermissionOverrides[0] != "command(npm test)" {
+		t.Errorf("expected permission override 'command(npm test)', got %v", parsed.PermissionOverrides)
+	}
+}
+
+func TestFormatResponseForCall_AntigravityPermissionOverrides_Deny(t *testing.T) {
+	call := &NormalizedToolCall{
+		Harness:  HarnessAntigravity,
+		ToolName: "run_command",
+		Command:  "rm -rf /",
+	}
+	res := EvaluationResult{
+		Decision: DecisionDeny,
+		Reason:   "Catastrophic deletion blocked",
+	}
+
+	exitCode, out, err := FormatResponseForCall(call, res)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected error: err=%v, code=%d", err, exitCode)
+	}
+
+	var parsed AntigravityDecisionOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if len(parsed.PermissionOverrides) != 0 {
+		t.Errorf("expected no permission overrides on deny, got %v", parsed.PermissionOverrides)
+	}
+}
+
+func TestFormatResponseForCall_AntigravityPermissionOverrides_NoCommand(t *testing.T) {
+	call := &NormalizedToolCall{
+		Harness:    HarnessAntigravity,
+		ToolName:   "write_to_file",
+		TargetPath: "test.go",
+	}
+	res := EvaluationResult{
+		Decision: DecisionAllow,
+		Reason:   "File write allowed",
+	}
+
+	exitCode, out, err := FormatResponseForCall(call, res)
+	if err != nil || exitCode != 0 {
+		t.Fatalf("unexpected error: err=%v, code=%d", err, exitCode)
+	}
+
+	var parsed AntigravityDecisionOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+	if len(parsed.PermissionOverrides) != 0 {
+		t.Errorf("expected no permission overrides for tool without command, got %v", parsed.PermissionOverrides)
+	}
+}
+
 func TestFormatResponse_Claude(t *testing.T) {
 	resAsk := EvaluationResult{
 		Decision: DecisionAsk,
