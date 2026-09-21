@@ -18,7 +18,11 @@ esac
 
 if command -v go >/dev/null 2>&1 && [ -f "./main.go" ] && [ -f "./go.mod" ] && grep -qE '^module[[:space:]]+jev-guard' ./go.mod; then
   echo "Building jev-guard locally from source..."
-  go build -ldflags="-s -w" -o "${TARGET}" ./main.go
+  GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 'none')"
+  GIT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  GIT_TAG="$(git describe --tags --exact-match 2>/dev/null || echo 'dev')"
+  LDFLAGS="-s -w -X jev-guard/pkg/cli.Version=${GIT_TAG} -X jev-guard/pkg/cli.Commit=${GIT_COMMIT} -X jev-guard/pkg/cli.Date=${GIT_DATE}"
+  go build -ldflags="${LDFLAGS}" -o "${TARGET}" ./main.go
 else
   REPO="${GITHUB_REPOSITORY:-ClemensSchartmueller/jev-guard}"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/jev-guard-${OS}-${ARCH}"

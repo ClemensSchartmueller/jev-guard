@@ -18,7 +18,13 @@ $BinaryTarget = Join-Path $InstallDir "jev-guard.exe"
 # If go is installed and source is available locally, build directly
 if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go") -and (Test-Path ".\go.mod") -and ((Get-Content ".\go.mod" -Raw) -match '(?m)^module\s+jev-guard\b')) {
     Write-Host "Building jev-guard from local source with Go..." -ForegroundColor Yellow
-    go build -ldflags="-s -w" -o $BinaryTarget .\main.go
+    $GitCommit = try { (git rev-parse --short HEAD 2>$null).Trim() } catch { "none" }
+    if (!$GitCommit) { $GitCommit = "none" }
+    $GitDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $GitTag = try { (git describe --tags --exact-match 2>$null).Trim() } catch { "dev" }
+    if (!$GitTag) { $GitTag = "dev" }
+    $LdFlags = "-s -w -X jev-guard/pkg/cli.Version=$GitTag -X jev-guard/pkg/cli.Commit=$GitCommit -X jev-guard/pkg/cli.Date=$GitDate"
+    go build -ldflags $LdFlags -o $BinaryTarget .\main.go
 } else {
     if (![Environment]::Is64BitOperatingSystem) {
         Write-Error "Unsupported architecture: 32-bit Windows is not supported by prebuilt binaries. Please install Go and compile from source."
