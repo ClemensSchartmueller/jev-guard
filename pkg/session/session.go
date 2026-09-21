@@ -17,7 +17,10 @@ import (
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
 const DefaultSessionTTL = 60 * time.Minute
 
-var abortPattern = regexp.MustCompile(`(?i)^\s*((stop|cancel|abort|halt|quit)\s*([!.]|$|\b(that|it|now|all|everything|execution|operation)\b)|(stop|cancel|abort|halt)!\s*.*|(don'?t|do\s+not)\s+(do\s+that|run\s+that|proceed|continue)\b)`)
+var (
+	abortPattern       = regexp.MustCompile(`(?i)^\s*((stop|cancel|abort|halt|quit)\s*([!.]|$|\b(that|it|now|all|everything|execution|operation)\b)|(stop|cancel|abort|halt)!\s*.*|(don'?t|do\s+not)\s+(do\s+that|run\s+that|proceed|continue)\b)`)
+	safeSessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+)
 
 // SessionState records the active user prompt and turn context for a session.
 type SessionState struct {
@@ -54,8 +57,7 @@ func SafeSessionFileName(sessionID string) string {
 	}
 
 	// If the session ID has safe chars (alphanumeric, dash, underscore), use it directly with prefix.
-	safeRegex := regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
-	if safeRegex.MatchString(cleaned) && len(cleaned) <= 64 {
+	if safeSessionIDRegex.MatchString(cleaned) && len(cleaned) <= 64 {
 		return cleaned + ".json"
 	}
 
