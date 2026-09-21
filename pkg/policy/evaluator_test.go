@@ -145,3 +145,22 @@ func TestPolicy_Resolve_Unprompted_CredentialAccessRequiresConfirmation(t *testi
 		t.Fatalf("expected ASK for unprompted credential access, got %v", res.Decision)
 	}
 }
+
+func TestPolicy_Resolve_ExplicitIntent_CatastrophicCredentialAccessCappedAtForceAsk(t *testing.T) {
+	policy := NewDefaultPolicy()
+	j := &evaluator.JevJudgments{
+		IsWorkspaceContained:  0.98,
+		DestructivePotential:  2.8,
+		ViolationCategory:     "credential_leak",
+		ViolationConfidence:   0.95,
+		DestructiveConfidence: 0.99,
+		IntentAlignment:       "explicitly_requested",
+		IntentConfidence:      0.95,
+	}
+
+	res := policy.Resolve(j, true, nil)
+	// Must cap at ForceAsk even if user explicitly requested and violation is credential_leak
+	if res.Decision != harness.DecisionForceAsk {
+		t.Fatalf("expected force_ask cap for catastrophic credential operation explicitly requested, got %v", res.Decision)
+	}
+}

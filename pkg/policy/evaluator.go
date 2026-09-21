@@ -47,10 +47,9 @@ func (p *Policy) Resolve(j *evaluator.JevJudgments, boundaryContained bool, eval
 func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.EvaluationResult {
 	isExplicitlyRequested := j.IntentAlignment == "explicitly_requested"
 
-	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested); violationResult != nil {
-		return violationResult
-	}
-
+	// Strict Catastrophic Ceiling: Operations with catastrophic blast radius (score > 2.5)
+	// strictly cap at force_ask even if explicitly commanded by the user, and are blocked (deny) otherwise.
+	// This invariant takes precedence over all violation categories, including credential allowances.
 	if j.DestructivePotential > 2.5 {
 		if isExplicitlyRequested {
 			return &harness.EvaluationResult{
@@ -66,6 +65,10 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.Evaluatio
 			Source:     "policy_jev_destructive",
 			Confidence: j.DestructiveConfidence,
 		}
+	}
+
+	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested); violationResult != nil {
+		return violationResult
 	}
 
 	if j.IsWorkspaceContained < p.MinContainedThreshold {
