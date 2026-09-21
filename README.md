@@ -29,9 +29,29 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     1. `is_workspace_contained` (`Noul`): Probability the operation stays strictly inside workspace roots.
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
+- **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
+  - **User Intent Ingestion**: Ingests active user prompts via dedicated lifecycle hooks (`UserPromptSubmit` in Claude Code, `PreInvocation` in Antigravity) into an ephemeral session cache stored in `~/.jevguard/sessions/`.
+  - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
+  - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
+  - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
+  - **Fully Optional & Zero-Guess Fallback**: Configurable via `"context_awareness_enabled": false` or `JEV_GUARD_CONTEXT_AWARENESS_ENABLED=0`. If the cache is cold, `jev-guard` falls back deterministically to strict stateless safety.
 - **Fail-Safe Operation**: If TypeSafe AI is unavailable or network times out, safely falls back to interactive confirmation (`ASK` / `force_ask`).
 
 ---
+
+## Directory Architecture (`~/.jevguard`)
+
+`jev-guard` maintains a unified, self-contained directory in your user home:
+
+```text
+~/.jevguard/
+├── bin/
+│   └── jev-guard (or jev-guard.exe)   # Executable binary (added to User PATH)
+├── sessions/
+│   └── <session_hash>.json            # Ephemeral, atomic session intent cache
+└── logs/
+    └── audit.log                      # Optional fallback audit log
+```
 
 ## Installation
 
@@ -41,7 +61,7 @@ Download precompiled binaries for Linux, macOS, and Windows from the [GitHub Rel
 
 ### Local Installation
 
-Build and install directly to your local user binary directory:
+Build and install directly to `~/.jevguard/bin` (automatically configured in your User `PATH`):
 
 #### Linux / macOS:
 ```bash
@@ -55,18 +75,32 @@ Build and install directly to your local user binary directory:
 
 ---
 
-## CLI Usage & Verification
+## CLI Usage & Commands
 
-`jev-guard` includes built-in flags for diagnostics and supports manual payload testing via standard input:
+`jev-guard` includes subcommands for intent management, diagnostics, and testing:
 
 ```bash
 # Display version and build information
 jev-guard --version
 
-# Show help and usage details
+# Show help and command reference
 jev-guard --help
 
-# Test evaluation manually by piping a tool call payload JSON
+# Ingest active user prompt/intent into the session cache (called by hooks)
+jev-guard ingest --session "my-session" --turn 1 --prompt "Delete the build folder"
+
+# Or pipe a hook event JSON payload directly on stdin
+cat hook_payload.json | jev-guard ingest
+
+# Clear active intent for a specific session (or all sessions)
+jev-guard clear-intent --session "my-session"
+jev-guard clear-intent --all
+jev-guard cache clear
+
+# Display status of active sessions and cache directory
+jev-guard status
+
+# Test gate evaluation manually by piping a tool call payload JSON
 cat payload.json | jev-guard
 ```
 
@@ -160,15 +194,16 @@ jevguard.json
 | **Model** | `model` | `TYPESAFE_MODEL` | `"jev-latest"` | System One evaluation model |
 | **Timeout** | `timeout_ms` | `JEV_GUARD_TIMEOUT_MS` | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fastpath** | `fastpath_enabled` | `JEV_GUARD_FASTPATH_ENABLED` | `true` | Enable sub-1ms local fastpath filter |
+| **Context Awareness** | `context_awareness_enabled` | `JEV_GUARD_CONTEXT_AWARENESS_ENABLED` | `true` | Enable session intent caching & intent-aware evaluation |
 | **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
 | **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | Array of substrings/globs to prompt confirmation on |
 | **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | Array of command prefixes cached for zero-latency approval |
 
 ### Configuration Precedence
 
-1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`) override file settings.
+1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`, `JEV_GUARD_CONTEXT_AWARENESS_ENABLED`) override file settings.
 2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered in `cwd` or nearest ancestor directory).
-3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, standard sensitive file patterns and read commands).
+3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, standard sensitive file patterns and read commands).
 
 ### Audit Log Schema
 
@@ -192,9 +227,18 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
 ## Hook Setup
 
 ### Claude Code (`.claude/hooks.json`)
+
+Configure `UserPromptSubmit` to ingest human instructions into the session cache, and `PreToolUse` to enforce safety:
+
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "command": "jev-guard ingest"
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
@@ -206,9 +250,18 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
 ```
 
 ### Antigravity (`.agents/hooks.json`)
+
+Configure `PreInvocation` to capture turn intent and `PreToolUse` for tool-level gating:
+
 ```json
 {
   "jev-guard": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "jev-guard ingest"
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource",
@@ -237,6 +290,26 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
   }
 }
 ```
+
+---
+
+## Context-Aware Intent Policy Matrix
+
+When context awareness is enabled and intent is ingested, TypeSafe AI classifies `intent_alignment` into three categories:
+
+| Action Risk / Blast Radius | Unprompted / Contrary Intent | Incidental / Unclear Intent | Explicitly Requested by User |
+| :--- | :--- | :--- | :--- |
+| **Catastrophic Deletion** (`score > 2.5`, `catastrophic_deletion`) | **DENY** (Hard block) | **DENY** (Hard block) | **`force_ask`** (Mandatory interactive confirmation) |
+| **Moderate Blast Radius** (`score 1.2 – 2.4`, e.g. `rm -rf dist`) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`ALLOW`** (Auto-proceeds frictionlessly) |
+| **Sensitive File Access** (`.env`, `.pem`, credentials) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`ALLOW`** (Auto-proceeds frictionlessly) |
+| **Privilege / Persistence** (system profile edits, root escalations) | **DENY** (Hard block) | **DENY** (Hard block) | **`force_ask`** (Mandatory confirmation) |
+| **Workspace Boundary Escape** (`../../` traversal) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) |
+| **Anti-Tampering** (`~/.jevguard/` cache access) | **DENY** (Strict invariant) | **DENY** (Strict invariant) | **DENY** (Strict invariant) |
+
+> [!IMPORTANT]
+> **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto.
+
+---
 
 ### Platform Safety & Autonomous Matrix
 
