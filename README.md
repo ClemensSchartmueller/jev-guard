@@ -13,9 +13,10 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
   - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
-  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
-  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`).
-  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, or newlines) and outbound network fetch operations (`read_url_content`) are strictly routed to TypeSafe AI System One for semantic evaluation.
+  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
+  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
+  - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
+  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`) are strictly routed to TypeSafe AI System One for semantic evaluation.
   - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
 - **Platform-Specific Safety Enforcement**:
   - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
@@ -101,6 +102,8 @@ jev-guard cache clear
 
 # Display status of active sessions and cache directory
 jev-guard status
+jev-guard cache status
+jev-guard cache
 
 # Test gate evaluation manually by piping a tool call payload JSON
 cat payload.json | jev-guard
@@ -193,7 +196,7 @@ jevguard.json
 | :--- | :--- | :--- | :--- | :--- |
 | **Mode** | `mode` | `JEV_GUARD_MODE` | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
 | **API Key** | `typesafe_api_key` / `api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
-| **Base URL** | `base_url` | `TYPESAFE_API_URL` | `"https://api.typesafe.ai"` | TypeSafe API endpoint URL |
+| **Base URL** | `base_url` | `TYPESAFE_API_URL` | `"https://api.typesafe.ai/v1/systemone"` | TypeSafe API endpoint URL |
 | **Model** | `model` | `TYPESAFE_MODEL` | `"jev-latest"` | System One evaluation model |
 | **Timeout** | `timeout_ms` | `JEV_GUARD_TIMEOUT_MS` | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fastpath** | `fastpath_enabled` | `JEV_GUARD_FASTPATH_ENABLED` | `true` | Enable sub-1ms local fastpath filter |
@@ -205,7 +208,7 @@ jevguard.json
 ### Configuration Precedence
 
 1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`, `JEV_GUARD_CONTEXT_AWARENESS_ENABLED`) override file settings.
-2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered in `cwd` or nearest ancestor directory).
+2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered safely in `cwd` or declared workspace roots, avoiding untrusted target directory hijacking).
 3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, standard sensitive file patterns and read commands).
 
 ### Audit Log Schema
@@ -229,9 +232,9 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
 
 ## Hook Setup
 
-### Claude Code (`.claude/hooks.json`)
+### Claude Code (`.claude/settings.json`)
 
-Configure `UserPromptSubmit` to ingest human instructions into the session cache, and `PreToolUse` to enforce safety:
+Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/settings.json` (global). Configure `UserPromptSubmit` to ingest human instructions into the session cache, and `PreToolUse` to enforce safety:
 
 ```json
 {
@@ -239,18 +242,31 @@ Configure `UserPromptSubmit` to ingest human instructions into the session cache
     "UserPromptSubmit": [
       {
         "matcher": ".*",
-        "command": "jev-guard ingest"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard ingest"
+          }
+        ]
       }
     ],
     "PreToolUse": [
       {
         "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+> [!NOTE]
+> `jev-guard` formats Claude Code PreToolUse verdicts using the standard `hookSpecificOutput.permissionDecision` schema. Ingest confirmations are sent to `stderr` to ensure they never pollute active user prompts.
 
 ### Antigravity (`.agents/hooks.json`)
 
