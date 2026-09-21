@@ -154,12 +154,12 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return ""
+		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target)
 	}
 
 	contained, err := checker.IsPathContained(target, call.Cwd)
 	if err != nil {
-		return ""
+		return fmt.Sprintf("Target path cannot be verified within workspace: %s (%v)", target, err)
 	}
 
 	if !contained {
@@ -236,7 +236,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 
 		if isPotentialPath(cleanArg) {
 			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
-			if err == nil && !contained {
+			if err != nil || !contained {
 				return false
 			}
 		}

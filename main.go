@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/cli"
@@ -98,12 +99,15 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 }
 
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
-	if resolver == nil {
+	if strings.TrimSpace(call.TargetPath) == "" {
 		return true
+	}
+	if resolver == nil {
+		return false
 	}
 	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {
-		return true
+		return false
 	}
 	return contained
 }

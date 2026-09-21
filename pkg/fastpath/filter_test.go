@@ -1,6 +1,7 @@
 package fastpath
 
 import (
+	"fmt"
 	"testing"
 
 	"jev-guard/pkg/config"
@@ -224,10 +225,11 @@ func TestFastPath_ConfigInjection(t *testing.T) {
 
 type mockBoundaryChecker struct {
 	contained bool
+	err       error
 }
 
 func (m *mockBoundaryChecker) IsPathContained(targetPath string, cwd string) (bool, error) {
-	return m.contained, nil
+	return m.contained, m.err
 }
 
 func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
@@ -244,6 +246,14 @@ func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
 		t.Fatalf("expected ASK for uncontained mock path, got %+v", res)
 	}
 
+	// Resolution error must fail closed (DecisionAsk)
+	checker.err = fmt.Errorf("canonicalization failed")
+	resErr := filter.Evaluate(call)
+	if resErr == nil || resErr.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK on boundary checker error (fail-closed), got %+v", resErr)
+	}
+
+	checker.err = nil
 	checker.contained = true
 	resAllow := filter.Evaluate(call)
 	if resAllow == nil || resAllow.Decision != harness.DecisionAllow {
