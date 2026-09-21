@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -272,5 +273,63 @@ func TestSafeSessionFileName(t *testing.T) {
 	got := SafeSessionFileName("session/with/slashes")
 	if strings.Contains(got, "/") || strings.Contains(got, "\\") {
 		t.Errorf("expected slashes to be stripped or hashed, got %s", got)
+	}
+}
+
+func TestSession_TempFileCleanup(t *testing.T) {
+	setupTestJevguardDir(t)
+	sessionsDir := GetSessionsDir()
+	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
+		t.Fatalf("failed to create sessions dir: %v", err)
+	}
+
+	// 1. Save an active session
+	state := &SessionState{
+		SessionID: "active-1",
+		TurnID:    1,
+		Prompt:    "Active session",
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := SaveSession(state); err != nil {
+		t.Fatalf("SaveSession failed: %v", err)
+	}
+
+	// 2. Create an orphaned old temp file
+	oldTempPath := filepath.Join(sessionsDir, "sess.tmp.12345")
+	if err := os.WriteFile(oldTempPath, []byte("stale"), 0600); err != nil {
+		t.Fatalf("failed to write old temp file: %v", err)
+	}
+	oldTime := time.Now().Add(-10 * time.Minute)
+	_ = os.Chtimes(oldTempPath, oldTime, oldTime)
+
+	// 3. Create a fresh temp file
+	freshTempPath := filepath.Join(sessionsDir, "sess.tmp.67890")
+	if err := os.WriteFile(freshTempPath, []byte("fresh"), 0600); err != nil {
+		t.Fatalf("failed to write fresh temp file: %v", err)
+	}
+
+	// 4. ListSessions should clean up old temp file (>5 min) but not touch fresh temp file
+	sessions, err := ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions failed: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != "active-1" {
+		t.Errorf("expected 1 active session, got %d", len(sessions))
+	}
+
+	if _, err := os.Stat(oldTempPath); !os.IsNotExist(err) {
+		t.Errorf("expected old temp file to be deleted by ListSessions")
+	}
+	if _, err := os.Stat(freshTempPath); err != nil {
+		t.Errorf("expected fresh temp file to be preserved: %v", err)
+	}
+
+	// 5. ClearAllSessions should wipe both .json and any remaining .tmp. files
+	if err := ClearAllSessions(); err != nil {
+		t.Fatalf("ClearAllSessions failed: %v", err)
+	}
+	entries, _ := os.ReadDir(sessionsDir)
+	if len(entries) != 0 {
+		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
 	}
 }

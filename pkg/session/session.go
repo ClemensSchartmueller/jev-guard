@@ -121,13 +121,19 @@ func SaveSession(state *SessionState) error {
 		return fmt.Errorf("failed to write temporary session file: %w", err)
 	}
 
-	if err := os.Rename(tempPath, targetPath); err != nil {
-		// Fallback for systems/filesystems where rename fails across handles
-		_ = os.Remove(targetPath)
-		if retryErr := os.Rename(tempPath, targetPath); retryErr != nil {
-			_ = os.Remove(tempPath)
-			return fmt.Errorf("failed to commit session file: %w", retryErr)
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		renameErr = os.Rename(tempPath, targetPath)
+		if renameErr == nil {
+			break
 		}
+		_ = os.Remove(targetPath)
+		time.Sleep(time.Duration(10*(attempt+1)) * time.Millisecond)
+	}
+
+	if renameErr != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("failed to commit session file: %w", renameErr)
 	}
 
 	return nil
@@ -180,7 +186,7 @@ func ClearAllSessions() error {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".json") || strings.Contains(entry.Name(), ".tmp.")) {
 			_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
 		}
 	}
@@ -200,7 +206,18 @@ func ListSessions() ([]*SessionState, error) {
 
 	var sessions []*SessionState
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.Contains(entry.Name(), ".tmp.") {
+			if info, err := entry.Info(); err == nil {
+				if time.Since(info.ModTime()) > 5*time.Minute {
+					_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
+				}
+			}
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 
