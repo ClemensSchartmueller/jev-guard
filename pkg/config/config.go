@@ -303,19 +303,26 @@ type AuditEntry struct {
 
 // LogAudit writes evaluation results to the configured audit file when active.
 func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.EvaluationResult) error {
-	if c.AuditLogPath == "" {
+	if c == nil || c.AuditLogPath == "" {
+		return nil
+	}
+	if call == nil && res == nil {
 		return nil
 	}
 
 	entry := AuditEntry{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		ToolName:   call.ToolName,
-		Command:    call.Command,
-		TargetPath: call.TargetPath,
-		Decision:   res.Decision,
-		Reason:     res.Reason,
-		Source:     res.Source,
-		Confidence: res.Confidence,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	if call != nil {
+		entry.ToolName = call.ToolName
+		entry.Command = call.Command
+		entry.TargetPath = call.TargetPath
+	}
+	if res != nil {
+		entry.Decision = res.Decision
+		entry.Reason = res.Reason
+		entry.Source = res.Source
+		entry.Confidence = res.Confidence
 	}
 
 	data, err := json.Marshal(entry)

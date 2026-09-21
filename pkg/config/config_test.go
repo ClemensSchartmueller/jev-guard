@@ -401,3 +401,51 @@ func TestConfig_TargetPathDoesNotHijackConfig(t *testing.T) {
 		t.Errorf("vulnerability detected: configuration was hijacked from untrusted TargetPath directory! cfg: %+v", cfg)
 	}
 }
+
+func TestConfig_LogAudit_NilSafety(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "audit.log")
+
+	cfg := &Config{
+		AuditLogPath: logPath,
+	}
+
+	call := &harness.NormalizedToolCall{
+		ToolName: "Bash",
+		Command:  "ls",
+	}
+	res := &harness.EvaluationResult{
+		Decision: harness.DecisionAllow,
+		Reason:   "harmless command",
+	}
+
+	// 1. cfg is nil - should not panic
+	var nilCfg *Config
+	if err := nilCfg.LogAudit(call, res); err != nil {
+		t.Errorf("expected nil error on nil Config, got %v", err)
+	}
+
+	// 2. call and res both nil - should not panic and return nil
+	if err := cfg.LogAudit(nil, nil); err != nil {
+		t.Errorf("expected nil error on nil call and nil res, got %v", err)
+	}
+
+	// 3. call nil, res non-nil
+	if err := cfg.LogAudit(nil, res); err != nil {
+		t.Errorf("expected nil error on nil call, got %v", err)
+	}
+
+	// 4. call non-nil, res nil
+	if err := cfg.LogAudit(call, nil); err != nil {
+		t.Errorf("expected nil error on nil res, got %v", err)
+	}
+
+	// Verify log file was written and is valid JSON lines
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected audit log file to exist: %v", err)
+	}
+	if len(data) == 0 {
+		t.Errorf("expected non-empty audit log")
+	}
+}
