@@ -332,7 +332,7 @@ func TestFormatResponse_Claude(t *testing.T) {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("failed to parse claude hook output: %v", err)
 	}
-	if parsed.HookSpecificOutput.Action != "allow" || parsed.HookSpecificOutput.Message != "Safe read command" {
+	if parsed.HookSpecificOutput.PermissionDecision != "allow" || parsed.HookSpecificOutput.HookEventName != "PreToolUse" || parsed.HookSpecificOutput.PermissionDecisionReason != "Safe read command" {
 		t.Errorf("unexpected claude output: %+v", parsed)
 	}
 
@@ -381,6 +381,100 @@ func TestFormatResponse_Claude(t *testing.T) {
 	}
 	if string(out) != "Destructive command blocked" {
 		t.Errorf("expected error message in out, got %s", string(out))
+	}
+}
+
+func TestParsePayload_SessionExtraction(t *testing.T) {
+	antigravityRaw := []byte(`{
+		"toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}},
+		"conversationId": "ag-conv-999",
+		"invocationNum": 3
+	}`)
+	call, err := ParsePayload(antigravityRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.SessionID != "ag-conv-999" {
+		t.Errorf("expected SessionID 'ag-conv-999', got '%s'", call.SessionID)
+	}
+	if call.TurnID != 3 {
+		t.Errorf("expected TurnID 3, got %d", call.TurnID)
+	}
+
+	claudeRaw := []byte(`{
+		"tool_name": "Bash",
+		"tool_input": {"command": "git status", "session_id": "claude-sess-888"}
+	}`)
+	callClaude, err := ParsePayload(claudeRaw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callClaude.SessionID != "claude-sess-888" {
+		t.Errorf("expected SessionID 'claude-sess-888', got '%s'", callClaude.SessionID)
+	}
+}
+
+func TestParseIngestPayload_ClaudePrompt(t *testing.T) {
+	raw := []byte(`{
+		"session_id": "claude-sess-1",
+		"prompt": "Please delete the dist directory"
+	}`)
+
+	state, err := ParseIngestPayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.SessionID != "claude-sess-1" {
+		t.Errorf("expected session_id 'claude-sess-1', got '%s'", state.SessionID)
+	}
+	if state.Prompt != "Please delete the dist directory" {
+		t.Errorf("expected prompt, got '%s'", state.Prompt)
+	}
+}
+
+func TestParseIngestPayload_AntigravityPrompt(t *testing.T) {
+	raw := []byte(`{
+		"conversationId": "ag-conv-1",
+		"invocationNum": 2,
+		"prompt": "Clean build artifacts"
+	}`)
+
+	state, err := ParseIngestPayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.SessionID != "ag-conv-1" {
+		t.Errorf("expected session ID 'ag-conv-1', got '%s'", state.SessionID)
+	}
+	if state.TurnID != 2 {
+		t.Errorf("expected TurnID 2, got %d", state.TurnID)
+	}
+	if state.Prompt != "Clean build artifacts" {
+		t.Errorf("expected prompt 'Clean build artifacts', got '%s'", state.Prompt)
+	}
+}
+
+func TestParsePayload_UTF8BOM(t *testing.T) {
+	bom := []byte("\xef\xbb\xbf")
+	payload := []byte(`{"tool_name": "Bash", "tool_input": {"command": "git status"}}`)
+	call, err := ParsePayload(append(bom, payload...))
+	if err != nil {
+		t.Fatalf("unexpected error parsing payload with UTF-8 BOM: %v", err)
+	}
+	if call.Command != "git status" {
+		t.Errorf("expected command 'git status', got %q", call.Command)
+	}
+}
+
+func TestParseIngestPayload_UTF8BOM(t *testing.T) {
+	bom := []byte("\xef\xbb\xbf")
+	payload := []byte(`{"conversationId": "bom-conv", "prompt": "Run tests"}`)
+	state, err := ParseIngestPayload(append(bom, payload...))
+	if err != nil {
+		t.Fatalf("unexpected error parsing ingest payload with UTF-8 BOM: %v", err)
+	}
+	if state.SessionID != "bom-conv" || state.Prompt != "Run tests" {
+		t.Errorf("unexpected state: %+v", state)
 	}
 }
 
@@ -445,4 +539,5 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 		t.Errorf("expected target path '/repo/main.go', got '%s'", call.TargetPath)
 	}
 }
+
 

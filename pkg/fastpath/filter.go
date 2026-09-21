@@ -8,6 +8,7 @@ import (
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
+	"jev-guard/pkg/session"
 )
 
 // BoundaryChecker verifies whether a target path is contained within workspace boundaries.
@@ -43,7 +44,21 @@ func NewDefaultFilter() *Filter {
 // Evaluate checks the tool call against local invariants and latency cache.
 // Returns nil if semantic analysis by TypeSafe AI (Jev) is needed.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
+	if reason := f.checkAntiTampering(call); reason != "" {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionDeny,
+			Reason:     reason,
+			Source:     "fastpath_tampering",
+			Confidence: 1.0,
+		}
+	}
+
 	if reason := f.checkSensitive(call); reason != "" {
+		if strings.TrimSpace(call.UserIntent) != "" {
+			// Defer to TypeSafe AI for semantic intent verification.
+			// Never fall through to trusted read operations for sensitive files.
+			return nil
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     reason,
@@ -73,14 +88,35 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	return nil
 }
 
+func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
+	if call == nil {
+		return ""
+	}
+
+	if session.IsJevguardPath(call.TargetPath) {
+		return "Direct access to jev-guard security directory or configuration file is prohibited"
+	}
+
+	lowerCmd := strings.ToLower(call.Command)
+	if strings.Contains(lowerCmd, ".jevguard") || strings.Contains(lowerCmd, "jevguard.json") {
+		return "Access to jev-guard configuration or session state via command is prohibited"
+	}
+
+	return ""
+}
+
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
-	target := strings.ToLower(call.TargetPath)
-	cmd := strings.ToLower(call.Command)
-	baseName := strings.ToLower(filepath.Base(call.TargetPath))
+	targetRaw := call.TargetPath
+	if isFileURI(targetRaw) {
+		targetRaw = extractFilePathFromURI(targetRaw)
+	}
+	target := filepath.ToSlash(strings.ToLower(targetRaw))
+	cmd := filepath.ToSlash(strings.ToLower(call.Command))
+	baseName := strings.ToLower(filepath.Base(targetRaw))
 	cmdTokens := strings.Fields(cmd)
 
 	for _, s := range f.sensitiveFiles {
-		lowerPattern := strings.ToLower(s)
+		lowerPattern := filepath.ToSlash(strings.ToLower(s))
 
 		// 1. Glob matching on target path / basename
 		if baseName != "" && baseName != "." {
@@ -107,8 +143,19 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 
 		// 3. Substring matching
 		cleanPattern := strings.TrimPrefix(lowerPattern, "*")
-		if cleanPattern != "" && (strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern)) {
-			return "Access to sensitive file or credential pattern: " + s
+		if cleanPattern != "" {
+			if strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern) {
+				return "Access to sensitive file or credential pattern: " + s
+			}
+			if strings.HasSuffix(cleanPattern, "/") {
+				cleanPatternTrimmed := strings.TrimSuffix(cleanPattern, "/")
+				if strings.HasSuffix(target, "/"+cleanPatternTrimmed) || target == cleanPatternTrimmed || strings.Contains(target, "/"+cleanPatternTrimmed+"/") {
+					return "Access to sensitive file or credential pattern: " + s
+				}
+				if strings.Contains(cmd, "/"+cleanPatternTrimmed+"/") || strings.Contains(cmd, " "+cleanPatternTrimmed) {
+					return "Access to sensitive file or credential pattern: " + s
+				}
+			}
 		}
 	}
 	return ""
@@ -120,14 +167,18 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
 		return ""
 	}
 
+	if isFileURI(target) {
+		target = extractFilePathFromURI(target)
+	}
+
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return ""
+		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target)
 	}
 
 	contained, err := checker.IsPathContained(target, call.Cwd)
 	if err != nil {
-		return ""
+		return fmt.Sprintf("Target path cannot be verified within workspace: %s (%v)", target, err)
 	}
 
 	if !contained {
@@ -150,7 +201,7 @@ func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) Bounda
 }
 
 func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) bool {
-	if isSafeReadTool(call.ToolName) {
+	if isSafeReadTool(call) {
 		return true
 	}
 	return f.isTrustedCommand(call)
@@ -192,19 +243,38 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return true
+		return false
 	}
 
 	tokens := strings.Fields(argsStr)
-	for _, token := range tokens {
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
 		cleanArg := strings.Trim(token, `"'`)
+
+		// Disallow file output/writing flags in trusted read commands - defer to semantic evaluation
+		lowerArg := strings.ToLower(cleanArg)
+		if lowerArg == "-o" || strings.HasPrefix(lowerArg, "-o=") || strings.HasPrefix(lowerArg, "--output") || strings.HasPrefix(lowerArg, "--output-directory") {
+			return false
+		}
+
+		// Inspect --flag=path syntax
 		if strings.HasPrefix(cleanArg, "-") {
+			if strings.Contains(cleanArg, "=") {
+				parts := strings.SplitN(cleanArg, "=", 2)
+				val := strings.Trim(parts[1], `"'`)
+				if isPotentialPath(val) {
+					contained, err := checker.IsPathContained(val, call.Cwd)
+					if err != nil || !contained {
+						return false
+					}
+				}
+			}
 			continue
 		}
 
 		if isPotentialPath(cleanArg) {
 			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
-			if err == nil && !contained {
+			if err != nil || !contained {
 				return false
 			}
 		}
@@ -226,11 +296,20 @@ func isPotentialPath(arg string) bool {
 	return false
 }
 
-func isSafeReadTool(toolName string) bool {
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
+func isSafeReadTool(call *harness.NormalizedToolCall) bool {
+	if call == nil {
+		return false
+	}
+	toolName := strings.ToLower(strings.TrimSpace(call.ToolName))
+	switch toolName {
 	case "view_file", "view", "read_file", "readlocalfile",
-		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob",
-		"read_url_content", "read_resource":
+		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob":
+		return true
+	case "read_resource":
+		target := strings.TrimSpace(call.TargetPath)
+		if isURL(target) || (isCustomURI(target) && !isFileURI(target)) {
+			return false
+		}
 		return true
 	default:
 		return false
@@ -238,7 +317,7 @@ func isSafeReadTool(toolName string) bool {
 }
 
 func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&&", "||", "|", ">", ">>", "`", "$("}
+	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
 	for _, op := range operators {
 		if strings.Contains(cmd, op) {
 			return true
@@ -249,5 +328,38 @@ func containsChainingOperators(cmd string) bool {
 
 func isURL(p string) bool {
 	lower := strings.ToLower(p)
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+	if strings.HasPrefix(lower, "file://") {
+		return false
+	}
+	return strings.Contains(lower, "://")
+}
+
+func isFileURI(p string) bool {
+	return strings.HasPrefix(strings.ToLower(p), "file://")
+}
+
+func isCustomURI(p string) bool {
+	lower := strings.ToLower(p)
+	return strings.Contains(lower, "://")
+}
+
+func extractFilePathFromURI(uriStr string) string {
+	lower := strings.ToLower(uriStr)
+	if strings.HasPrefix(lower, "file:///") {
+		trimmed := uriStr[len("file:///"):]
+		// On Windows: file:///C:/path -> C:/path
+		if len(trimmed) >= 2 && isDriveLetter(trimmed[0]) && trimmed[1] == ':' {
+			return trimmed
+		}
+		// On POSIX: file:///etc/passwd -> /etc/passwd
+		return "/" + trimmed
+	}
+	if strings.HasPrefix(lower, "file://") {
+		return uriStr[len("file://"):]
+	}
+	return uriStr
+}
+
+func isDriveLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }

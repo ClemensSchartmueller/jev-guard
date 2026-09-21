@@ -22,9 +22,10 @@ type Config struct {
 	Timeout          time.Duration `json:"-"`
 	TimeoutMs        int           `json:"timeout_ms,omitempty"`
 	AuditLogPath     string        `json:"audit_log_path,omitempty"`
-	FastpathEnabled  *bool         `json:"fastpath_enabled,omitempty"`  // whether local fastpath filter is active
-	SensitiveFiles   []string      `json:"sensitive_files,omitempty"`
-	TrustedCommands  []string      `json:"trusted_commands,omitempty"`
+	FastpathEnabled         *bool         `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
+	ContextAwarenessEnabled *bool         `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
+	SensitiveFiles          []string      `json:"sensitive_files,omitempty"`
+	TrustedCommands         []string      `json:"trusted_commands,omitempty"`
 }
 
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
@@ -33,13 +34,15 @@ var ConfigFileNames = []string{".jevguard.json", "jevguard.json"}
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	enabled := true
+	contextAwareness := true
 	return &Config{
-		Mode:            "enforcing",
-		Timeout:         1500 * time.Millisecond,
-		TimeoutMs:       1500,
-		FastpathEnabled: &enabled,
-		SensitiveFiles:  DefaultSensitiveFiles(),
-		TrustedCommands: DefaultTrustedCommands(),
+		Mode:                    "enforcing",
+		Timeout:                 1500 * time.Millisecond,
+		TimeoutMs:               1500,
+		FastpathEnabled:         &enabled,
+		ContextAwarenessEnabled: &contextAwareness,
+		SensitiveFiles:          DefaultSensitiveFiles(),
+		TrustedCommands:         DefaultTrustedCommands(),
 	}
 }
 
@@ -51,18 +54,37 @@ func (c *Config) IsFastpathEnabled() bool {
 	return *c.FastpathEnabled
 }
 
+// IsContextAwarenessEnabled reports whether session intent context-awareness is enabled (defaults to true).
+func (c *Config) IsContextAwarenessEnabled() bool {
+	if c.ContextAwarenessEnabled == nil {
+		return true
+	}
+	return *c.ContextAwarenessEnabled
+}
+
 // DefaultSensitiveFiles returns standard sensitive filename fragments protected by default.
 func DefaultSensitiveFiles() []string {
 	return []string{
 		".env",
 		"id_rsa",
 		"id_ed25519",
+		"id_ecdsa",
+		"id_dsa",
 		".ssh/",
 		".aws/",
+		".kube/",
+		"kubeconfig",
+		".npmrc",
+		".yarnrc",
+		".pypirc",
+		".git-credentials",
 		"credentials.json",
 		".pem",
 		".key",
 		"serviceaccount.json",
+		".jevguard.json",
+		"jevguard.json",
+		".jevguard.log",
 	}
 }
 
@@ -103,9 +125,6 @@ func collectCandidates(call *harness.NormalizedToolCall) []string {
 			if root != "" {
 				candidates = append(candidates, root)
 			}
-		}
-		if call.TargetPath != "" {
-			candidates = append(candidates, filepath.Dir(call.TargetPath))
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
@@ -218,6 +237,9 @@ func applyFilePolicies(cfg *Config, fileCfg *Config) {
 	if fileCfg.FastpathEnabled != nil {
 		cfg.FastpathEnabled = fileCfg.FastpathEnabled
 	}
+	if fileCfg.ContextAwarenessEnabled != nil {
+		cfg.ContextAwarenessEnabled = fileCfg.ContextAwarenessEnabled
+	}
 	if len(fileCfg.SensitiveFiles) > 0 {
 		cfg.SensitiveFiles = mergeUniqueStrings(cfg.SensitiveFiles, fileCfg.SensitiveFiles)
 	}
@@ -268,6 +290,11 @@ func loadEnvironment(cfg *Config) {
 		enabled := lower != "false" && lower != "0" && lower != "no" && lower != "off"
 		cfg.FastpathEnabled = &enabled
 	}
+	if val := os.Getenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED"); val != "" {
+		lower := strings.ToLower(strings.TrimSpace(val))
+		enabled := lower != "false" && lower != "0" && lower != "no" && lower != "off"
+		cfg.ContextAwarenessEnabled = &enabled
+	}
 }
 
 // AuditEntry records tool evaluations for security auditing and verification.
@@ -284,19 +311,26 @@ type AuditEntry struct {
 
 // LogAudit writes evaluation results to the configured audit file when active.
 func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.EvaluationResult) error {
-	if c.AuditLogPath == "" {
+	if c == nil || c.AuditLogPath == "" {
+		return nil
+	}
+	if call == nil && res == nil {
 		return nil
 	}
 
 	entry := AuditEntry{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		ToolName:   call.ToolName,
-		Command:    call.Command,
-		TargetPath: call.TargetPath,
-		Decision:   res.Decision,
-		Reason:     res.Reason,
-		Source:     res.Source,
-		Confidence: res.Confidence,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	if call != nil {
+		entry.ToolName = call.ToolName
+		entry.Command = call.Command
+		entry.TargetPath = call.TargetPath
+	}
+	if res != nil {
+		entry.Decision = res.Decision
+		entry.Reason = res.Reason
+		entry.Source = res.Source
+		entry.Confidence = res.Confidence
 	}
 
 	data, err := json.Marshal(entry)
@@ -305,6 +339,13 @@ func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.Evaluat
 	}
 
 	targetPath := c.resolveAuditLogPath(call)
+	dir := filepath.Dir(targetPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create audit log directory %s: %w", dir, err)
+		}
+	}
+
 	f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open audit log file %s: %w", targetPath, err)

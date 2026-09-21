@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/cli"
@@ -13,6 +14,7 @@ import (
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
+	"jev-guard/pkg/session"
 )
 
 func main() {
@@ -39,6 +41,29 @@ func runGate() int {
 	}
 
 	cfg := config.LoadConfigForCall(call)
+
+	if cfg.IsContextAwarenessEnabled() {
+		sessionID := call.SessionID
+		if sessionID == "" {
+			sessionID = "default"
+		}
+		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
+			if sessState.Aborted {
+				result := &harness.EvaluationResult{
+					Decision:   harness.DecisionForceAsk,
+					Reason:     "Action held: an active abort/stop signal was recorded for this session",
+					Source:     "session_aborted",
+					Confidence: 1.0,
+				}
+				_ = cfg.LogAudit(call, result)
+				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+			}
+			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
+				call.UserIntent = intent
+			}
+		}
+	}
+
 	result := executeGateEvaluation(call, cfg)
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
@@ -76,12 +101,15 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 }
 
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
-	if resolver == nil {
+	if strings.TrimSpace(call.TargetPath) == "" {
 		return true
+	}
+	if resolver == nil {
+		return false
 	}
 	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {
-		return true
+		return false
 	}
 	return contained
 }
@@ -135,3 +163,11 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	}
 	return outputHarnessVerdict(call, res)
 }
+
+func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) string {
+	if callTurnID == 0 || sessionTurnID == 0 || callTurnID == sessionTurnID {
+		return sessionPrompt
+	}
+	return ""
+}
+
