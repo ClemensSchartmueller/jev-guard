@@ -20,7 +20,19 @@ const DefaultSessionTTL = 60 * time.Minute
 var (
 	abortPattern       = regexp.MustCompile(`(?i)^\s*((stop|cancel|abort|halt|quit)\s*([!.]|$|\b(that|it|now|all|everything|execution|operation)\b)|(stop|cancel|abort|halt)!\s*.*|(don'?t|do\s+not)\s+(do\s+that|run\s+that|proceed|continue)\b)`)
 	safeSessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+
+	reservedWindowsNames = map[string]bool{
+		"CON": true, "PRN": true, "AUX": true, "NUL": true,
+		"COM1": true, "COM2": true, "COM3": true, "COM4": true,
+		"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
+		"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
+		"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+	}
 )
+
+func isReservedWindowsName(name string) bool {
+	return reservedWindowsNames[strings.ToUpper(name)]
+}
 
 // SessionState records the active user prompt and turn context for a session.
 type SessionState struct {
@@ -56,12 +68,12 @@ func SafeSessionFileName(sessionID string) string {
 		cleaned = "default"
 	}
 
-	// If the session ID has safe chars (alphanumeric, dash, underscore), use it directly with prefix.
-	if safeSessionIDRegex.MatchString(cleaned) && len(cleaned) <= 64 {
+	// If the session ID has safe chars (alphanumeric, dash, underscore) and is not a Windows reserved device name, use it directly.
+	if safeSessionIDRegex.MatchString(cleaned) && len(cleaned) <= 64 && !isReservedWindowsName(cleaned) {
 		return cleaned + ".json"
 	}
 
-	// Otherwise hash the session ID to prevent path traversal or filesystem issues.
+	// Otherwise hash the session ID to prevent path traversal, filesystem issues, or Windows reserved device collisions.
 	h := sha256.Sum256([]byte(cleaned))
 	return hex.EncodeToString(h[:16]) + ".json"
 }

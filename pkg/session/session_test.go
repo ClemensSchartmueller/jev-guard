@@ -2,6 +2,7 @@ package session
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -214,5 +215,35 @@ func TestIsJevguardPath(t *testing.T) {
 		if !IsJevguardPath(cfgFile) {
 			t.Errorf("expected config file %s to be recognized as jevguard path", cfgFile)
 		}
+	}
+}
+
+func TestSafeSessionFileName(t *testing.T) {
+	// Standard safe IDs should keep their name
+	if got := SafeSessionFileName("my-session_123"); got != "my-session_123.json" {
+		t.Errorf("expected my-session_123.json, got %s", got)
+	}
+
+	// Empty string defaults to default.json
+	if got := SafeSessionFileName(""); got != "default.json" {
+		t.Errorf("expected default.json, got %s", got)
+	}
+
+	// Windows reserved device names must NOT use direct name
+	reserved := []string{"con", "CON", "prn", "PRN", "aux", "AUX", "nul", "NUL", "com1", "COM1", "lpt9", "LPT9"}
+	for _, name := range reserved {
+		got := SafeSessionFileName(name)
+		if strings.EqualFold(got, name+".json") {
+			t.Errorf("vulnerability: Windows reserved device name %q resulted in unsafe file %q", name, got)
+		}
+		if !strings.HasSuffix(got, ".json") {
+			t.Errorf("expected .json suffix, got %q", got)
+		}
+	}
+
+	// Unsafe characters should be hashed
+	got := SafeSessionFileName("session/with/slashes")
+	if strings.Contains(got, "/") || strings.Contains(got, "\\") {
+		t.Errorf("expected slashes to be stripped or hashed, got %s", got)
 	}
 }
