@@ -81,7 +81,34 @@ func canonicalizePath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Clean(abs), nil
+	clean := filepath.Clean(abs)
+	return resolveSymlinks(clean), nil
+}
+
+func resolveSymlinks(path string) string {
+	if realPath, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(realPath)
+	}
+
+	curr := path
+	var parts []string
+	for {
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		parts = append([]string{filepath.Base(curr)}, parts...)
+		if realParent, err := filepath.EvalSymlinks(parent); err == nil {
+			result := realParent
+			for _, part := range parts {
+				result = filepath.Join(result, part)
+			}
+			return filepath.Clean(result)
+		}
+		curr = parent
+	}
+
+	return path
 }
 
 func isSubPath(parent, child string) bool {

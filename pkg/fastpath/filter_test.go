@@ -222,3 +222,64 @@ func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
 	}
 }
 
+func TestFastPath_SensitiveFiles_Globs(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SensitiveFiles = []string{"*.pem", "*.key"}
+	filter := NewFilter(nil, cfg)
+
+	// Target path glob
+	call1 := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: "certs/server.pem",
+	}
+	res1 := filter.Evaluate(call1)
+	if res1 == nil || res1.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for glob *.pem on server.pem, got %+v", res1)
+	}
+
+	// Command argument glob
+	call2 := &harness.NormalizedToolCall{
+		ToolName: "Bash",
+		Command:  "openssl x509 -in cert.pem -text",
+	}
+	res2 := filter.Evaluate(call2)
+	if res2 == nil || res2.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for glob *.pem in command args, got %+v", res2)
+	}
+}
+
+func TestFastPath_TrustedCommands_ArgumentEscape(t *testing.T) {
+	checker := &mockBoundaryChecker{contained: false}
+	filter := NewFilter(checker, nil)
+
+	call1 := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "ls /etc",
+	}
+	res1 := filter.Evaluate(call1)
+	if res1 != nil {
+		t.Errorf("expected nil (delegation) for 'ls /etc' escaping boundary, got %+v", res1)
+	}
+
+	call2 := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff ../../other_repo",
+	}
+	res2 := filter.Evaluate(call2)
+	if res2 != nil {
+		t.Errorf("expected nil (delegation) for 'git diff ../../other_repo' escaping boundary, got %+v", res2)
+	}
+
+	// Contained argument should be allowed
+	checker.contained = true
+	call3 := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff HEAD~1",
+	}
+	res3 := filter.Evaluate(call3)
+	if res3 == nil || res3.Decision != harness.DecisionAllow {
+		t.Errorf("expected ALLOW for contained git diff, got %+v", res3)
+	}
+}
+
+
