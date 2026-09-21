@@ -58,7 +58,9 @@ func runGate() int {
 				_ = cfg.LogAudit(call, result)
 				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 			}
-			call.UserIntent = sessState.Prompt
+			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
+				call.UserIntent = intent
+			}
 		}
 	}
 
@@ -161,3 +163,11 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	}
 	return outputHarnessVerdict(call, res)
 }
+
+func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) string {
+	if callTurnID == 0 || sessionTurnID == 0 || callTurnID == sessionTurnID {
+		return sessionPrompt
+	}
+	return ""
+}
+
