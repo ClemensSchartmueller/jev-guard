@@ -46,7 +46,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
-          go build -trimpath -ldflags="-s -w" -o dist/${{ matrix.output }} main.go
+          go build -trimpath -ldflags="-s -w -X jev-guard/pkg/cli.Version=${{ github.ref_name }} -X jev-guard/pkg/cli.Commit=${{ github.sha }} -X 'jev-guard/pkg/cli.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" -o dist/${{ matrix.output }} main.go
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4

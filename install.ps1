@@ -20,7 +20,11 @@ if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go"))
     Write-Host "Building jev-guard from local source with Go..." -ForegroundColor Yellow
     go build -ldflags="-s -w" -o $BinaryTarget .\main.go
 } else {
-    $Arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
+    if (![Environment]::Is64BitOperatingSystem) {
+        Write-Error "Unsupported architecture: 32-bit Windows is not supported by prebuilt binaries. Please install Go and compile from source."
+        exit 1
+    }
+    $Arch = "amd64"
     $Repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "ClemensSchartmueller/jev-guard" }
     $DownloadUrl = if ($Version -eq "latest") {
         "https://github.com/$Repo/releases/latest/download/jev-guard-windows-$Arch.exe"
