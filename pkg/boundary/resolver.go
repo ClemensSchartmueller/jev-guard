@@ -3,7 +3,9 @@ package boundary
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -50,12 +52,12 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	absPath := targetPath
-	if !filepath.IsAbs(targetPath) && !isSlashRoot(targetPath) {
+	if !isAbsPath(targetPath) {
 		baseDir := cwd
 		if baseDir == "" {
 			baseDir, _ = os.Getwd()
 		}
-		absPath = filepath.Join(baseDir, targetPath)
+		absPath = joinPaths(baseDir, targetPath)
 	}
 
 	cleanTarget, err := canonicalizePath(absPath)
@@ -72,11 +74,43 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	return false, nil
 }
 
+func isAbsPath(p string) bool {
+	if filepath.IsAbs(p) || isSlashRoot(p) {
+		return true
+	}
+	if isWindowsDriveAbs(p) {
+		return true
+	}
+	return false
+}
+
 func isSlashRoot(p string) bool {
 	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\")
 }
 
+func isWindowsDriveAbs(p string) bool {
+	return len(p) >= 3 && isDriveLetter(p[0]) && p[1] == ':' && (p[2] == '/' || p[2] == '\\')
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func normalizeSeparators(p string) string {
+	return strings.ReplaceAll(p, "\\", "/")
+}
+
+func joinPaths(base, rel string) string {
+	cleanBase := normalizeSeparators(base)
+	cleanRel := normalizeSeparators(rel)
+	return path.Join(cleanBase, cleanRel)
+}
+
 func canonicalizePath(path string) (string, error) {
+	if runtime.GOOS != "windows" && isWindowsDriveAbs(path) {
+		return normalizeSeparators(filepath.Clean(path)), nil
+	}
+
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
@@ -112,20 +146,19 @@ func resolveSymlinks(path string) string {
 }
 
 func isSubPath(parent, child string) bool {
-	// Normalize drive letters and case on Windows for accurate boundary checks
-	normParent := strings.ToLower(filepath.Clean(parent))
-	normChild := strings.ToLower(filepath.Clean(child))
+	// Normalize drive letters and separators for accurate cross-platform boundary checks
+	normParent := strings.ToLower(normalizeSeparators(filepath.Clean(parent)))
+	normChild := strings.ToLower(normalizeSeparators(filepath.Clean(child)))
 
 	if normParent == normChild {
 		return true
 	}
 
-	parentWithSep := normParent
-	if !strings.HasSuffix(parentWithSep, string(filepath.Separator)) {
-		parentWithSep += string(filepath.Separator)
+	if !strings.HasSuffix(normParent, "/") {
+		normParent += "/"
 	}
 
-	return strings.HasPrefix(normChild, parentWithSep)
+	return strings.HasPrefix(normChild, normParent)
 }
 
 func findGitRoot(startDir string) string {
