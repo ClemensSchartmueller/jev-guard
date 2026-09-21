@@ -250,7 +250,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
 	filter := NewDefaultFilter()
 
-	// Without intent -> should ask immediately
+	// Without intent -> should ask immediately for write
 	callWithoutIntent := &harness.NormalizedToolCall{
 		ToolName:   "write_to_file",
 		TargetPath: ".env",
@@ -258,10 +258,32 @@ func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
 	}
 	resAsk := filter.Evaluate(callWithoutIntent)
 	if resAsk == nil || resAsk.Decision != harness.DecisionAsk {
-		t.Fatalf("expected ASK for .env without intent, got %+v", resAsk)
+		t.Fatalf("expected ASK for write_to_file .env without intent, got %+v", resAsk)
 	}
 
-	// With intent -> should defer (return nil) to semantic evaluation
+	// Without intent -> should ask immediately for read tools (view_file)
+	callReadWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".env",
+		UserIntent: "",
+	}
+	resReadAsk := filter.Evaluate(callReadWithoutIntent)
+	if resReadAsk == nil || resReadAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for view_file .env without intent, got %+v", resReadAsk)
+	}
+
+	// Without intent -> should ask immediately for trusted read command (cat .env)
+	callCmdWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "run_command",
+		Command:    "cat .env",
+		UserIntent: "",
+	}
+	resCmdAsk := filter.Evaluate(callCmdWithoutIntent)
+	if resCmdAsk == nil || resCmdAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for cat .env without intent, got %+v", resCmdAsk)
+	}
+
+	// With intent -> should defer (return nil) for write
 	callWithIntent := &harness.NormalizedToolCall{
 		ToolName:   "write_to_file",
 		TargetPath: ".env",
@@ -269,7 +291,29 @@ func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
 	}
 	resDefer := filter.Evaluate(callWithIntent)
 	if resDefer != nil {
-		t.Fatalf("expected nil (deferred to Jev) when intent is present, got %+v", resDefer)
+		t.Fatalf("expected nil (deferred to Jev) for write with intent, got %+v", resDefer)
+	}
+
+	// With intent -> should defer (return nil) for view_file, NEVER auto-allow
+	callReadWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".env",
+		UserIntent: "Inspect database configuration",
+	}
+	resReadDefer := filter.Evaluate(callReadWithIntent)
+	if resReadDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) for view_file with intent, got %+v", resReadDefer)
+	}
+
+	// With intent -> should defer (return nil) for trusted command (cat .env), NEVER auto-allow
+	callCmdWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "run_command",
+		Command:    "cat .env",
+		UserIntent: "Inspect database configuration",
+	}
+	resCmdDefer := filter.Evaluate(callCmdWithIntent)
+	if resCmdDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) for cat .env with intent, got %+v", resCmdDefer)
 	}
 }
 

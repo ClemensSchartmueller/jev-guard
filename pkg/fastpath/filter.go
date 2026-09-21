@@ -54,6 +54,11 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	}
 
 	if reason := f.checkSensitive(call); reason != "" {
+		if strings.TrimSpace(call.UserIntent) != "" {
+			// Defer to TypeSafe AI for semantic intent verification.
+			// Never fall through to trusted read operations for sensitive files.
+			return nil
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     reason,
@@ -101,11 +106,6 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
-	// If the user has active context intent, defer sensitive evaluation to TypeSafe AI
-	if call != nil && strings.TrimSpace(call.UserIntent) != "" {
-		return ""
-	}
-
 	target := strings.ToLower(call.TargetPath)
 	cmd := strings.ToLower(call.Command)
 	baseName := strings.ToLower(filepath.Base(call.TargetPath))
