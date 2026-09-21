@@ -15,7 +15,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 - **Sub-1ms Local Invariant & Latency Gate**:
   - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, AWS keys, and private certificates before network calls.
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`).
-  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass.
+  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, or newlines) and outbound network fetch operations (`read_url_content`) are strictly routed to TypeSafe AI System One for semantic evaluation.
   - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
 - **Platform-Specific Safety Enforcement**:
   - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
@@ -86,14 +86,16 @@ jev-guard --version
 # Show help and command reference
 jev-guard --help
 
-# Ingest active user prompt/intent into the session cache (called by hooks)
+# Ingest active user prompt/intent into the session cache (supports space-separated or --flag=value)
 jev-guard ingest --session "my-session" --turn 1 --prompt "Delete the build folder"
+jev-guard ingest --session="my-session" --turn=1 --prompt="Delete the build folder"
 
 # Or pipe a hook event JSON payload directly on stdin
 cat hook_payload.json | jev-guard ingest
 
 # Clear active intent for a specific session (or all sessions)
 jev-guard clear-intent --session "my-session"
+jev-guard clear-intent --session="my-session"
 jev-guard clear-intent --all
 jev-guard cache clear
 
@@ -265,7 +267,7 @@ Configure `PreInvocation` to capture turn intent and `PreToolUse` for tool-level
     ],
     "PreToolUse": [
       {
-        "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource",
+        "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
         "hooks": [
           {
             "type": "command",
