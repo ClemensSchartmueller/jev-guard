@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"jev-guard/pkg/session"
 )
 
 var (
@@ -51,6 +53,8 @@ func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
 		Cwd:            cwd,
 		WorkspaceRoots: payload.WorkspacePaths,
 		RawArgs:        payload.ToolCall.Args,
+		SessionID:      payload.ConversationID,
+		TurnID:         payload.InvocationNum,
 	}, nil
 }
 
@@ -76,6 +80,15 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 	cmd, target := extractCommandAndTarget(payload.ToolInput)
 	cwd := resolveClaudeCwd(&payload)
 
+	sid := payload.SessionID
+	if sid == "" && payload.ToolInput != nil {
+		if val, exists := payload.ToolInput["session_id"]; exists {
+			if strVal, ok := val.(string); ok {
+				sid = strVal
+			}
+		}
+	}
+
 	return &NormalizedToolCall{
 		Harness:        HarnessClaudeCode,
 		ToolName:       payload.ToolName,
@@ -84,6 +97,49 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		Cwd:            cwd,
 		WorkspaceRoots: nil,
 		RawArgs:        payload.ToolInput,
+		SessionID:      sid,
+	}, nil
+}
+
+// ParseIngestPayload parses a JSON payload from UserPromptSubmit (Claude) or PreInvocation (Antigravity).
+func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, ErrEmptyPayload
+	}
+
+	var payload IngestPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ingest payload: %w", err)
+	}
+
+	sid := payload.SessionID
+	if sid == "" {
+		sid = payload.ConversationID
+	}
+	if sid == "" {
+		sid = "default"
+	}
+
+	turn := payload.TurnID
+	if turn == 0 {
+		turn = payload.InvocationNum
+	}
+	if turn == 0 {
+		turn = payload.StepIdx
+	}
+
+	prompt := payload.Prompt
+	if prompt == "" {
+		prompt = payload.UserPrompt
+	}
+	if prompt == "" {
+		prompt = payload.UserMessage
+	}
+
+	return &session.SessionState{
+		SessionID: sid,
+		TurnID:    turn,
+		Prompt:    prompt,
 	}, nil
 }
 
