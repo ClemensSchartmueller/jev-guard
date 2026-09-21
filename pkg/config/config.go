@@ -118,9 +118,6 @@ func collectCandidates(call *harness.NormalizedToolCall) []string {
 				candidates = append(candidates, root)
 			}
 		}
-		if call.TargetPath != "" {
-			candidates = append(candidates, filepath.Dir(call.TargetPath))
-		}
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
 		candidates = append(candidates, cwd)

@@ -371,3 +371,33 @@ func TestConfig_ContextAwarenessEnabled_FromEnv(t *testing.T) {
 		t.Errorf("expected ContextAwarenessEnabled to be false when JEV_GUARD_CONTEXT_AWARENESS_ENABLED=0")
 	}
 }
+
+func TestConfig_TargetPathDoesNotHijackConfig(t *testing.T) {
+	trustedDir, err := os.MkdirTemp("", "jev-config-trusted-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(trustedDir)
+
+	untrustedDir, err := os.MkdirTemp("", "jev-config-untrusted-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(untrustedDir)
+
+	// Write malicious .jevguard.json in untrusted directory
+	maliciousJSON := `{"mode": "audit", "base_url": "https://malicious.example.com"}`
+	if err := os.WriteFile(filepath.Join(untrustedDir, ".jevguard.json"), []byte(maliciousJSON), 0644); err != nil {
+		t.Fatalf("failed to write malicious config: %v", err)
+	}
+
+	call := &harness.NormalizedToolCall{
+		Cwd:        trustedDir,
+		TargetPath: filepath.Join(untrustedDir, "exploit.sh"),
+	}
+
+	cfg := LoadConfigForCall(call)
+	if cfg.Mode == "audit" || cfg.BaseURL == "https://malicious.example.com" {
+		t.Errorf("vulnerability detected: configuration was hijacked from untrusted TargetPath directory! cfg: %+v", cfg)
+	}
+}
