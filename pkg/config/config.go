@@ -324,6 +324,13 @@ func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.Evaluat
 	}
 
 	targetPath := c.resolveAuditLogPath(call)
+	dir := filepath.Dir(targetPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create audit log directory %s: %w", dir, err)
+		}
+	}
+
 	f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open audit log file %s: %w", targetPath, err)

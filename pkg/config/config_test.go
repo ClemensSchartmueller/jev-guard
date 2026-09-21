@@ -175,6 +175,41 @@ func TestConfig_LogAudit(t *testing.T) {
 	}
 }
 
+func TestConfig_LogAudit_CreatesParentDirectory(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-audit-nested-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	nestedLogPath := filepath.Join(tempDir, "nested", "subfolder", "audit.log")
+	cfg := &Config{
+		AuditLogPath: nestedLogPath,
+	}
+
+	call := &harness.NormalizedToolCall{
+		ToolName: "Bash",
+		Command:  "git status",
+	}
+	res := &harness.EvaluationResult{
+		Decision: harness.DecisionAllow,
+		Reason:   "Safe command",
+		Source:   "fastpath_trusted",
+	}
+
+	if err := cfg.LogAudit(call, res); err != nil {
+		t.Fatalf("expected LogAudit to create missing parent directories, got error: %v", err)
+	}
+
+	content, err := os.ReadFile(nestedLogPath)
+	if err != nil {
+		t.Fatalf("failed to read nested audit log: %v", err)
+	}
+	if len(content) == 0 {
+		t.Errorf("nested audit log file was empty")
+	}
+}
+
 func TestConfig_FastpathEnabled_Default(t *testing.T) {
 	cfg := DefaultConfig()
 	if !cfg.IsFastpathEnabled() {
