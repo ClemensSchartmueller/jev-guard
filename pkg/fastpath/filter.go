@@ -270,7 +270,7 @@ func isSafeReadTool(toolName string) bool {
 }
 
 func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&", "|", ">", "`", "$(", "\n", "\r"}
+	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
 	for _, op := range operators {
 		if strings.Contains(cmd, op) {
 			return true

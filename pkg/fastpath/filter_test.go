@@ -87,6 +87,11 @@ func TestFastPath_TrustedCommands(t *testing.T) {
 		"git status\r\nrm -rf /",
 		"git status | grep foo",
 		"git status > out.txt",
+		"echo (Get-Process)",
+		"git status (calc)",
+		"git status $(whoami)",
+		"echo { dangerous }",
+		"ls < input.txt",
 	}
 	for _, chainedCmd := range chainedCommands {
 		callChained := &harness.NormalizedToolCall{
