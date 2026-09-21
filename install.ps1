@@ -16,7 +16,7 @@ if (!(Test-Path $InstallDir)) {
 $BinaryTarget = Join-Path $InstallDir "jev-guard.exe"
 
 # If go is installed and source is available locally, build directly
-if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go")) {
+if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go") -and (Test-Path ".\go.mod") -and ((Get-Content ".\go.mod" -Raw) -match '(?m)^module\s+jev-guard\b')) {
     Write-Host "Building jev-guard from local source with Go..." -ForegroundColor Yellow
     go build -ldflags="-s -w" -o $BinaryTarget .\main.go
 } else {

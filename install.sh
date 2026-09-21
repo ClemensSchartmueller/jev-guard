@@ -16,7 +16,7 @@ case "${ARCH}" in
   *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;;
 esac
 
-if command -v go >/dev/null 2>&1 && [ -f "./main.go" ]; then
+if command -v go >/dev/null 2>&1 && [ -f "./main.go" ] && [ -f "./go.mod" ] && grep -qE '^module[[:space:]]+jev-guard' ./go.mod; then
   echo "Building jev-guard locally from source..."
   go build -ldflags="-s -w" -o "${TARGET}" ./main.go
 else
