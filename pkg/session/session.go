@@ -17,7 +17,7 @@ import (
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
 const DefaultSessionTTL = 60 * time.Minute
 
-var abortPattern = regexp.MustCompile(`(?i)^\s*(stop|cancel|abort|wait|don't|dont|halt|quit)\b`)
+var abortPattern = regexp.MustCompile(`(?i)^\s*((stop|cancel|abort|halt|quit)\s*([!.]|$|\b(that|it|now|all|everything|execution|operation)\b)|(stop|cancel|abort|halt)!\s*.*|(don'?t|do\s+not)\s+(do\s+that|run\s+that|proceed|continue)\b)`)
 
 // SessionState records the active user prompt and turn context for a session.
 type SessionState struct {

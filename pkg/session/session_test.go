@@ -80,6 +80,23 @@ func TestSession_NegativeIntentAbort(t *testing.T) {
 	}
 }
 
+func TestSession_NonAbortInstructions(t *testing.T) {
+	nonAborts := []string{
+		"don't forget to run unit tests",
+		"dont modify package.json",
+		"wait for the build to finish before committing",
+		"stop the docker container named my-app",
+		"quit the background daemon and restart",
+		"halt if you see compiler warnings",
+	}
+
+	for _, prompt := range nonAborts {
+		if IsNegativeIntent(prompt) {
+			t.Errorf("expected prompt %q NOT to be classified as negative abort intent", prompt)
+		}
+	}
+}
+
 func TestSession_Clear(t *testing.T) {
 	setupTestJevguardDir(t)
 
