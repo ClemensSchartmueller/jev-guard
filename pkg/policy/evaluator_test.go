@@ -164,3 +164,21 @@ func TestPolicy_Resolve_ExplicitIntent_CatastrophicCredentialAccessCappedAtForce
 		t.Fatalf("expected force_ask cap for catastrophic credential operation explicitly requested, got %v", res.Decision)
 	}
 }
+
+func TestPolicy_Resolve_ExplicitIntent_LowConfidenceRequiresConfirmation(t *testing.T) {
+	policy := NewDefaultPolicy()
+	j := &evaluator.JevJudgments{
+		IsWorkspaceContained:  0.98,
+		DestructivePotential:  1.9,
+		ViolationCategory:     "none",
+		DestructiveConfidence: 0.9,
+		IntentAlignment:       "explicitly_requested",
+		IntentConfidence:      0.45, // Below default 0.70 threshold
+	}
+
+	res := policy.Resolve(j, true, nil)
+	// Low confidence must not auto-allow; it must fall back to asking confirmation
+	if res.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for low confidence explicit intent, got %v", res.Decision)
+	}
+}

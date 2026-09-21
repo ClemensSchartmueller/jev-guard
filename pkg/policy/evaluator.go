@@ -11,6 +11,7 @@ import (
 type Policy struct {
 	MaxAllowScore         float64
 	MinContainedThreshold float64
+	MinIntentConfidence   float64
 }
 
 // NewDefaultPolicy creates a standard policy with calibrated thresholds.
@@ -18,6 +19,7 @@ func NewDefaultPolicy() *Policy {
 	return &Policy{
 		MaxAllowScore:         1.2,
 		MinContainedThreshold: 0.85,
+		MinIntentConfidence:   0.70,
 	}
 }
 
@@ -45,7 +47,11 @@ func (p *Policy) Resolve(j *evaluator.JevJudgments, boundaryContained bool, eval
 }
 
 func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.EvaluationResult {
-	isExplicitlyRequested := j.IntentAlignment == "explicitly_requested"
+	minConfidence := p.MinIntentConfidence
+	if minConfidence <= 0 {
+		minConfidence = 0.70
+	}
+	isExplicitlyRequested := j.IntentAlignment == "explicitly_requested" && j.IntentConfidence >= minConfidence
 
 	// Strict Catastrophic Ceiling: Operations with catastrophic blast radius (score > 2.5)
 	// strictly cap at force_ask even if explicitly commanded by the user, and are blocked (deny) otherwise.
