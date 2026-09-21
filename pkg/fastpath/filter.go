@@ -235,13 +235,32 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return true
+		return false
 	}
 
 	tokens := strings.Fields(argsStr)
-	for _, token := range tokens {
+	for i := 0; i < len(tokens); i++ {
+		token := tokens[i]
 		cleanArg := strings.Trim(token, `"'`)
+
+		// Disallow file output/writing flags in trusted read commands - defer to semantic evaluation
+		lowerArg := strings.ToLower(cleanArg)
+		if lowerArg == "-o" || strings.HasPrefix(lowerArg, "-o=") || strings.HasPrefix(lowerArg, "--output") || strings.HasPrefix(lowerArg, "--output-directory") {
+			return false
+		}
+
+		// Inspect --flag=path syntax
 		if strings.HasPrefix(cleanArg, "-") {
+			if strings.Contains(cleanArg, "=") {
+				parts := strings.SplitN(cleanArg, "=", 2)
+				val := strings.Trim(parts[1], `"'`)
+				if isPotentialPath(val) {
+					contained, err := checker.IsPathContained(val, call.Cwd)
+					if err != nil || !contained {
+						return false
+					}
+				}
+			}
 			continue
 		}
 

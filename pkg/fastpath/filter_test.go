@@ -460,6 +460,33 @@ func TestFastPath_TrustedCommands_ArgumentEscape(t *testing.T) {
 	if res3 == nil || res3.Decision != harness.DecisionAllow {
 		t.Errorf("expected ALLOW for contained git diff, got %+v", res3)
 	}
+
+	// Output writing flags must be rejected (deferred to semantic evaluation)
+	callOutputFlag := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff --output=diff.txt",
+	}
+	if resOut := filter.Evaluate(callOutputFlag); resOut != nil {
+		t.Errorf("expected nil (delegation) for git diff with --output flag, got %+v", resOut)
+	}
+
+	callOFlag := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff -o out.patch",
+	}
+	if resO := filter.Evaluate(callOFlag); resO != nil {
+		t.Errorf("expected nil (delegation) for git diff with -o flag, got %+v", resO)
+	}
+
+	// Flag with path escaping boundary
+	checker.contained = false
+	callFlagEscape := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git log --file=../../outside.txt",
+	}
+	if resFlagEsc := filter.Evaluate(callFlagEscape); resFlagEsc != nil {
+		t.Errorf("expected nil (delegation) for git log with escaping --file=... argument, got %+v", resFlagEsc)
+	}
 }
 
 
