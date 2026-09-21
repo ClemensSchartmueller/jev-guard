@@ -98,6 +98,33 @@ func TestSession_NonAbortInstructions(t *testing.T) {
 	}
 }
 
+func TestSession_ConversationalAbortInstructions(t *testing.T) {
+	aborts := []string{
+		"stop",
+		"please stop",
+		"stop please",
+		"stop running",
+		"cancel the build",
+		"cancel this task",
+		"wait, abort!",
+		"wait! stop",
+		"hey, halt execution",
+		"stop right now",
+		"abort immediately",
+		"kill the process",
+		"terminate execution",
+		"don't proceed",
+		"do not continue",
+		"Stop! Do not run that command",
+	}
+
+	for _, prompt := range aborts {
+		if !IsNegativeIntent(prompt) {
+			t.Errorf("expected prompt %q TO be classified as negative abort intent", prompt)
+		}
+	}
+}
+
 func TestSession_Clear(t *testing.T) {
 	setupTestJevguardDir(t)
 

@@ -18,7 +18,7 @@ import (
 const DefaultSessionTTL = 60 * time.Minute
 
 var (
-	abortPattern       = regexp.MustCompile(`(?i)^\s*((stop|cancel|abort|halt|quit)\s*([!.]|$|\b(that|it|now|all|everything|execution|operation)\b)|(stop|cancel|abort|halt)!\s*.*|(don'?t|do\s+not)\s+(do\s+that|run\s+that|proceed|continue)\b)`)
+	abortPattern       = regexp.MustCompile(`(?i)^\s*(?:(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))|(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute)\b)`)
 	safeSessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 	reservedWindowsNames = map[string]bool{
