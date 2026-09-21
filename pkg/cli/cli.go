@@ -125,22 +125,17 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
-		switch strings.ToLower(args[i]) {
-		case "-s", "--session", "--session-id", "--session_id":
-			if i+1 < len(args) {
-				sessionID = args[i+1]
-				i++
-			}
-		case "-t", "--turn", "--turn-id", "--turn_id":
-			if i+1 < len(args) {
-				fmt.Sscanf(args[i+1], "%d", &turnID)
-				i++
-			}
-		case "-p", "--prompt":
-			if i+1 < len(args) {
-				prompt = args[i+1]
-				i++
-			}
+		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
+			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
+			fmt.Sscanf(val, "%d", &turnID)
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "-p", "--prompt"); ok {
+			prompt = val
+			continue
 		}
 	}
 
@@ -201,12 +196,11 @@ func (r *Runner) handleClearIntent(args []string) (Action, int) {
 	clearAll := false
 
 	for i := 0; i < len(args); i++ {
+		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
+			sessionID = val
+			continue
+		}
 		switch strings.ToLower(args[i]) {
-		case "-s", "--session", "--session-id", "--session_id":
-			if i+1 < len(args) {
-				sessionID = args[i+1]
-				i++
-			}
 		case "-a", "--all":
 			clearAll = true
 		}
@@ -298,3 +292,27 @@ Description:
   via 'jev-guard ingest' (invoked by UserPromptSubmit or PreInvocation hooks)
   to authorize explicitly requested operations and prevent false denials.`
 }
+
+// parseFlagValue extracts the value for a given flag either from --flag=value or from a separate next argument.
+func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
+	arg := args[*i]
+	lower := strings.ToLower(arg)
+
+	for _, name := range flagNames {
+		lowerName := strings.ToLower(name)
+		if lower == lowerName {
+			if *i+1 < len(args) {
+				*i++
+				return strings.Trim(args[*i], `"'`), true
+			}
+			return "", true
+		}
+		prefix := lowerName + "="
+		if strings.HasPrefix(lower, prefix) {
+			rawVal := arg[len(prefix):]
+			return strings.Trim(rawVal, `"'`), true
+		}
+	}
+	return "", false
+}
+

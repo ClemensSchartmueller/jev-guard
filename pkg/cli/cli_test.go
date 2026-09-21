@@ -132,6 +132,24 @@ func TestEvaluateArgs_IngestFlags(t *testing.T) {
 	}
 }
 
+func TestEvaluateArgs_IngestEqualsSyntax(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"ingest", "--session=equals-sess", "--turn=3", "--prompt=Clean up cache directory"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "equals-sess") || !strings.Contains(stdout.String(), "turn: 3") {
+		t.Errorf("expected output to mention equals-sess and turn 3, got %q", stdout.String())
+	}
+}
+
 func TestEvaluateArgs_IngestStdin(t *testing.T) {
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
 
@@ -186,6 +204,26 @@ func TestEvaluateArgs_ClearIntent(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Session intent cleared") {
 		t.Errorf("expected clear output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_ClearIntentEqualsSyntax(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	// First ingest
+	_, _ = runner.EvaluateArgs([]string{"ingest", "--session=to-clear-eq", "--prompt=Test"})
+	stdout.Reset()
+
+	// Clear specific using equals syntax
+	action, code := runner.EvaluateArgs([]string{"clear-intent", "--session=to-clear-eq"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "Session intent cleared for session 'to-clear-eq'") {
+		t.Errorf("expected clear output for to-clear-eq, got %q", stdout.String())
 	}
 }
 
