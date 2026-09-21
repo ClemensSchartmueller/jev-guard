@@ -1,5 +1,11 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "command": "jev-guard ingest"
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",

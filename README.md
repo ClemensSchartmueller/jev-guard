@@ -156,6 +156,7 @@ Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) 
   "timeout_ms": 1500,
   "model": "jev-latest",
   "fastpath_enabled": true,
+  "context_awareness_enabled": true,
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
