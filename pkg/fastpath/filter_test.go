@@ -489,4 +489,39 @@ func TestFastPath_TrustedCommands_ArgumentEscape(t *testing.T) {
 	}
 }
 
+func TestFastPath_ReadResource_FileURIs(t *testing.T) {
+	checker := &mockBoundaryChecker{contained: true}
+	filter := NewFilter(checker, nil)
+
+	// Contained file URI
+	callContained := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "file:///workspace/project/data.json",
+	}
+	resContained := filter.Evaluate(callContained)
+	if resContained == nil || resContained.Decision != harness.DecisionAllow {
+		t.Fatalf("expected ALLOW for contained file URI, got %+v", resContained)
+	}
+
+	// Escaping file URI
+	checker.contained = false
+	callEscape := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "file:///C:/Windows/system.ini",
+	}
+	resEscape := filter.Evaluate(callEscape)
+	if resEscape == nil || resEscape.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for escaping file URI, got %+v", resEscape)
+	}
+
+	// Non-file custom URI (e.g. database/external resource) must defer to semantic evaluation
+	callExternal := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "postgres://db.internal/secrets",
+	}
+	if resExt := filter.Evaluate(callExternal); resExt != nil {
+		t.Fatalf("expected nil (delegation to Jev) for external URI, got %+v", resExt)
+	}
+}
+
 

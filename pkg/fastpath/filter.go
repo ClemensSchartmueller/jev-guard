@@ -106,9 +106,13 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
-	target := filepath.ToSlash(strings.ToLower(call.TargetPath))
+	targetRaw := call.TargetPath
+	if isFileURI(targetRaw) {
+		targetRaw = extractFilePathFromURI(targetRaw)
+	}
+	target := filepath.ToSlash(strings.ToLower(targetRaw))
 	cmd := filepath.ToSlash(strings.ToLower(call.Command))
-	baseName := strings.ToLower(filepath.Base(call.TargetPath))
+	baseName := strings.ToLower(filepath.Base(targetRaw))
 	cmdTokens := strings.Fields(cmd)
 
 	for _, s := range f.sensitiveFiles {
@@ -163,6 +167,10 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
 		return ""
 	}
 
+	if isFileURI(target) {
+		target = extractFilePathFromURI(target)
+	}
+
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
 		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target)
@@ -193,7 +201,7 @@ func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) Bounda
 }
 
 func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) bool {
-	if isSafeReadTool(call.ToolName) {
+	if isSafeReadTool(call) {
 		return true
 	}
 	return f.isTrustedCommand(call)
@@ -288,11 +296,20 @@ func isPotentialPath(arg string) bool {
 	return false
 }
 
-func isSafeReadTool(toolName string) bool {
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
+func isSafeReadTool(call *harness.NormalizedToolCall) bool {
+	if call == nil {
+		return false
+	}
+	toolName := strings.ToLower(strings.TrimSpace(call.ToolName))
+	switch toolName {
 	case "view_file", "view", "read_file", "readlocalfile",
-		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob",
-		"read_resource":
+		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob":
+		return true
+	case "read_resource":
+		target := strings.TrimSpace(call.TargetPath)
+		if isURL(target) || (isCustomURI(target) && !isFileURI(target)) {
+			return false
+		}
 		return true
 	default:
 		return false
@@ -311,5 +328,38 @@ func containsChainingOperators(cmd string) bool {
 
 func isURL(p string) bool {
 	lower := strings.ToLower(p)
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+	if strings.HasPrefix(lower, "file://") {
+		return false
+	}
+	return strings.Contains(lower, "://")
+}
+
+func isFileURI(p string) bool {
+	return strings.HasPrefix(strings.ToLower(p), "file://")
+}
+
+func isCustomURI(p string) bool {
+	lower := strings.ToLower(p)
+	return strings.Contains(lower, "://")
+}
+
+func extractFilePathFromURI(uriStr string) string {
+	lower := strings.ToLower(uriStr)
+	if strings.HasPrefix(lower, "file:///") {
+		trimmed := uriStr[len("file:///"):]
+		// On Windows: file:///C:/path -> C:/path
+		if len(trimmed) >= 2 && isDriveLetter(trimmed[0]) && trimmed[1] == ':' {
+			return trimmed
+		}
+		// On POSIX: file:///etc/passwd -> /etc/passwd
+		return "/" + trimmed
+	}
+	if strings.HasPrefix(lower, "file://") {
+		return uriStr[len("file://"):]
+	}
+	return uriStr
+}
+
+func isDriveLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
