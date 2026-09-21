@@ -17,6 +17,26 @@ func TestConfig_Defaults(t *testing.T) {
 	if cfg.Timeout != 1500*time.Millisecond {
 		t.Errorf("expected timeout 1500ms, got %v", cfg.Timeout)
 	}
+
+	expectedSensitive := []string{
+		".npmrc",
+		".yarnrc",
+		".pypirc",
+		".git-credentials",
+		"id_ecdsa",
+		"id_dsa",
+		"kubeconfig",
+		".kube/",
+	}
+	sensitiveSet := make(map[string]bool)
+	for _, s := range cfg.SensitiveFiles {
+		sensitiveSet[s] = true
+	}
+	for _, exp := range expectedSensitive {
+		if !sensitiveSet[exp] {
+			t.Errorf("expected sensitive files to contain %q", exp)
+		}
+	}
 }
 
 func TestConfig_LoadConfigFile(t *testing.T) {
