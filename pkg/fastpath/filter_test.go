@@ -78,13 +78,37 @@ func TestFastPath_TrustedCommands(t *testing.T) {
 	}
 
 	// Should NOT allow if chained with other commands
-	call3 := &harness.NormalizedToolCall{
-		ToolName: "run_command",
-		Command:  "git status; rm -rf /",
+	chainedCommands := []string{
+		"git status; rm -rf /",
+		"git status && rm -rf /",
+		"git status & rm -rf /",
+		"git status\nrm -rf /",
+		"git status \n rm -rf /",
+		"git status\r\nrm -rf /",
+		"git status | grep foo",
+		"git status > out.txt",
 	}
-	res3 := filter.Evaluate(call3)
-	if res3 != nil {
-		t.Errorf("expected nil (delegation to Jev) for chained command, got %+v", res3)
+	for _, chainedCmd := range chainedCommands {
+		callChained := &harness.NormalizedToolCall{
+			ToolName: "run_command",
+			Command:  chainedCmd,
+		}
+		if resChained := filter.Evaluate(callChained); resChained != nil {
+			t.Errorf("expected nil (delegation to Jev) for chained command %q, got %+v", chainedCmd, resChained)
+		}
+	}
+}
+
+func TestFastPath_ReadUrlContent_DelegatesToSemantic(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	call := &harness.NormalizedToolCall{
+		ToolName:   "read_url_content",
+		TargetPath: "https://example.com/docs",
+	}
+	res := filter.Evaluate(call)
+	if res != nil {
+		t.Errorf("expected nil (pass-through to semantic evaluator for outbound HTTP fetch), got %+v", res)
 	}
 }
 

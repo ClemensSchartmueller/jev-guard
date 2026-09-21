@@ -262,7 +262,7 @@ func isSafeReadTool(toolName string) bool {
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "view_file", "view", "read_file", "readlocalfile",
 		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob",
-		"read_url_content", "read_resource":
+		"read_resource":
 		return true
 	default:
 		return false
@@ -270,7 +270,7 @@ func isSafeReadTool(toolName string) bool {
 }
 
 func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&&", "||", "|", ">", ">>", "`", "$("}
+	operators := []string{";", "&", "|", ">", "`", "$(", "\n", "\r"}
 	for _, op := range operators {
 		if strings.Contains(cmd, op) {
 			return true
