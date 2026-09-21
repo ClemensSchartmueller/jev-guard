@@ -283,6 +283,24 @@ func TestFastPath_AntiTampering(t *testing.T) {
 	if resRelTarget == nil || resRelTarget.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for relative path targeting .jevguard, got %+v", resRelTarget)
 	}
+
+	callConfig := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".jevguard.json",
+	}
+	resConfig := filter.Evaluate(callConfig)
+	if resConfig == nil || resConfig.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for reading .jevguard.json, got %+v", resConfig)
+	}
+
+	callConfigAlt := &harness.NormalizedToolCall{
+		ToolName:   "read_file",
+		TargetPath: "jevguard.json",
+	}
+	resConfigAlt := filter.Evaluate(callConfigAlt)
+	if resConfigAlt == nil || resConfigAlt.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for reading jevguard.json, got %+v", resConfigAlt)
+	}
 }
 
 func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {

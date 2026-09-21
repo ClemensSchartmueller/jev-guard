@@ -228,10 +228,10 @@ func IsJevguardPath(targetPath string) bool {
 		}
 	}
 
-	// Check if the path lexically contains .jevguard directory segment
+	// Check if the path lexically contains .jevguard directory or configuration segment
 	normalized := strings.ToLower(filepath.ToSlash(filepath.Clean(trimmed)))
 	for _, segment := range strings.Split(normalized, "/") {
-		if segment == ".jevguard" {
+		if segment == ".jevguard" || segment == ".jevguard.json" || segment == "jevguard.json" || segment == ".jevguard.log" {
 			return true
 		}
 	}

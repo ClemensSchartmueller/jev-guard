@@ -94,11 +94,11 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 	}
 
 	if session.IsJevguardPath(call.TargetPath) {
-		return "Direct access to jev-guard security directory is prohibited"
+		return "Direct access to jev-guard security directory or configuration file is prohibited"
 	}
 
 	lowerCmd := strings.ToLower(call.Command)
-	if strings.Contains(lowerCmd, ".jevguard") {
+	if strings.Contains(lowerCmd, ".jevguard") || strings.Contains(lowerCmd, "jevguard.json") {
 		return "Access to jev-guard configuration or session state via command is prohibited"
 	}
 

@@ -74,6 +74,9 @@ func DefaultSensitiveFiles() []string {
 		".pem",
 		".key",
 		"serviceaccount.json",
+		".jevguard.json",
+		"jevguard.json",
+		".jevguard.log",
 	}
 }
 

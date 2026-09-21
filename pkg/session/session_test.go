@@ -208,4 +208,11 @@ func TestIsJevguardPath(t *testing.T) {
 	if IsJevguardPath(relOutside) {
 		t.Errorf("expected relative workspace file %s NOT to be recognized as jevguard path", relOutside)
 	}
+
+	// Configuration and log files
+	for _, cfgFile := range []string{".jevguard.json", "jevguard.json", ".jevguard.log", "sub/.jevguard.json"} {
+		if !IsJevguardPath(cfgFile) {
+			t.Errorf("expected config file %s to be recognized as jevguard path", cfgFile)
+		}
+	}
 }
