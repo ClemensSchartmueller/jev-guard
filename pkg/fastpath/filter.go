@@ -106,13 +106,13 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
-	target := strings.ToLower(call.TargetPath)
-	cmd := strings.ToLower(call.Command)
+	target := filepath.ToSlash(strings.ToLower(call.TargetPath))
+	cmd := filepath.ToSlash(strings.ToLower(call.Command))
 	baseName := strings.ToLower(filepath.Base(call.TargetPath))
 	cmdTokens := strings.Fields(cmd)
 
 	for _, s := range f.sensitiveFiles {
-		lowerPattern := strings.ToLower(s)
+		lowerPattern := filepath.ToSlash(strings.ToLower(s))
 
 		// 1. Glob matching on target path / basename
 		if baseName != "" && baseName != "." {
@@ -139,8 +139,19 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 
 		// 3. Substring matching
 		cleanPattern := strings.TrimPrefix(lowerPattern, "*")
-		if cleanPattern != "" && (strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern)) {
-			return "Access to sensitive file or credential pattern: " + s
+		if cleanPattern != "" {
+			if strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern) {
+				return "Access to sensitive file or credential pattern: " + s
+			}
+			if strings.HasSuffix(cleanPattern, "/") {
+				cleanPatternTrimmed := strings.TrimSuffix(cleanPattern, "/")
+				if strings.HasSuffix(target, "/"+cleanPatternTrimmed) || target == cleanPatternTrimmed || strings.Contains(target, "/"+cleanPatternTrimmed+"/") {
+					return "Access to sensitive file or credential pattern: " + s
+				}
+				if strings.Contains(cmd, "/"+cleanPatternTrimmed+"/") || strings.Contains(cmd, " "+cleanPatternTrimmed) {
+					return "Access to sensitive file or credential pattern: " + s
+				}
+			}
 		}
 	}
 	return ""

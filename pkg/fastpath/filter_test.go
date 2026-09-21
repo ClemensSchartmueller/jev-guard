@@ -52,6 +52,25 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	if res2 == nil || res2.Decision != harness.DecisionAsk {
 		t.Errorf("expected ASK for id_rsa, got %+v", res2)
 	}
+
+	// Windows backslash path to .ssh and .aws
+	callWinSSH := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: `C:\Users\User\.ssh\config`,
+	}
+	resWinSSH := filter.Evaluate(callWinSSH)
+	if resWinSSH == nil || resWinSSH.Decision != harness.DecisionAsk {
+		t.Errorf("expected ASK for Windows .ssh path, got %+v", resWinSSH)
+	}
+
+	callWinAWS := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  `type C:\Users\User\.aws\credentials`,
+	}
+	resWinAWS := filter.Evaluate(callWinAWS)
+	if resWinAWS == nil || resWinAWS.Decision != harness.DecisionAsk {
+		t.Errorf("expected ASK for Windows .aws path, got %+v", resWinAWS)
+	}
 }
 
 func TestFastPath_TrustedCommands(t *testing.T) {
