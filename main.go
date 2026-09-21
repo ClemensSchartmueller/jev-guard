@@ -13,6 +13,7 @@ import (
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
+	"jev-guard/pkg/session"
 )
 
 func main() {
@@ -39,6 +40,23 @@ func runGate() int {
 	}
 
 	cfg := config.LoadConfigForCall(call)
+
+	if cfg.IsContextAwarenessEnabled() && call.SessionID != "" {
+		if sessState, sessErr := session.LoadSession(call.SessionID); sessErr == nil && sessState != nil {
+			if sessState.Aborted {
+				result := &harness.EvaluationResult{
+					Decision:   harness.DecisionForceAsk,
+					Reason:     "Action held: an active abort/stop signal was recorded for this session",
+					Source:     "session_aborted",
+					Confidence: 1.0,
+				}
+				_ = cfg.LogAudit(call, result)
+				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+			}
+			call.UserIntent = sessState.Prompt
+		}
+	}
+
 	result := executeGateEvaluation(call, cfg)
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {

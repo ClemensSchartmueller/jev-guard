@@ -8,6 +8,7 @@ import (
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
+	"jev-guard/pkg/session"
 )
 
 // BoundaryChecker verifies whether a target path is contained within workspace boundaries.
@@ -43,6 +44,15 @@ func NewDefaultFilter() *Filter {
 // Evaluate checks the tool call against local invariants and latency cache.
 // Returns nil if semantic analysis by TypeSafe AI (Jev) is needed.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
+	if reason := f.checkAntiTampering(call); reason != "" {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionDeny,
+			Reason:     reason,
+			Source:     "fastpath_tampering",
+			Confidence: 1.0,
+		}
+	}
+
 	if reason := f.checkSensitive(call); reason != "" {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
@@ -73,7 +83,29 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	return nil
 }
 
+func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
+	if call == nil {
+		return ""
+	}
+
+	if session.IsJevguardPath(call.TargetPath) {
+		return "Direct access to jev-guard security directory is prohibited"
+	}
+
+	lowerCmd := strings.ToLower(call.Command)
+	if strings.Contains(lowerCmd, ".jevguard") {
+		return "Access to jev-guard configuration or session state via command is prohibited"
+	}
+
+	return ""
+}
+
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+	// If the user has active context intent, defer sensitive evaluation to TypeSafe AI
+	if call != nil && strings.TrimSpace(call.UserIntent) != "" {
+		return ""
+	}
+
 	target := strings.ToLower(call.TargetPath)
 	cmd := strings.ToLower(call.Command)
 	baseName := strings.ToLower(filepath.Base(call.TargetPath))

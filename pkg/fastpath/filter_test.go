@@ -222,3 +222,54 @@ func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
 	}
 }
 
+func TestFastPath_AntiTampering(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("JEV_GUARD_HOME", tempHome)
+
+	filter := NewDefaultFilter()
+
+	callTarget := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: tempHome + "/sessions/override.json",
+	}
+	resTarget := filter.Evaluate(callTarget)
+	if resTarget == nil || resTarget.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for writing to jevguard home, got %+v", resTarget)
+	}
+
+	callCmd := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "cat ~/.jevguard/sessions/default.json",
+	}
+	resCmd := filter.Evaluate(callCmd)
+	if resCmd == nil || resCmd.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for command accessing .jevguard, got %+v", resCmd)
+	}
+}
+
+func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	// Without intent -> should ask immediately
+	callWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".env",
+		UserIntent: "",
+	}
+	resAsk := filter.Evaluate(callWithoutIntent)
+	if resAsk == nil || resAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for .env without intent, got %+v", resAsk)
+	}
+
+	// With intent -> should defer (return nil) to semantic evaluation
+	callWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".env",
+		UserIntent: "Configure DATABASE_URL in .env",
+	}
+	resDefer := filter.Evaluate(callWithIntent)
+	if resDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) when intent is present, got %+v", resDefer)
+	}
+}
+
