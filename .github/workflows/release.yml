@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Release
+    name: Build
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -48,15 +48,37 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o dist/${{ matrix.output }} main.go
 
-      - name: Generate SHA256 Checksum
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          retention-days: 1
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256 Checksums
         run: |
           cd dist
-          sha256sum ${{ matrix.output }} >> checksums.txt
+          sha256sum jev-guard-* > checksums.txt
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -35,6 +35,10 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 
 ## Installation
 
+### Prebuilt Binaries
+
+Download precompiled binaries for Linux, macOS, and Windows from the [GitHub Releases](https://github.com/ClemensSchartmueller/jev-guard/releases) page. Each release includes SHA256 checksums in `checksums.txt`.
+
 ### Local Installation
 
 Build and install directly to your local user binary directory:
