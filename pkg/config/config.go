@@ -22,9 +22,10 @@ type Config struct {
 	Timeout          time.Duration `json:"-"`
 	TimeoutMs        int           `json:"timeout_ms,omitempty"`
 	AuditLogPath     string        `json:"audit_log_path,omitempty"`
-	FastpathEnabled  *bool         `json:"fastpath_enabled,omitempty"`  // whether local fastpath filter is active
-	SensitiveFiles   []string      `json:"sensitive_files,omitempty"`
-	TrustedCommands  []string      `json:"trusted_commands,omitempty"`
+	FastpathEnabled         *bool         `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
+	ContextAwarenessEnabled *bool         `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
+	SensitiveFiles          []string      `json:"sensitive_files,omitempty"`
+	TrustedCommands         []string      `json:"trusted_commands,omitempty"`
 }
 
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
@@ -33,13 +34,15 @@ var ConfigFileNames = []string{".jevguard.json", "jevguard.json"}
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	enabled := true
+	contextAwareness := true
 	return &Config{
-		Mode:            "enforcing",
-		Timeout:         1500 * time.Millisecond,
-		TimeoutMs:       1500,
-		FastpathEnabled: &enabled,
-		SensitiveFiles:  DefaultSensitiveFiles(),
-		TrustedCommands: DefaultTrustedCommands(),
+		Mode:                    "enforcing",
+		Timeout:                 1500 * time.Millisecond,
+		TimeoutMs:               1500,
+		FastpathEnabled:         &enabled,
+		ContextAwarenessEnabled: &contextAwareness,
+		SensitiveFiles:          DefaultSensitiveFiles(),
+		TrustedCommands:         DefaultTrustedCommands(),
 	}
 }
 
@@ -49,6 +52,14 @@ func (c *Config) IsFastpathEnabled() bool {
 		return true
 	}
 	return *c.FastpathEnabled
+}
+
+// IsContextAwarenessEnabled reports whether session intent context-awareness is enabled (defaults to true).
+func (c *Config) IsContextAwarenessEnabled() bool {
+	if c.ContextAwarenessEnabled == nil {
+		return true
+	}
+	return *c.ContextAwarenessEnabled
 }
 
 // DefaultSensitiveFiles returns standard sensitive filename fragments protected by default.
@@ -218,6 +229,9 @@ func applyFilePolicies(cfg *Config, fileCfg *Config) {
 	if fileCfg.FastpathEnabled != nil {
 		cfg.FastpathEnabled = fileCfg.FastpathEnabled
 	}
+	if fileCfg.ContextAwarenessEnabled != nil {
+		cfg.ContextAwarenessEnabled = fileCfg.ContextAwarenessEnabled
+	}
 	if len(fileCfg.SensitiveFiles) > 0 {
 		cfg.SensitiveFiles = mergeUniqueStrings(cfg.SensitiveFiles, fileCfg.SensitiveFiles)
 	}
@@ -267,6 +281,11 @@ func loadEnvironment(cfg *Config) {
 		lower := strings.ToLower(strings.TrimSpace(val))
 		enabled := lower != "false" && lower != "0" && lower != "no" && lower != "off"
 		cfg.FastpathEnabled = &enabled
+	}
+	if val := os.Getenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED"); val != "" {
+		lower := strings.ToLower(strings.TrimSpace(val))
+		enabled := lower != "false" && lower != "0" && lower != "no" && lower != "off"
+		cfg.ContextAwarenessEnabled = &enabled
 	}
 }
 

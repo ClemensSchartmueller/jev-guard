@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Installing jev-guard..." -ForegroundColor Cyan
 
-$InstallDir = Join-Path $HOME ".local\bin"
+$InstallDir = Join-Path $HOME ".jevguard\bin"
 if (!(Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }

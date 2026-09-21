@@ -300,3 +300,39 @@ func TestConfig_LogAudit_RelativeResolvedWithCallCwd(t *testing.T) {
 		t.Errorf("expected audit log content, got empty file")
 	}
 }
+
+func TestConfig_ContextAwarenessEnabled_Default(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.IsContextAwarenessEnabled() {
+		t.Errorf("expected ContextAwarenessEnabled to be true by default")
+	}
+}
+
+func TestConfig_ContextAwarenessEnabled_FromFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "jev-config-ctx-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	configJSON := `{"context_awareness_enabled": false}`
+	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := LoadConfig(tempDir)
+	if cfg.IsContextAwarenessEnabled() {
+		t.Errorf("expected ContextAwarenessEnabled to be false when set in config file")
+	}
+}
+
+func TestConfig_ContextAwarenessEnabled_FromEnv(t *testing.T) {
+	os.Setenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED", "0")
+	defer os.Unsetenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED")
+
+	cfg := DefaultConfig()
+	loadEnvironment(cfg)
+	if cfg.IsContextAwarenessEnabled() {
+		t.Errorf("expected ContextAwarenessEnabled to be false when JEV_GUARD_CONTEXT_AWARENESS_ENABLED=0")
+	}
+}

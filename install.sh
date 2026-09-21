@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "Installing jev-guard..."
 
-INSTALL_DIR="${HOME}/.local/bin"
+INSTALL_DIR="${HOME}/.jevguard/bin"
 mkdir -p "${INSTALL_DIR}"
 TARGET="${INSTALL_DIR}/jev-guard"
 
@@ -30,7 +30,7 @@ chmod +x "${TARGET}"
 
 if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
   echo "Notice: ${INSTALL_DIR} is not in your PATH."
-  echo "Add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to your ~/.bashrc or ~/.zshrc."
+  echo "Add 'export PATH=\"\$HOME/.jevguard/bin:\$PATH\"' to your ~/.bashrc or ~/.zshrc."
 fi
 
 echo "jev-guard successfully installed at ${TARGET}"
