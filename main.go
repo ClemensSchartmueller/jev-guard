@@ -41,8 +41,12 @@ func runGate() int {
 
 	cfg := config.LoadConfigForCall(call)
 
-	if cfg.IsContextAwarenessEnabled() && call.SessionID != "" {
-		if sessState, sessErr := session.LoadSession(call.SessionID); sessErr == nil && sessState != nil {
+	if cfg.IsContextAwarenessEnabled() {
+		sessionID := call.SessionID
+		if sessionID == "" {
+			sessionID = "default"
+		}
+		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
 			if sessState.Aborted {
 				result := &harness.EvaluationResult{
 					Decision:   harness.DecisionForceAsk,
