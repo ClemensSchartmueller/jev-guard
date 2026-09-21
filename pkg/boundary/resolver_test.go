@@ -71,3 +71,37 @@ func TestIsPathContained_RelativeEscapes(t *testing.T) {
 		t.Errorf("expected relative escape %s to be outside workspace", escapeRelative)
 	}
 }
+
+func TestIsPathContained_SymlinkOutsideWorkspace(t *testing.T) {
+	tempWorkspace, err := os.MkdirTemp("", "jev-ws-*")
+	if err != nil {
+		t.Fatalf("failed to create temp ws: %v", err)
+	}
+	defer os.RemoveAll(tempWorkspace)
+
+	tempOutside, err := os.MkdirTemp("", "jev-outside-*")
+	if err != nil {
+		t.Fatalf("failed to create temp outside: %v", err)
+	}
+	defer os.RemoveAll(tempOutside)
+
+	symlinkPath := filepath.Join(tempWorkspace, "symlink_dir")
+	if err := os.Symlink(tempOutside, symlinkPath); err != nil {
+		t.Skipf("skipping symlink test on current environment: %v", err)
+	}
+
+	resolver, err := NewResolver([]string{tempWorkspace}, tempWorkspace)
+	if err != nil {
+		t.Fatalf("failed to create resolver: %v", err)
+	}
+
+	targetViaSymlink := filepath.Join(symlinkPath, "secret.txt")
+	contained, err := resolver.IsPathContained(targetViaSymlink, tempWorkspace)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if contained {
+		t.Errorf("expected symlink target %s pointing to %s to be recognized as outside workspace", targetViaSymlink, tempOutside)
+	}
+}
+

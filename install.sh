@@ -20,7 +20,7 @@ if command -v go >/dev/null 2>&1 && [ -f "./main.go" ]; then
   echo "Building jev-guard locally from source..."
   go build -ldflags="-s -w" -o "${TARGET}" ./main.go
 else
-  REPO="${GITHUB_REPOSITORY:-user/jev-guard}"
+  REPO="${GITHUB_REPOSITORY:-ClemensSchartmueller/jev-guard}"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/jev-guard-${OS}-${ARCH}"
   echo "Downloading ${DOWNLOAD_URL}..."
   curl -fsSL "${DOWNLOAD_URL}" -o "${TARGET}"

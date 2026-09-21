@@ -454,3 +454,66 @@ func TestParseIngestPayload_AntigravityPrompt(t *testing.T) {
 	}
 }
 
+func TestParsePayload_AntigravityGrepSearch(t *testing.T) {
+	raw := []byte(`{
+		"toolCall": {
+			"name": "grep_search",
+			"args": {
+				"SearchPath": "/outside/workspace",
+				"Query": "secret"
+			}
+		},
+		"workspacePaths": ["/inside/workspace"],
+		"conversationId": "conv-grep"
+	}`)
+
+	call, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.TargetPath != "/outside/workspace" {
+		t.Errorf("expected target path '/outside/workspace', got '%s'", call.TargetPath)
+	}
+}
+
+func TestParsePayload_AntigravityReadResource(t *testing.T) {
+	raw := []byte(`{
+		"toolCall": {
+			"name": "read_resource",
+			"args": {
+				"Uri": "file:///path/to/resource.txt"
+			}
+		},
+		"workspacePaths": ["/workspace"],
+		"conversationId": "conv-res"
+	}`)
+
+	call, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.TargetPath != "file:///path/to/resource.txt" {
+		t.Errorf("expected target path 'file:///path/to/resource.txt', got '%s'", call.TargetPath)
+	}
+}
+
+func TestParsePayload_CodexApplyPatch(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "apply_patch",
+		"tool_input": {
+			"file": "/repo/main.go",
+			"patch": "*** main.go\n--- main.go\n"
+		},
+		"cwd": "/repo"
+	}`)
+
+	call, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.TargetPath != "/repo/main.go" {
+		t.Errorf("expected target path '/repo/main.go', got '%s'", call.TargetPath)
+	}
+}
+
+

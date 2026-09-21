@@ -63,7 +63,7 @@ func TestClient_Evaluate_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 1*time.Second)
+	client := NewClient("test-key", server.URL, "jev-latest", 1*time.Second)
 
 	call := &harness.NormalizedToolCall{
 		ToolName:   "write_to_file",
@@ -87,8 +87,42 @@ func TestClient_Evaluate_Success(t *testing.T) {
 	}
 }
 
+func TestClient_Evaluate_CustomModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		if reqBody["model"] != "custom-jev-v2" {
+			http.Error(w, "unexpected model", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"model": "custom-jev-v2",
+			"answers": {
+				"is_workspace_contained": {"type": "noul", "noul": 1.0},
+				"destructive_potential": {"type": "score", "score": 0.1, "confidence": 0.9},
+				"violation_category": {"type": "choice", "choice": "none", "confidence": 0.9}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", server.URL, "custom-jev-v2", 1*time.Second)
+	judgments, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "view_file"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if judgments.IsWorkspaceContained != 1.0 {
+		t.Errorf("expected IsWorkspaceContained 1.0, got %f", judgments.IsWorkspaceContained)
+	}
+}
+
 func TestClient_Evaluate_MissingKey(t *testing.T) {
-	client := NewClient("", "", 1*time.Second)
+	client := NewClient("", "", "", 1*time.Second)
 	_, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{})
 	if err != ErrMissingAPIKey {
 		t.Errorf("expected ErrMissingAPIKey, got %v", err)
@@ -101,7 +135,7 @@ func TestClient_Evaluate_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 1*time.Second)
+	client := NewClient("test-key", server.URL, "", 1*time.Second)
 	_, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{})
 	if err == nil {
 		t.Errorf("expected error on 500 status, got nil")
@@ -144,7 +178,7 @@ func TestClient_Evaluate_WithUserIntent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient("test-key", server.URL, 1*time.Second)
+	client := NewClient("test-key", server.URL, "jev-latest", 1*time.Second)
 
 	call := &harness.NormalizedToolCall{
 		ToolName:   "run_command",

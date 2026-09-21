@@ -109,10 +109,37 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 	target := strings.ToLower(call.TargetPath)
 	cmd := strings.ToLower(call.Command)
 	baseName := strings.ToLower(filepath.Base(call.TargetPath))
+	cmdTokens := strings.Fields(cmd)
 
 	for _, s := range f.sensitiveFiles {
 		lowerPattern := strings.ToLower(s)
-		if strings.Contains(target, lowerPattern) || strings.Contains(baseName, lowerPattern) || strings.Contains(cmd, lowerPattern) {
+
+		// 1. Glob matching on target path / basename
+		if baseName != "" && baseName != "." {
+			if matched, _ := filepath.Match(lowerPattern, baseName); matched {
+				return "Access to sensitive file or credential pattern: " + s
+			}
+		}
+		if target != "" {
+			if matched, _ := filepath.Match(lowerPattern, target); matched {
+				return "Access to sensitive file or credential pattern: " + s
+			}
+		}
+
+		// 2. Glob matching on command arguments
+		if strings.Contains(lowerPattern, "*") || strings.Contains(lowerPattern, "?") {
+			for _, token := range cmdTokens {
+				cleanToken := strings.Trim(token, `"'`)
+				tokenBase := strings.ToLower(filepath.Base(cleanToken))
+				if matched, _ := filepath.Match(lowerPattern, tokenBase); matched {
+					return "Access to sensitive file or credential pattern: " + s
+				}
+			}
+		}
+
+		// 3. Substring matching
+		cleanPattern := strings.TrimPrefix(lowerPattern, "*")
+		if cleanPattern != "" && (strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern)) {
 			return "Access to sensitive file or credential pattern: " + s
 		}
 	}
@@ -171,11 +198,62 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) bool {
 		return false
 	}
 
+	matched := false
+	var matchedPrefix string
 	for _, trusted := range f.trustedCommands {
 		trustedLower := strings.ToLower(trusted)
 		if trimmedCmd == trustedLower || strings.HasPrefix(trimmedCmd, trustedLower+" ") {
-			return true
+			matched = true
+			matchedPrefix = trustedLower
+			break
 		}
+	}
+
+	if !matched {
+		return false
+	}
+
+	return f.areCommandArgsContained(trimmedCmd, matchedPrefix, call)
+}
+
+func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harness.NormalizedToolCall) bool {
+	argsStr := strings.TrimSpace(strings.TrimPrefix(cmd, trustedPrefix))
+	if argsStr == "" {
+		return true
+	}
+
+	checker := f.resolveBoundaryChecker(call)
+	if checker == nil {
+		return true
+	}
+
+	tokens := strings.Fields(argsStr)
+	for _, token := range tokens {
+		cleanArg := strings.Trim(token, `"'`)
+		if strings.HasPrefix(cleanArg, "-") {
+			continue
+		}
+
+		if isPotentialPath(cleanArg) {
+			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
+			if err == nil && !contained {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func isPotentialPath(arg string) bool {
+	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "\\") {
+		return true
+	}
+	if strings.Contains(arg, "..") || strings.Contains(arg, "/") || strings.Contains(arg, "\\") {
+		return true
+	}
+	if len(arg) >= 2 && arg[1] == ':' {
+		return true
 	}
 	return false
 }

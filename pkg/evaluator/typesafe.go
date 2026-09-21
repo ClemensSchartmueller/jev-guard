@@ -44,9 +44,12 @@ type Client struct {
 }
 
 // NewClient constructs a TypeSafe API client with standard timeout and configuration.
-func NewClient(apiKey, baseURL string, timeout time.Duration) *Client {
+func NewClient(apiKey, baseURL, model string, timeout time.Duration) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
+	}
+	if model == "" {
+		model = DefaultModel
 	}
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -55,7 +58,7 @@ func NewClient(apiKey, baseURL string, timeout time.Duration) *Client {
 	return &Client{
 		APIKey:  apiKey,
 		BaseURL: baseURL,
-		Model:   DefaultModel,
+		Model:   model,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},

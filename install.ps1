@@ -21,7 +21,7 @@ if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go"))
     go build -ldflags="-s -w" -o $BinaryTarget .\main.go
 } else {
     $Arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
-    $Repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "user/jev-guard" }
+    $Repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "ClemensSchartmueller/jev-guard" }
     $DownloadUrl = if ($Version -eq "latest") {
         "https://github.com/$Repo/releases/latest/download/jev-guard-windows-$Arch.exe"
     } else {

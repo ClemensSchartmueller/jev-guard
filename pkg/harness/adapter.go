@@ -185,13 +185,16 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	var target string
 	pathKeys := []string{
 		"TargetFile", "AbsolutePath", "file_path", "filePath",
-		"path", "target_path", "targetPath", "SearchDirectory",
-		"DirectoryPath", "dir_path", "directory", "target",
+		"SearchPath", "search_path", "SearchDirectory",
+		"DirectoryPath", "dir_path", "directory",
+		"path", "target_path", "targetPath", "target",
+		"file", "filename", "Uri", "uri", "Url", "url",
+		"dest", "destination", "source", "src",
 	}
 	for _, key := range pathKeys {
 		if val, exists := args[key]; exists {
-			if strVal, ok := val.(string); ok {
-				target = strVal
+			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
+				target = strings.TrimSpace(strVal)
 				break
 			}
 		}
