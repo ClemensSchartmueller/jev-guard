@@ -162,13 +162,33 @@ func TestSession_TTLExpiration(t *testing.T) {
 func TestIsJevguardPath(t *testing.T) {
 	tempHome := setupTestJevguardDir(t)
 
+	// Absolute path inside JEV_GUARD_HOME
 	inside := filepath.Join(tempHome, "sessions", "abc.json")
 	if !IsJevguardPath(inside) {
 		t.Errorf("expected %s to be recognized as jevguard path", inside)
 	}
 
+	// Relative path containing .jevguard
+	relInside := filepath.Join(".jevguard", "sessions", "abc.json")
+	if !IsJevguardPath(relInside) {
+		t.Errorf("expected relative path %s to be recognized as jevguard path", relInside)
+	}
+
+	// Tilde path
+	tildePath := "~/.jevguard/sessions/xyz.json"
+	if !IsJevguardPath(tildePath) {
+		t.Errorf("expected tilde path %s to be recognized as jevguard path", tildePath)
+	}
+
+	// Outside path
 	outside := filepath.Join(filepath.Dir(tempHome), "workspace", "file.go")
 	if IsJevguardPath(outside) {
 		t.Errorf("expected %s NOT to be recognized as jevguard path", outside)
+	}
+
+	// Normal workspace relative path
+	relOutside := "pkg/session/session.go"
+	if IsJevguardPath(relOutside) {
+		t.Errorf("expected relative workspace file %s NOT to be recognized as jevguard path", relOutside)
 	}
 }

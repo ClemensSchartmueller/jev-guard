@@ -245,6 +245,15 @@ func TestFastPath_AntiTampering(t *testing.T) {
 	if resCmd == nil || resCmd.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for command accessing .jevguard, got %+v", resCmd)
 	}
+
+	callRelTarget := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".jevguard/sessions/malicious.json",
+	}
+	resRelTarget := filter.Evaluate(callRelTarget)
+	if resRelTarget == nil || resRelTarget.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for relative path targeting .jevguard, got %+v", resRelTarget)
+	}
 }
 
 func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {

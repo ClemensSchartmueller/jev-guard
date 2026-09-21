@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"jev-guard/pkg/boundary"
 )
 
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
@@ -210,22 +212,42 @@ func ListSessions() ([]*SessionState, error) {
 	return sessions, nil
 }
 
-// IsJevguardPath checks if a given file path is located inside ~/.jevguard.
+// IsJevguardPath checks if a given file path is located inside ~/.jevguard or targets the security cache.
 func IsJevguardPath(targetPath string) bool {
-	if strings.TrimSpace(targetPath) == "" {
+	trimmed := strings.TrimSpace(targetPath)
+	if trimmed == "" {
 		return false
 	}
 
-	cleanTarget := filepath.Clean(targetPath)
-	cleanHome := filepath.Clean(GetJevguardDir())
+	// Expand ~ to user home directory
+	if strings.HasPrefix(trimmed, "~") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			trimmed = filepath.Join(home, strings.TrimPrefix(trimmed, "~"))
+		}
+	}
 
-	// Exact match or subpath
-	if strings.EqualFold(cleanTarget, cleanHome) {
-		return true
+	// Check if the path lexically contains .jevguard directory segment
+	normalized := strings.ToLower(filepath.ToSlash(filepath.Clean(trimmed)))
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".jevguard" {
+			return true
+		}
 	}
-	rel, err := filepath.Rel(cleanHome, cleanTarget)
-	if err != nil {
-		return false
+
+	cleanHome := GetJevguardDir()
+	if canonHome, err := boundary.CanonicalizePath(cleanHome); err == nil && canonHome != "" {
+		cleanHome = canonHome
 	}
-	return !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
+
+	absTarget := trimmed
+	if !filepath.IsAbs(absTarget) {
+		if abs, err := filepath.Abs(absTarget); err == nil {
+			absTarget = abs
+		}
+	}
+	if canonTarget, err := boundary.CanonicalizePath(absTarget); err == nil && canonTarget != "" {
+		absTarget = canonTarget
+	}
+
+	return boundary.IsSubPath(cleanHome, absTarget)
 }
