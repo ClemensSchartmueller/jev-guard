@@ -254,6 +254,51 @@ func TestEvaluateArgs_CacheClearAlias(t *testing.T) {
 	}
 }
 
+func TestEvaluateArgs_CacheNoArgs(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "jev-guard status:") {
+		t.Errorf("expected status output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheStatus(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache", "status"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "jev-guard status:") {
+		t.Errorf("expected status output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheUnknown(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache", "invalid"})
+	if action != ActionHandled || code != 1 {
+		t.Fatalf("expected ActionHandled with code 1, got %v, %d", action, code)
+	}
+	if !strings.Contains(stderr.String(), "unrecognized flag or command") {
+		t.Errorf("expected error output, got %q", stderr.String())
+	}
+}
+
 func TestEvaluateArgs_Status(t *testing.T) {
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
 

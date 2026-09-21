@@ -78,10 +78,13 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 	case "clear-intent", "clear_intent":
 		return r.handleClearIntent(args[1:])
 	case "cache":
-		if len(args) > 1 && strings.EqualFold(args[1], "clear") {
+		if len(args) == 1 {
+			return r.handleStatus()
+		}
+		if strings.EqualFold(args[1], "clear") {
 			return r.handleClearIntent(args[2:])
 		}
-		if len(args) > 1 && strings.EqualFold(args[1], "status") {
+		if strings.EqualFold(args[1], "status") {
 			return r.handleStatus()
 		}
 		return r.handleUnknown(args[0] + " " + args[1])
