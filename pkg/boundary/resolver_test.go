@@ -105,3 +105,23 @@ func TestIsPathContained_SymlinkOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestIsSubPathForOS(t *testing.T) {
+	// Linux: case sensitivity preserved
+	if isSubPathForOS("/workspace/Project", "/workspace/project/main.go", "linux") {
+		t.Errorf("expected Linux path comparison to be case-sensitive")
+	}
+	if !isSubPathForOS("/workspace/Project", "/workspace/Project/main.go", "linux") {
+		t.Errorf("expected matching case path to be subpath on Linux")
+	}
+
+	// Windows: case-insensitive
+	if !isSubPathForOS("C:\\Workspace\\Project", "c:\\workspace\\project\\main.go", "windows") {
+		t.Errorf("expected Windows path comparison to be case-insensitive")
+	}
+
+	// Sibling prefix evasion check
+	if isSubPathForOS("/workspace/app", "/workspace/app-secrets/key.pem", "linux") {
+		t.Errorf("sibling directory app-secrets should not be considered inside app")
+	}
+}
+

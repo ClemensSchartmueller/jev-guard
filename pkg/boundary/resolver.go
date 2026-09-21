@@ -156,9 +156,17 @@ func resolveSymlinks(path string) string {
 }
 
 func isSubPath(parent, child string) bool {
-	// Normalize drive letters and separators for accurate cross-platform boundary checks
-	normParent := strings.ToLower(normalizeSeparators(filepath.Clean(parent)))
-	normChild := strings.ToLower(normalizeSeparators(filepath.Clean(child)))
+	return isSubPathForOS(parent, child, runtime.GOOS)
+}
+
+func isSubPathForOS(parent, child, goos string) bool {
+	normParent := normalizeSeparators(filepath.Clean(parent))
+	normChild := normalizeSeparators(filepath.Clean(child))
+
+	if goos == "windows" {
+		normParent = strings.ToLower(normParent)
+		normChild = strings.ToLower(normChild)
+	}
 
 	if normParent == normChild {
 		return true
