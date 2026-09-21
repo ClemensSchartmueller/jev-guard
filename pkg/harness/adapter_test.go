@@ -332,7 +332,7 @@ func TestFormatResponse_Claude(t *testing.T) {
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		t.Fatalf("failed to parse claude hook output: %v", err)
 	}
-	if parsed.HookSpecificOutput.Action != "allow" || parsed.HookSpecificOutput.Message != "Safe read command" {
+	if parsed.HookSpecificOutput.PermissionDecision != "allow" || parsed.HookSpecificOutput.HookEventName != "PreToolUse" || parsed.HookSpecificOutput.PermissionDecisionReason != "Safe read command" {
 		t.Errorf("unexpected claude output: %+v", parsed)
 	}
 

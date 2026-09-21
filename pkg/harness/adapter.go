@@ -271,8 +271,9 @@ func formatClaudeResponse(result EvaluationResult) (int, []byte, error) {
 
 	out := ClaudeHookOutput{
 		HookSpecificOutput: ClaudeHookAction{
-			Action:  "allow",
-			Message: result.Reason,
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "allow",
+			PermissionDecisionReason: result.Reason,
 		},
 	}
 	bytes, err := json.Marshal(out)

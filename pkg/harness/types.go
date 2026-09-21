@@ -75,10 +75,11 @@ type ClaudeHookOutput struct {
 	HookSpecificOutput ClaudeHookAction `json:"hookSpecificOutput"`
 }
 
-// ClaudeHookAction defines the action decision and optional message for Claude Code.
+// ClaudeHookAction defines the PreToolUse decision schema for Claude Code.
 type ClaudeHookAction struct {
-	Action  string `json:"action"` // "allow" or "ask"
-	Message string `json:"message,omitempty"`
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"` // "allow", "deny", or "ask"
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
 }
 
 // AntigravityDecisionOutput shapes the stdout for Antigravity pre-tool responses.
