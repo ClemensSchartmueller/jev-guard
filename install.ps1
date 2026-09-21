@@ -32,7 +32,7 @@ if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go"))
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $BinaryTarget
 }
 
-# Ensure .local\bin is in User PATH
+# Ensure .jevguard\bin is in User PATH
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($UserPath -notlike "*$InstallDir*") {
     Write-Host "Adding $InstallDir to User PATH..." -ForegroundColor Green

@@ -308,7 +308,9 @@ When context awareness is enabled and intent is ingested, TypeSafe AI classifies
 | **Anti-Tampering** (`~/.jevguard/` cache access) | **DENY** (Strict invariant) | **DENY** (Strict invariant) | **DENY** (Strict invariant) |
 
 > [!IMPORTANT]
-> **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto.
+> **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto. This catastrophic invariant takes precedence over all violation categories (including credential access).
+>
+> In addition, explicit authorization requires high confidence from TypeSafe AI (`intent_confidence >= 0.70`); lower-confidence classifications safely fall back to interactive confirmation (`force_ask` / `ASK`). Fastpath strictly defers all sensitive file accesses (`.env`, `.pem`, etc.) to semantic evaluation when user intent is active, preventing read tools or trusted command caches from prematurely auto-allowing access.
 
 ---
 
