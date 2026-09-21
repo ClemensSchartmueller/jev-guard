@@ -87,7 +87,7 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {
-	client := evaluator.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Timeout)
+	client := evaluator.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Model, cfg.Timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
