@@ -127,8 +127,11 @@ func TestEvaluateArgs_IngestFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Session intent recorded") {
-		t.Errorf("expected output to mention session intent recorded, got %q", stdout.String())
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Session intent recorded") {
+		t.Errorf("expected stderr to mention session intent recorded, got %q", stderr.String())
 	}
 }
 
@@ -145,8 +148,11 @@ func TestEvaluateArgs_IngestEqualsSyntax(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "equals-sess") || !strings.Contains(stdout.String(), "turn: 3") {
-		t.Errorf("expected output to mention equals-sess and turn 3, got %q", stdout.String())
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "equals-sess") || !strings.Contains(stderr.String(), "turn: 3") {
+		t.Errorf("expected stderr to mention equals-sess and turn 3, got %q", stderr.String())
 	}
 }
 
@@ -164,8 +170,11 @@ func TestEvaluateArgs_IngestStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "piped-sess") {
-		t.Errorf("expected output to mention piped-sess, got %q", stdout.String())
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "piped-sess") {
+		t.Errorf("expected stderr to mention piped-sess, got %q", stderr.String())
 	}
 }
 
@@ -180,10 +189,13 @@ func TestEvaluateArgs_IngestAbort(t *testing.T) {
 		t.Fatalf("expected ActionHandled, got %v", action)
 	}
 	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Abort signal recorded") {
-		t.Errorf("expected abort signal notice, got %q", stdout.String())
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Abort signal recorded") {
+		t.Errorf("expected abort signal notice in stderr, got %q", stderr.String())
 	}
 }
 

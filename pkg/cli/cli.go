@@ -182,10 +182,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 		return ActionHandled, 1
 	}
 
+	// Write confirmation to Stderr so stdout remains empty and does not pollute Claude Code prompts
 	if session.IsNegativeIntent(prompt) {
-		fmt.Fprintf(r.Stdout, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
+		fmt.Fprintf(r.Stderr, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
 	} else {
-		fmt.Fprintf(r.Stdout, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
 	}
 
 	return ActionHandled, 0
