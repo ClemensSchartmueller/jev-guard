@@ -199,6 +199,24 @@ func TestEvaluateArgs_IngestAbort(t *testing.T) {
 	}
 }
 
+func TestEvaluateArgs_IngestTerminalWithoutPrompt(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return true }) // interactive terminal
+
+	action, code := runner.EvaluateArgs([]string{"ingest"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "requires a non-empty prompt") {
+		t.Errorf("expected error message about non-empty prompt, got %q", stderr.String())
+	}
+}
+
 func TestEvaluateArgs_ClearIntent(t *testing.T) {
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
 

@@ -144,6 +144,10 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 
 	// If prompt not provided in CLI flags, attempt to read piped JSON from Stdin
 	if prompt == "" && r.Stdin != nil {
+		if r.IsTerminal != nil && r.IsTerminal() {
+			fmt.Fprintln(r.Stderr, "Error: ingest requires a non-empty prompt via --prompt or piped JSON payload on stdin")
+			return ActionHandled, 1
+		}
 		stdinBytes, err := io.ReadAll(r.Stdin)
 		if err != nil {
 			fmt.Fprintf(r.Stderr, "Error reading stdin: %v\n", err)
