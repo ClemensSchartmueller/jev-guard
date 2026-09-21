@@ -146,21 +146,22 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 
 	// If prompt not provided in CLI flags, attempt to read piped JSON from Stdin
 	if prompt == "" && r.Stdin != nil {
-		isTerm := r.IsTerminal != nil && r.IsTerminal()
-		if !isTerm {
-			stdinBytes, err := io.ReadAll(r.Stdin)
-			if err == nil && len(strings.TrimSpace(string(stdinBytes))) > 0 {
-				parsedState, parseErr := harness.ParseIngestPayload(stdinBytes)
-				if parseErr == nil && parsedState != nil {
-					if sessionID == "" {
-						sessionID = parsedState.SessionID
-					}
-					if turnID == 0 {
-						turnID = parsedState.TurnID
-					}
-					if prompt == "" {
-						prompt = parsedState.Prompt
-					}
+		stdinBytes, err := io.ReadAll(r.Stdin)
+		if err != nil {
+			fmt.Fprintf(r.Stderr, "Error reading stdin: %v\n", err)
+		} else if len(strings.TrimSpace(string(stdinBytes))) > 0 {
+			parsedState, parseErr := harness.ParseIngestPayload(stdinBytes)
+			if parseErr != nil {
+				fmt.Fprintf(r.Stderr, "Error parsing ingest payload: %v (received: %q)\n", parseErr, string(stdinBytes))
+			} else if parsedState != nil {
+				if sessionID == "" {
+					sessionID = parsedState.SessionID
+				}
+				if turnID == 0 {
+					turnID = parsedState.TurnID
+				}
+				if prompt == "" {
+					prompt = parsedState.Prompt
 				}
 			}
 		}

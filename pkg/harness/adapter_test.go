@@ -454,6 +454,30 @@ func TestParseIngestPayload_AntigravityPrompt(t *testing.T) {
 	}
 }
 
+func TestParsePayload_UTF8BOM(t *testing.T) {
+	bom := []byte("\xef\xbb\xbf")
+	payload := []byte(`{"tool_name": "Bash", "tool_input": {"command": "git status"}}`)
+	call, err := ParsePayload(append(bom, payload...))
+	if err != nil {
+		t.Fatalf("unexpected error parsing payload with UTF-8 BOM: %v", err)
+	}
+	if call.Command != "git status" {
+		t.Errorf("expected command 'git status', got %q", call.Command)
+	}
+}
+
+func TestParseIngestPayload_UTF8BOM(t *testing.T) {
+	bom := []byte("\xef\xbb\xbf")
+	payload := []byte(`{"conversationId": "bom-conv", "prompt": "Run tests"}`)
+	state, err := ParseIngestPayload(append(bom, payload...))
+	if err != nil {
+		t.Fatalf("unexpected error parsing ingest payload with UTF-8 BOM: %v", err)
+	}
+	if state.SessionID != "bom-conv" || state.Prompt != "Run tests" {
+		t.Errorf("unexpected state: %+v", state)
+	}
+}
+
 func TestParsePayload_AntigravityGrepSearch(t *testing.T) {
 	raw := []byte(`{
 		"toolCall": {

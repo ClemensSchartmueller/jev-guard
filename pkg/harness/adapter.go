@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,21 +17,22 @@ var (
 
 // ParsePayload inspects raw JSON and normalizes it into a unified tool call representation.
 func ParsePayload(raw []byte) (*NormalizedToolCall, error) {
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	clean := bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
+	if len(strings.TrimSpace(string(clean))) == 0 {
 		return nil, ErrEmptyPayload
 	}
 
 	var root map[string]interface{}
-	if err := json.Unmarshal(raw, &root); err != nil {
+	if err := json.Unmarshal(clean, &root); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal JSON payload: %w", err)
 	}
 
 	if _, ok := root["toolCall"]; ok {
-		return parseAntigravityPayload(raw)
+		return parseAntigravityPayload(clean)
 	}
 
 	if _, ok := root["tool_name"]; ok {
-		return parseClaudePayload(raw)
+		return parseClaudePayload(clean)
 	}
 
 	return nil, ErrUnknownPayload
@@ -103,12 +105,13 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 
 // ParseIngestPayload parses a JSON payload from UserPromptSubmit (Claude) or PreInvocation (Antigravity).
 func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	clean := bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
+	if len(strings.TrimSpace(string(clean))) == 0 {
 		return nil, ErrEmptyPayload
 	}
 
 	var payload IngestPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := json.Unmarshal(clean, &payload); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal ingest payload: %w", err)
 	}
 
