@@ -56,6 +56,32 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 
 ## Installation
 
+### One-command setup (Node.js and npm)
+
+From the project you want to protect, run:
+
+```bash
+npx --yes jev-guard@latest
+```
+
+The npm launcher downloads the matching `jev-guard` release for your operating system and architecture, checks its SHA256 digest against the release checksums, installs it under `~/.jevguard/bin`, and runs `jev-guard init`. Setup adds hooks for detected agents in the current project; when none are detected, it sets up all supported agents. Existing hook configuration is preserved, and running setup again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they do not depend on a new terminal picking up a changed `PATH`.
+
+To choose an agent explicitly, pass `--agent claude`, `--agent codex`, `--agent antigravity`, or `--agent all` after the package name. The default scope is the current project; `--scope user` configures supported user-level hooks. You can also run `jev-guard init` after installing a binary by another method.
+
+The release tag and npm package version must match (for example, package `0.2.0` downloads release `v0.2.0`). The npm command becomes available after the first package is published. Node.js and npm are only needed for this setup route; the installed hooks run the native binary.
+
+Set a TypeSafe AI API key before using semantic evaluation:
+
+```bash
+export TYPESAFE_API_KEY="your-typesafe-api-key" # Linux / macOS
+```
+
+```powershell
+$env:TYPESAFE_API_KEY = "your-typesafe-api-key" # PowerShell, current session
+```
+
+Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex project hooks, review and trust the new hook through `/hooks` in Codex before it runs.
+
 ### Prebuilt Binaries
 
 Download precompiled binaries for Linux, macOS, and Windows from the [GitHub Releases](https://github.com/ClemensSchartmueller/jev-guard/releases) page. Each release includes SHA256 checksums in `checksums.txt`.

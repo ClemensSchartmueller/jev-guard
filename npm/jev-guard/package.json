@@ -1,0 +1,26 @@
+{
+  "name": "jev-guard",
+  "version": "0.2.0",
+  "description": "Install and initialize jev-guard for your coding agents",
+  "bin": {
+    "jev-guard": "bin/jev-guard.js"
+  },
+  "files": [
+    "bin/jev-guard.js",
+    "LICENSE.md",
+    "README.md"
+  ],
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ClemensSchartmueller/jev-guard.git",
+    "directory": "npm/jev-guard"
+  },
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  }
+}

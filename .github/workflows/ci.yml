@@ -9,6 +9,28 @@ on:
       - main
 
 jobs:
+  npm-launcher:
+    name: npm launcher
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: npm/jev-guard
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Test launcher
+        run: npm test
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
