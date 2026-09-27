@@ -48,8 +48,8 @@ func TestInstallAgentHooksPreservesSettingsAndIsIdempotent(t *testing.T) {
 			}
 			if agent == "antigravity" {
 				section := root["jev-guard"].(map[string]interface{})
-				if _, ok := section["PreInvocation"]; !ok {
-					t.Fatal("missing Antigravity intent hook")
+				if _, ok := section["PreInvocation"]; ok {
+					t.Fatal("unexpected Antigravity PreInvocation hook without prompt data")
 				}
 				if _, ok := section["PreToolUse"]; !ok {
 					t.Fatal("missing Antigravity gate hook")
@@ -192,7 +192,7 @@ func TestInstallAgentHooksPreservesSharedMatcher(t *testing.T) {
 
 func TestInstallAgentHooksEnablesAntigravityGroup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	original := `{"jev-guard":{"enabled":false,"PreInvocation":[{"type":"command","command":"jev-guard ingest"}],"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"jev-guard"}]}]}}`
+	original := `{"jev-guard":{"enabled":false,"PreInvocation":[{"type":"command","command":"jev-guard ingest"},{"type":"command","command":"custom-hook"}],"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"jev-guard"}]}]}}`
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -208,8 +208,13 @@ func TestInstallAgentHooksEnablesAntigravityGroup(t *testing.T) {
 	if err := json.Unmarshal(data, &root); err != nil {
 		t.Fatal(err)
 	}
-	if root["jev-guard"].(map[string]interface{})["enabled"] != true {
+	section := root["jev-guard"].(map[string]interface{})
+	if section["enabled"] != true {
 		t.Fatal("Antigravity group remains disabled")
+	}
+	preInvocation := section["PreInvocation"].([]interface{})
+	if len(preInvocation) != 1 || preInvocation[0].(map[string]interface{})["command"] != "custom-hook" {
+		t.Fatalf("managed PreInvocation ingest hook was not removed while preserving other hooks: %#v", preInvocation)
 	}
 	changed, err = installAgentHooks(path, "antigravity", `"/bin/jev-guard"`)
 	if err != nil || changed {

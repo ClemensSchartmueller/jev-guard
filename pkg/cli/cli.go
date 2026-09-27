@@ -444,7 +444,7 @@ Description:
   and outputs evaluation verdicts (ALLOW, ASK, or DENY).
 
   With context awareness enabled, jev-guard can ingest active user prompts
-  via 'jev-guard ingest' (invoked by UserPromptSubmit or PreInvocation hooks)
+  via 'jev-guard ingest' (invoked by Claude Code's UserPromptSubmit hook)
   to authorize explicitly requested operations and prevent false denials.`
 }
 

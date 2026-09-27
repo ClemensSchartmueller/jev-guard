@@ -31,7 +31,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts via dedicated lifecycle hooks (`UserPromptSubmit` in Claude Code, `PreInvocation` in Antigravity) into an ephemeral session cache stored in `~/.jevguard/sessions/`.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -313,17 +313,13 @@ Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/setting
 
 ### Antigravity (`.agents/hooks.json`)
 
-Configure `PreInvocation` to capture turn intent and `PreToolUse` for tool-level gating:
+Configure `PreToolUse` for tool-level gating:
+
+Antigravity's documented `PreInvocation` payload includes a transcript path but does not include the prompt text or document the transcript JSONL format. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
 
 ```json
 {
   "jev-guard": {
-    "PreInvocation": [
-      {
-        "type": "command",
-        "command": "jev-guard ingest"
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",

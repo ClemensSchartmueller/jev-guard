@@ -238,7 +238,10 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 		changed = changed || c
 	} else if agent == "antigravity" {
-		c, err := ensureHook(section, "PreInvocation", "", command+" ingest", true)
+		// Antigravity's documented PreInvocation payload does not expose prompt text.
+		// Remove the older managed ingest hook instead of installing a hook that
+		// always fails validation, while preserving any unrelated user hooks.
+		c, err := removeManagedDirectHook(section, "PreInvocation", command+" ingest")
 		if err != nil {
 			return false, err
 		}
@@ -367,6 +370,38 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 		entry = map[string]interface{}{"matcher": matcher, "hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
 	}
 	section[event] = append(entries, entry)
+	return true, nil
+}
+
+func removeManagedDirectHook(section map[string]interface{}, event, command string) (bool, error) {
+	value, exists := section[event]
+	if !exists {
+		return false, nil
+	}
+	entries, ok := value.([]interface{})
+	if !ok {
+		return false, fmt.Errorf("%s must be a JSON array", event)
+	}
+	kept := make([]interface{}, 0, len(entries))
+	removed := false
+	for _, entry := range entries {
+		item, ok := entry.(map[string]interface{})
+		if ok {
+			if existing, ok := item["command"].(string); ok && managedHookCommand(existing, command) {
+				removed = true
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	if !removed {
+		return false, nil
+	}
+	if len(kept) == 0 {
+		delete(section, event)
+	} else {
+		section[event] = kept
+	}
 	return true, nil
 }
 

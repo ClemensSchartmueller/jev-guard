@@ -52,7 +52,7 @@ type AntigravityPayload struct {
 	Cwd            string              `json:"cwd"`
 }
 
-// IngestPayload represents lifecycle ingestion inputs (e.g. UserPromptSubmit, PreInvocation).
+// IngestPayload represents prompt-bearing hook payloads or explicit ingest JSON.
 type IngestPayload struct {
 	SessionID      string `json:"session_id,omitempty"`
 	ConversationID string `json:"conversationId,omitempty"`
