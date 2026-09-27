@@ -37,6 +37,7 @@ type Config struct {
 	Sources                 map[string]string  `json:"-"`
 	Diagnostics             []string           `json:"-"`
 	ProjectConfig           *ProjectConfigInfo `json:"-"`
+	UserConfigPath          string             `json:"-"`
 }
 
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
@@ -168,6 +169,7 @@ func LoadConfigWithPaths(candidateDirs []string, userConfigPath, trustRegistryPa
 // Without declared roots, candidates use their nearest .git root, or the candidate itself.
 func LoadConfigWithPathsAndRoots(candidateDirs, workspaceRoots []string, userConfigPath, trustRegistryPath string) *Config {
 	cfg := DefaultConfig()
+	cfg.UserConfigPath = userConfigPath
 	if cfg.Sources == nil {
 		cfg.Sources = make(map[string]string)
 	}
@@ -177,14 +179,26 @@ func LoadConfigWithPathsAndRoots(candidateDirs, workspaceRoots []string, userCon
 	return cfg
 }
 
-// UserConfigPath returns the user-owned policy file path. It deliberately uses the system account
-// profile rather than environment variables that a repository or hook process can override.
+// UserConfigPath returns the selected user-owned policy file path. It deliberately uses the
+// system account profile rather than environment variables that a repository or hook process
+// can override. The legacy path is used only when the canonical file is absent.
 func UserConfigPath() string {
 	current, err := user.Current()
 	if err != nil || strings.TrimSpace(current.HomeDir) == "" {
 		return ""
 	}
-	return filepath.Join(current.HomeDir, ".jevguard", "config.json")
+	return userConfigPathForHome(current.HomeDir)
+}
+
+func userConfigPathForHome(home string) string {
+	canonical := filepath.Join(home, ".jevguard.json")
+	if _, err := os.Lstat(canonical); os.IsNotExist(err) {
+		legacy := filepath.Join(home, ".jevguard", "config.json")
+		if _, legacyErr := os.Lstat(legacy); !os.IsNotExist(legacyErr) {
+			return legacy
+		}
+	}
+	return canonical
 }
 
 // TrustRegistryPath returns the user-owned registry that approves exact project config contents.

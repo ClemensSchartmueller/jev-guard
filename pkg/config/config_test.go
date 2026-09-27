@@ -39,6 +39,70 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestUserConfigPathSelection(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, tc := range []struct {
+		name           string
+		canonical      string
+		legacy         string
+		canonicalDir   bool
+		selectedLegacy bool
+		wantMode       string
+		wantAuditDir   string
+	}{
+		{name: "no config", wantMode: "enforcing", wantAuditDir: ""},
+		{name: "legacy only", legacy: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, selectedLegacy: true, wantMode: "audit", wantAuditDir: "legacy"},
+		{name: "canonical only", canonical: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, wantMode: "audit", wantAuditDir: "home"},
+		{name: "canonical wins", canonical: `{"mode":"enforcing","audit_log_path":"audit.jsonl"}`, legacy: `{"mode":"audit"}`, wantMode: "enforcing", wantAuditDir: "home"},
+		{name: "invalid canonical does not load legacy", canonical: `{`, legacy: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "nonregular canonical does not load legacy", canonicalDir: true, legacy: `{"mode":"audit"}`, wantMode: "enforcing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			canonical := filepath.Join(home, ".jevguard.json")
+			legacyDir := filepath.Join(home, ".jevguard")
+			legacy := filepath.Join(legacyDir, "config.json")
+			if tc.canonicalDir {
+				if err := os.Mkdir(canonical, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.canonical != "" {
+				if err := os.WriteFile(canonical, []byte(tc.canonical), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.legacy != "" {
+				if err := os.Mkdir(legacyDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(legacy, []byte(tc.legacy), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selected := canonical
+			if tc.selectedLegacy {
+				selected = legacy
+			}
+			if got := userConfigPathForHome(home); got != selected {
+				t.Fatalf("selected path = %q, want %q", got, selected)
+			}
+			cfg := LoadConfigWithPaths(nil, selected, filepath.Join(legacyDir, "trusted-project-configs.json"))
+			if cfg.UserConfigPath != selected || cfg.Mode != tc.wantMode {
+				t.Fatalf("path = %q, mode = %q; want %q, %q", cfg.UserConfigPath, cfg.Mode, selected, tc.wantMode)
+			}
+			if tc.wantAuditDir != "" {
+				base := home
+				if tc.wantAuditDir == "legacy" {
+					base = legacyDir
+				}
+				if want := filepath.Join(base, "audit.jsonl"); cfg.AuditLogPath != want {
+					t.Fatalf("audit log path = %q, want %q", cfg.AuditLogPath, want)
+				}
+			}
+		})
+	}
+}
+
 func TestConfig_LoadConfigFile(t *testing.T) {
 	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-test-*")

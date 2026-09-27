@@ -21,7 +21,7 @@ const (
 )
 
 var (
-	ErrMissingAPIKey  = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY or api_key in ~/.jevguard/config.json)")
+	ErrMissingAPIKey  = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY or api_key in ~/.jevguard.json)")
 	ErrAPIFailure     = errors.New("typesafe system one api returned error")
 	ErrUnsafeEndpoint = errors.New("typesafe api endpoint must use HTTPS or loopback HTTP and cannot contain credentials, a query, or a fragment")
 )
