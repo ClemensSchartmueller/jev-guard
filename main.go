@@ -41,6 +41,9 @@ func runGate() int {
 	}
 
 	cfg := config.LoadConfigForCall(call)
+	for _, diagnostic := range cfg.Diagnostics {
+		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+	}
 
 	if cfg.IsContextAwarenessEnabled() {
 		sessionID := call.SessionID
@@ -170,4 +173,3 @@ func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) stri
 	}
 	return ""
 }
-

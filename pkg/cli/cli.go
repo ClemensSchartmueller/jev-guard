@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
 )
@@ -90,9 +92,148 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleUnknown(args[0] + " " + args[1])
 	case "status":
 		return r.handleStatus()
+	case "config":
+		return r.handleConfig(args[1:])
 	default:
 		return r.handleUnknown(args[0])
 	}
+}
+
+func (r *Runner) handleConfig(args []string) (Action, int) {
+	if len(args) == 0 {
+		fmt.Fprintln(r.Stderr, "Error: config requires show, trust, or untrust")
+		return ActionHandled, 1
+	}
+	switch strings.ToLower(args[0]) {
+	case "show":
+		return r.handleConfigShow()
+	case "trust":
+		return r.handleConfigTrust(args[1:])
+	case "untrust":
+		return r.handleConfigUntrust(args[1:])
+	default:
+		fmt.Fprintf(r.Stderr, "Error: unknown config command %q\n", args[0])
+		return ActionHandled, 1
+	}
+}
+
+func (r *Runner) handleConfigShow() (Action, int) {
+	cwd, _ := os.Getwd()
+	cfg := config.LoadConfig(cwd)
+	fmt.Fprintln(r.Stdout, "jev-guard effective configuration:")
+	fmt.Fprintf(r.Stdout, "  User config:          %s\n", config.UserConfigPath())
+	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", config.TrustRegistryPath())
+	fmt.Fprintf(r.Stdout, "  Mode:                 %s (%s)\n", cfg.Mode, cfg.Sources["mode"])
+	fmt.Fprintf(r.Stdout, "  Base URL:             %s (%s)\n", effectiveBaseURL(cfg.BaseURL), cfg.Sources["base_url"])
+	fmt.Fprintf(r.Stdout, "  API key:              %s (%s)\n", configuredValue(cfg.APIKey), cfg.Sources["api_key"])
+	fmt.Fprintf(r.Stdout, "  Model:                %s (%s)\n", effectiveValue(cfg.Model, "jev-latest"), cfg.Sources["model"])
+	fmt.Fprintf(r.Stdout, "  Timeout:              %d ms (%s)\n", effectiveTimeout(cfg.TimeoutMs), cfg.Sources["timeout_ms"])
+	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])
+	fmt.Fprintf(r.Stdout, "  Context awareness:    %t (%s)\n", cfg.IsContextAwarenessEnabled(), cfg.Sources["context_awareness_enabled"])
+	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
+	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
+	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
+		if info, err := config.InspectProjectConfig(file); err == nil {
+			trustState := "not trusted"
+			if info.Trusted {
+				trustState = "trusted for this exact SHA-256"
+			}
+			fmt.Fprintf(r.Stdout, "  Project config:       %s (%s)\n", info.ConfigPath, trustState)
+			if info.TrustIssue != "" {
+				fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", info.TrustIssue)
+			}
+			if len(info.IgnoredKeys) > 0 {
+				fmt.Fprintf(r.Stdout, "  Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
+			}
+		}
+	}
+	for _, diagnostic := range cfg.Diagnostics {
+		fmt.Fprintf(r.Stderr, "jev-guard: %s\n", diagnostic)
+	}
+	return ActionHandled, 0
+}
+
+func (r *Runner) handleConfigTrust(args []string) (Action, int) {
+	info, err := inspectCLIProjectConfig(args)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "Error: %v\n", err)
+		return ActionHandled, 1
+	}
+	printTrustProposal(r.Stdout, info)
+	return ActionHandled, 0
+}
+
+func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
+	info, err := inspectCLIProjectConfig(args)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "Error: %v\n", err)
+		return ActionHandled, 1
+	}
+	fmt.Fprintf(r.Stdout, "Project config: %s\nProject root: %s\n", info.ConfigPath, info.ProjectRoot)
+	if info.Trusted {
+		fmt.Fprintf(r.Stdout, "Current digest %s is trusted. Remove the registry entry with this project_root and config_path to revoke it.\n", info.SHA256)
+	} else {
+		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
+	}
+	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", config.TrustRegistryPath())
+	fmt.Fprintln(r.Stdout, "This command does not edit user-owned files; edit the registry manually to revoke trust.")
+	return ActionHandled, 0
+}
+
+func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {
+	path := ""
+	if len(args) > 0 {
+		path = args[0]
+	} else if cwd, err := os.Getwd(); err == nil {
+		path = config.FindProjectConfigInDirectory(cwd)
+	}
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("no project config found; pass a config file or directory path")
+	}
+	return config.InspectProjectConfig(path)
+}
+
+func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
+	entry, _ := json.MarshalIndent(info.TrustRecord, "", "  ")
+	fmt.Fprintf(out, "Project config: %s\n", info.ConfigPath)
+	fmt.Fprintf(out, "Project root: %s\nSHA-256: %s\n", info.ProjectRoot, info.SHA256)
+	fmt.Fprintf(out, "Additive sensitive_files: %v\n", info.SensitiveFiles)
+	if info.TrustIssue != "" {
+		fmt.Fprintf(out, "Existing trust registry status: %s\n", info.TrustIssue)
+	}
+	if len(info.IgnoredKeys) > 0 {
+		fmt.Fprintf(out, "Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
+	}
+	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", config.TrustRegistryPath(), entry)
+	fmt.Fprintln(out, "The registry is user-owned. Review the file and add this record manually; this command does not grant trust.")
+}
+
+func configuredValue(value string) string {
+	if value == "" {
+		return "not configured"
+	}
+	return "configured"
+}
+
+func effectiveValue(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func effectiveTimeout(timeoutMs int) int {
+	if timeoutMs <= 0 {
+		return 1500
+	}
+	return timeoutMs
+}
+
+func effectiveBaseURL(value string) string {
+	if value == "" {
+		return "https://api.typesafe.ai/v1/systemone"
+	}
+	return value
 }
 
 func (r *Runner) printVersion() (Action, int) {
@@ -277,6 +418,9 @@ Commands:
   clear-intent    Clear active user intent for a session (or all sessions)
   cache clear     Alias for clear-intent
   status          Display active sessions and jev-guard environment status
+  config show     Show effective policy and its source without printing secrets
+  config trust    Print a digest-bound registry record for manual user approval
+  config untrust  Show which user registry entry to remove to revoke trust
 
 Flags:
   -h, --help       Show help and usage information
@@ -323,4 +467,3 @@ func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
 	}
 	return "", false
 }
-
