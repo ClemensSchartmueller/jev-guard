@@ -106,6 +106,16 @@ func joinPaths(base, rel string) string {
 	return path.Join(cleanBase, cleanRel)
 }
 
+// CanonicalizePath canonicalizes a path, evaluating symlinks and cleaning separators.
+func CanonicalizePath(path string) (string, error) {
+	return canonicalizePath(path)
+}
+
+// IsSubPath reports whether child resides lexically or physically inside parent.
+func IsSubPath(parent, child string) bool {
+	return isSubPath(parent, child)
+}
+
 func canonicalizePath(path string) (string, error) {
 	if runtime.GOOS != "windows" && isWindowsDriveAbs(path) {
 		return normalizeSeparators(filepath.Clean(path)), nil
@@ -146,9 +156,17 @@ func resolveSymlinks(path string) string {
 }
 
 func isSubPath(parent, child string) bool {
-	// Normalize drive letters and separators for accurate cross-platform boundary checks
-	normParent := strings.ToLower(normalizeSeparators(filepath.Clean(parent)))
-	normChild := strings.ToLower(normalizeSeparators(filepath.Clean(child)))
+	return isSubPathForOS(parent, child, runtime.GOOS)
+}
+
+func isSubPathForOS(parent, child, goos string) bool {
+	normParent := normalizeSeparators(filepath.Clean(parent))
+	normChild := normalizeSeparators(filepath.Clean(child))
+
+	if goos == "windows" {
+		normParent = strings.ToLower(normParent)
+		normChild = strings.ToLower(normChild)
+	}
 
 	if normParent == normChild {
 		return true

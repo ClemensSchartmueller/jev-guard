@@ -1,6 +1,7 @@
 package fastpath
 
 import (
+	"fmt"
 	"testing"
 
 	"jev-guard/pkg/config"
@@ -51,6 +52,25 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	if res2 == nil || res2.Decision != harness.DecisionAsk {
 		t.Errorf("expected ASK for id_rsa, got %+v", res2)
 	}
+
+	// Windows backslash path to .ssh and .aws
+	callWinSSH := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: `C:\Users\User\.ssh\config`,
+	}
+	resWinSSH := filter.Evaluate(callWinSSH)
+	if resWinSSH == nil || resWinSSH.Decision != harness.DecisionAsk {
+		t.Errorf("expected ASK for Windows .ssh path, got %+v", resWinSSH)
+	}
+
+	callWinAWS := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  `type C:\Users\User\.aws\credentials`,
+	}
+	resWinAWS := filter.Evaluate(callWinAWS)
+	if resWinAWS == nil || resWinAWS.Decision != harness.DecisionAsk {
+		t.Errorf("expected ASK for Windows .aws path, got %+v", resWinAWS)
+	}
 }
 
 func TestFastPath_TrustedCommands(t *testing.T) {
@@ -78,13 +98,42 @@ func TestFastPath_TrustedCommands(t *testing.T) {
 	}
 
 	// Should NOT allow if chained with other commands
-	call3 := &harness.NormalizedToolCall{
-		ToolName: "run_command",
-		Command:  "git status; rm -rf /",
+	chainedCommands := []string{
+		"git status; rm -rf /",
+		"git status && rm -rf /",
+		"git status & rm -rf /",
+		"git status\nrm -rf /",
+		"git status \n rm -rf /",
+		"git status\r\nrm -rf /",
+		"git status | grep foo",
+		"git status > out.txt",
+		"echo (Get-Process)",
+		"git status (calc)",
+		"git status $(whoami)",
+		"echo { dangerous }",
+		"ls < input.txt",
 	}
-	res3 := filter.Evaluate(call3)
-	if res3 != nil {
-		t.Errorf("expected nil (delegation to Jev) for chained command, got %+v", res3)
+	for _, chainedCmd := range chainedCommands {
+		callChained := &harness.NormalizedToolCall{
+			ToolName: "run_command",
+			Command:  chainedCmd,
+		}
+		if resChained := filter.Evaluate(callChained); resChained != nil {
+			t.Errorf("expected nil (delegation to Jev) for chained command %q, got %+v", chainedCmd, resChained)
+		}
+	}
+}
+
+func TestFastPath_ReadUrlContent_DelegatesToSemantic(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	call := &harness.NormalizedToolCall{
+		ToolName:   "read_url_content",
+		TargetPath: "https://example.com/docs",
+	}
+	res := filter.Evaluate(call)
+	if res != nil {
+		t.Errorf("expected nil (pass-through to semantic evaluator for outbound HTTP fetch), got %+v", res)
 	}
 }
 
@@ -195,10 +244,11 @@ func TestFastPath_ConfigInjection(t *testing.T) {
 
 type mockBoundaryChecker struct {
 	contained bool
+	err       error
 }
 
 func (m *mockBoundaryChecker) IsPathContained(targetPath string, cwd string) (bool, error) {
-	return m.contained, nil
+	return m.contained, m.err
 }
 
 func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
@@ -215,10 +265,140 @@ func TestFastPath_InjectedBoundaryChecker(t *testing.T) {
 		t.Fatalf("expected ASK for uncontained mock path, got %+v", res)
 	}
 
+	// Resolution error must fail closed (DecisionAsk)
+	checker.err = fmt.Errorf("canonicalization failed")
+	resErr := filter.Evaluate(call)
+	if resErr == nil || resErr.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK on boundary checker error (fail-closed), got %+v", resErr)
+	}
+
+	checker.err = nil
 	checker.contained = true
 	resAllow := filter.Evaluate(call)
 	if resAllow == nil || resAllow.Decision != harness.DecisionAllow {
 		t.Fatalf("expected ALLOW for contained mock path, got %+v", resAllow)
+	}
+}
+
+func TestFastPath_AntiTampering(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("JEV_GUARD_HOME", tempHome)
+
+	filter := NewDefaultFilter()
+
+	callTarget := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: tempHome + "/sessions/override.json",
+	}
+	resTarget := filter.Evaluate(callTarget)
+	if resTarget == nil || resTarget.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for writing to jevguard home, got %+v", resTarget)
+	}
+
+	callCmd := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "cat ~/.jevguard/sessions/default.json",
+	}
+	resCmd := filter.Evaluate(callCmd)
+	if resCmd == nil || resCmd.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for command accessing .jevguard, got %+v", resCmd)
+	}
+
+	callRelTarget := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".jevguard/sessions/malicious.json",
+	}
+	resRelTarget := filter.Evaluate(callRelTarget)
+	if resRelTarget == nil || resRelTarget.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for relative path targeting .jevguard, got %+v", resRelTarget)
+	}
+
+	callConfig := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".jevguard.json",
+	}
+	resConfig := filter.Evaluate(callConfig)
+	if resConfig == nil || resConfig.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for reading .jevguard.json, got %+v", resConfig)
+	}
+
+	callConfigAlt := &harness.NormalizedToolCall{
+		ToolName:   "read_file",
+		TargetPath: "jevguard.json",
+	}
+	resConfigAlt := filter.Evaluate(callConfigAlt)
+	if resConfigAlt == nil || resConfigAlt.Decision != harness.DecisionDeny {
+		t.Fatalf("expected DENY for reading jevguard.json, got %+v", resConfigAlt)
+	}
+}
+
+func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	// Without intent -> should ask immediately for write
+	callWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".env",
+		UserIntent: "",
+	}
+	resAsk := filter.Evaluate(callWithoutIntent)
+	if resAsk == nil || resAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for write_to_file .env without intent, got %+v", resAsk)
+	}
+
+	// Without intent -> should ask immediately for read tools (view_file)
+	callReadWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".env",
+		UserIntent: "",
+	}
+	resReadAsk := filter.Evaluate(callReadWithoutIntent)
+	if resReadAsk == nil || resReadAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for view_file .env without intent, got %+v", resReadAsk)
+	}
+
+	// Without intent -> should ask immediately for trusted read command (cat .env)
+	callCmdWithoutIntent := &harness.NormalizedToolCall{
+		ToolName:   "run_command",
+		Command:    "cat .env",
+		UserIntent: "",
+	}
+	resCmdAsk := filter.Evaluate(callCmdWithoutIntent)
+	if resCmdAsk == nil || resCmdAsk.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for cat .env without intent, got %+v", resCmdAsk)
+	}
+
+	// With intent -> should defer (return nil) for write
+	callWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "write_to_file",
+		TargetPath: ".env",
+		UserIntent: "Configure DATABASE_URL in .env",
+	}
+	resDefer := filter.Evaluate(callWithIntent)
+	if resDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) for write with intent, got %+v", resDefer)
+	}
+
+	// With intent -> should defer (return nil) for view_file, NEVER auto-allow
+	callReadWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "view_file",
+		TargetPath: ".env",
+		UserIntent: "Inspect database configuration",
+	}
+	resReadDefer := filter.Evaluate(callReadWithIntent)
+	if resReadDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) for view_file with intent, got %+v", resReadDefer)
+	}
+
+	// With intent -> should defer (return nil) for trusted command (cat .env), NEVER auto-allow
+	callCmdWithIntent := &harness.NormalizedToolCall{
+		ToolName:   "run_command",
+		Command:    "cat .env",
+		UserIntent: "Inspect database configuration",
+	}
+	resCmdDefer := filter.Evaluate(callCmdWithIntent)
+	if resCmdDefer != nil {
+		t.Fatalf("expected nil (deferred to Jev) for cat .env with intent, got %+v", resCmdDefer)
 	}
 }
 
@@ -279,6 +459,68 @@ func TestFastPath_TrustedCommands_ArgumentEscape(t *testing.T) {
 	res3 := filter.Evaluate(call3)
 	if res3 == nil || res3.Decision != harness.DecisionAllow {
 		t.Errorf("expected ALLOW for contained git diff, got %+v", res3)
+	}
+
+	// Output writing flags must be rejected (deferred to semantic evaluation)
+	callOutputFlag := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff --output=diff.txt",
+	}
+	if resOut := filter.Evaluate(callOutputFlag); resOut != nil {
+		t.Errorf("expected nil (delegation) for git diff with --output flag, got %+v", resOut)
+	}
+
+	callOFlag := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git diff -o out.patch",
+	}
+	if resO := filter.Evaluate(callOFlag); resO != nil {
+		t.Errorf("expected nil (delegation) for git diff with -o flag, got %+v", resO)
+	}
+
+	// Flag with path escaping boundary
+	checker.contained = false
+	callFlagEscape := &harness.NormalizedToolCall{
+		ToolName: "run_command",
+		Command:  "git log --file=../../outside.txt",
+	}
+	if resFlagEsc := filter.Evaluate(callFlagEscape); resFlagEsc != nil {
+		t.Errorf("expected nil (delegation) for git log with escaping --file=... argument, got %+v", resFlagEsc)
+	}
+}
+
+func TestFastPath_ReadResource_FileURIs(t *testing.T) {
+	checker := &mockBoundaryChecker{contained: true}
+	filter := NewFilter(checker, nil)
+
+	// Contained file URI
+	callContained := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "file:///workspace/project/data.json",
+	}
+	resContained := filter.Evaluate(callContained)
+	if resContained == nil || resContained.Decision != harness.DecisionAllow {
+		t.Fatalf("expected ALLOW for contained file URI, got %+v", resContained)
+	}
+
+	// Escaping file URI
+	checker.contained = false
+	callEscape := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "file:///C:/Windows/system.ini",
+	}
+	resEscape := filter.Evaluate(callEscape)
+	if resEscape == nil || resEscape.Decision != harness.DecisionAsk {
+		t.Fatalf("expected ASK for escaping file URI, got %+v", resEscape)
+	}
+
+	// Non-file custom URI (e.g. database/external resource) must defer to semantic evaluation
+	callExternal := &harness.NormalizedToolCall{
+		ToolName:   "read_resource",
+		TargetPath: "postgres://db.internal/secrets",
+	}
+	if resExt := filter.Evaluate(callExternal); resExt != nil {
+		t.Fatalf("expected nil (delegation to Jev) for external URI, got %+v", resExt)
 	}
 }
 

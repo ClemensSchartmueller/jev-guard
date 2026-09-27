@@ -11,6 +11,7 @@ import (
 type Policy struct {
 	MaxAllowScore         float64
 	MinContainedThreshold float64
+	MinIntentConfidence   float64
 }
 
 // NewDefaultPolicy creates a standard policy with calibrated thresholds.
@@ -18,6 +19,7 @@ func NewDefaultPolicy() *Policy {
 	return &Policy{
 		MaxAllowScore:         1.2,
 		MinContainedThreshold: 0.85,
+		MinIntentConfidence:   0.70,
 	}
 }
 
@@ -45,17 +47,34 @@ func (p *Policy) Resolve(j *evaluator.JevJudgments, boundaryContained bool, eval
 }
 
 func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.EvaluationResult {
-	if violationResult := p.checkViolationCategory(j); violationResult != nil {
-		return violationResult
+	minConfidence := p.MinIntentConfidence
+	if minConfidence <= 0 {
+		minConfidence = 0.70
 	}
+	isExplicitlyRequested := j.IntentAlignment == "explicitly_requested" && j.IntentConfidence >= minConfidence
 
+	// Strict Catastrophic Ceiling: Operations with catastrophic blast radius (score > 2.5)
+	// strictly cap at force_ask even if explicitly commanded by the user, and are blocked (deny) otherwise.
+	// This invariant takes precedence over all violation categories, including credential allowances.
 	if j.DestructivePotential > 2.5 {
+		if isExplicitlyRequested {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionForceAsk,
+				Reason:     fmt.Sprintf("Catastrophic operation explicitly requested by user (destructive score: %.2f); confirmation required", j.DestructivePotential),
+				Source:     "policy_jev_intent_catastrophic",
+				Confidence: j.DestructiveConfidence,
+			}
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionDeny,
 			Reason:     fmt.Sprintf("Catastrophic blast radius (destructive score: %.2f)", j.DestructivePotential),
 			Source:     "policy_jev_destructive",
 			Confidence: j.DestructiveConfidence,
 		}
+	}
+
+	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested); violationResult != nil {
+		return violationResult
 	}
 
 	if j.IsWorkspaceContained < p.MinContainedThreshold {
@@ -68,6 +87,14 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.Evaluatio
 	}
 
 	if j.DestructivePotential > p.MaxAllowScore {
+		if isExplicitlyRequested {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionAllow,
+				Reason:     fmt.Sprintf("Moderate operation authorized by explicit user intent (destructive score: %.2f)", j.DestructivePotential),
+				Source:     "policy_jev_intent_allow",
+				Confidence: j.DestructiveConfidence,
+			}
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     fmt.Sprintf("Moderate blast radius requiring confirmation (score: %.2f)", j.DestructivePotential),
@@ -84,19 +111,57 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.Evaluatio
 	}
 }
 
-func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments) *harness.EvaluationResult {
+func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested bool) *harness.EvaluationResult {
 	switch j.ViolationCategory {
-	case "catastrophic_deletion", "persistence_or_privilege":
+	case "catastrophic_deletion":
+		if isExplicitlyRequested {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionForceAsk,
+				Reason:     "Catastrophic deletion explicitly requested by user; confirmation required",
+				Source:     "policy_jev_intent_catastrophic",
+				Confidence: j.ViolationConfidence,
+			}
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionDeny,
-			Reason:     fmt.Sprintf("Blocked %s attack vector", j.ViolationCategory),
+			Reason:     "Blocked catastrophic_deletion attack vector",
 			Source:     "policy_jev_violation",
 			Confidence: j.ViolationConfidence,
 		}
-	case "credential_leak", "workspace_escape":
+	case "persistence_or_privilege":
+		if isExplicitlyRequested {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionForceAsk,
+				Reason:     "Privilege or persistence modification explicitly requested; confirmation required",
+				Source:     "policy_jev_intent_privilege",
+				Confidence: j.ViolationConfidence,
+			}
+		}
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionDeny,
+			Reason:     "Blocked persistence_or_privilege attack vector",
+			Source:     "policy_jev_violation",
+			Confidence: j.ViolationConfidence,
+		}
+	case "credential_leak":
+		if isExplicitlyRequested {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionAllow,
+				Reason:     "Credential or environment file access authorized by explicit user intent",
+				Source:     "policy_jev_intent_allow",
+				Confidence: j.ViolationConfidence,
+			}
+		}
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
-			Reason:     fmt.Sprintf("Requires confirmation for potential %s", j.ViolationCategory),
+			Reason:     "Requires confirmation for potential credential_leak",
+			Source:     "policy_jev_violation",
+			Confidence: j.ViolationConfidence,
+		}
+	case "workspace_escape":
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     "Requires confirmation for potential workspace_escape",
 			Source:     "policy_jev_violation",
 			Confidence: j.ViolationConfidence,
 		}

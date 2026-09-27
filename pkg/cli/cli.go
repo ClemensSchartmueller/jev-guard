@@ -5,6 +5,9 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"jev-guard/pkg/harness"
+	"jev-guard/pkg/session"
 )
 
 // Version information configured at compile-time or defaulted.
@@ -28,6 +31,7 @@ const (
 type Runner struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
+	Stdin      io.Reader
 	IsTerminal func() bool
 }
 
@@ -36,6 +40,7 @@ func NewRunner(stdout, stderr io.Writer, isTerminal func() bool) *Runner {
 	return &Runner{
 		Stdout:     stdout,
 		Stderr:     stderr,
+		Stdin:      os.Stdin,
 		IsTerminal: isTerminal,
 	}
 }
@@ -68,6 +73,23 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.printVersion()
 	case "-h", "--help", "-help", "help":
 		return r.printHelp()
+	case "ingest":
+		return r.handleIngest(args[1:])
+	case "clear-intent", "clear_intent":
+		return r.handleClearIntent(args[1:])
+	case "cache":
+		if len(args) == 1 {
+			return r.handleStatus()
+		}
+		if strings.EqualFold(args[1], "clear") {
+			return r.handleClearIntent(args[2:])
+		}
+		if strings.EqualFold(args[1], "status") {
+			return r.handleStatus()
+		}
+		return r.handleUnknown(args[0] + " " + args[1])
+	case "status":
+		return r.handleStatus()
 	default:
 		return r.handleUnknown(args[0])
 	}
@@ -100,19 +122,205 @@ func (r *Runner) handleUnknown(arg string) (Action, int) {
 	return ActionHandled, 1
 }
 
+func (r *Runner) handleIngest(args []string) (Action, int) {
+	var sessionID string
+	var turnID int
+	var prompt string
+
+	for i := 0; i < len(args); i++ {
+		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
+			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
+			fmt.Sscanf(val, "%d", &turnID)
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "-p", "--prompt"); ok {
+			prompt = val
+			continue
+		}
+	}
+
+	// If prompt not provided in CLI flags, attempt to read piped JSON from Stdin
+	if prompt == "" && r.Stdin != nil {
+		if r.IsTerminal != nil && r.IsTerminal() {
+			fmt.Fprintln(r.Stderr, "Error: ingest requires a non-empty prompt via --prompt or piped JSON payload on stdin")
+			return ActionHandled, 1
+		}
+		stdinBytes, err := io.ReadAll(r.Stdin)
+		if err != nil {
+			fmt.Fprintf(r.Stderr, "Error reading stdin: %v\n", err)
+		} else if len(strings.TrimSpace(string(stdinBytes))) > 0 {
+			parsedState, parseErr := harness.ParseIngestPayload(stdinBytes)
+			if parseErr != nil {
+				fmt.Fprintf(r.Stderr, "Error parsing ingest payload: %v (received: %q)\n", parseErr, string(stdinBytes))
+			} else if parsedState != nil {
+				if sessionID == "" {
+					sessionID = parsedState.SessionID
+				}
+				if turnID == 0 {
+					turnID = parsedState.TurnID
+				}
+				if prompt == "" {
+					prompt = parsedState.Prompt
+				}
+			}
+		}
+	}
+
+	if strings.TrimSpace(prompt) == "" {
+		fmt.Fprintln(r.Stderr, "Error: ingest requires a non-empty prompt via --prompt or piped JSON payload on stdin")
+		return ActionHandled, 1
+	}
+
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	state := &session.SessionState{
+		SessionID: sessionID,
+		TurnID:    turnID,
+		Prompt:    prompt,
+	}
+
+	if err := session.SaveSession(state); err != nil {
+		fmt.Fprintf(r.Stderr, "Error: failed to save session intent: %v\n", err)
+		return ActionHandled, 1
+	}
+
+	// Write confirmation to Stderr so stdout remains empty and does not pollute Claude Code prompts
+	if session.IsNegativeIntent(prompt) {
+		fmt.Fprintf(r.Stderr, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
+	} else {
+		fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+	}
+
+	return ActionHandled, 0
+}
+
+func (r *Runner) handleClearIntent(args []string) (Action, int) {
+	var sessionID string
+	clearAll := false
+
+	for i := 0; i < len(args); i++ {
+		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
+			sessionID = val
+			continue
+		}
+		switch strings.ToLower(args[i]) {
+		case "-a", "--all":
+			clearAll = true
+		}
+	}
+
+	if sessionID != "" && !clearAll {
+		if err := session.ClearSession(sessionID); err != nil {
+			fmt.Fprintf(r.Stderr, "Error: failed to clear session: %v\n", err)
+			return ActionHandled, 1
+		}
+		fmt.Fprintf(r.Stdout, "Session intent cleared for session '%s'\n", sessionID)
+		return ActionHandled, 0
+	}
+
+	if err := session.ClearAllSessions(); err != nil {
+		fmt.Fprintf(r.Stderr, "Error: failed to clear all sessions: %v\n", err)
+		return ActionHandled, 1
+	}
+	fmt.Fprintln(r.Stdout, "All active session intents cleared")
+	return ActionHandled, 0
+}
+
+func (r *Runner) handleStatus() (Action, int) {
+	homeDir := session.GetJevguardDir()
+	sessionsDir := session.GetSessionsDir()
+
+	list, err := session.ListSessions()
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "Error reading sessions: %v\n", err)
+		return ActionHandled, 1
+	}
+
+	fmt.Fprintln(r.Stdout, "jev-guard status:")
+	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
+	fmt.Fprintf(r.Stdout, "  Sessions Directory: %s\n", sessionsDir)
+	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(list))
+
+	for _, s := range list {
+		status := "Active"
+		if s.Aborted {
+			status = "Aborted"
+		}
+		promptPreview := s.Prompt
+		if len(promptPreview) > 60 {
+			promptPreview = promptPreview[:57] + "..."
+		}
+		fmt.Fprintf(r.Stdout, "  - [%s] Status: %s, Turn: %d, Updated: %s\n",
+			s.SessionID, status, s.TurnID, s.UpdatedAt.Format("15:04:05"))
+		if promptPreview != "" {
+			fmt.Fprintf(r.Stdout, "    Prompt: %q\n", promptPreview)
+		}
+	}
+
+	return ActionHandled, 0
+}
+
 func helpMessage() string {
 	return `jev-guard - High-speed, cross-agent safety gate plugin
 
 Usage:
-  jev-guard [flags]
+  jev-guard [command] [flags]
   <payload-json> | jev-guard
+
+Commands:
+  ingest          Ingest active user prompt/intent into session cache
+  clear-intent    Clear active user intent for a session (or all sessions)
+  cache clear     Alias for clear-intent
+  status          Display active sessions and jev-guard environment status
 
 Flags:
   -h, --help       Show help and usage information
   -v, --version    Show version information
 
+Ingest Flags:
+  -s, --session <id>   Session / Conversation ID (defaults to "default")
+  -t, --turn <num>     Turn / Invocation sequence number
+  -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
+
+Clear-Intent Flags:
+  -s, --session <id>   Session ID to clear (omitting clears all sessions)
+  -a, --all            Clear all active session caches
+
 Description:
   jev-guard intercepts AI agent tool calls from Claude Code, Codex CLI,
   and Antigravity. It reads tool call payloads from standard input (stdin)
-  and outputs evaluation verdicts (ALLOW, ASK, or DENY).`
+  and outputs evaluation verdicts (ALLOW, ASK, or DENY).
+
+  With context awareness enabled, jev-guard can ingest active user prompts
+  via 'jev-guard ingest' (invoked by UserPromptSubmit or PreInvocation hooks)
+  to authorize explicitly requested operations and prevent false denials.`
 }
+
+// parseFlagValue extracts the value for a given flag either from --flag=value or from a separate next argument.
+func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
+	arg := args[*i]
+	lower := strings.ToLower(arg)
+
+	for _, name := range flagNames {
+		lowerName := strings.ToLower(name)
+		if lower == lowerName {
+			if *i+1 < len(args) {
+				*i++
+				return strings.Trim(args[*i], `"'`), true
+			}
+			return "", true
+		}
+		prefix := lowerName + "="
+		if strings.HasPrefix(lower, prefix) {
+			rawVal := arg[len(prefix):]
+			return strings.Trim(rawVal, `"'`), true
+		}
+	}
+	return "", false
+}
+

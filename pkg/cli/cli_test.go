@@ -113,3 +113,225 @@ func TestEvaluateArgs_PipeNoArgs(t *testing.T) {
 		t.Fatalf("expected no stdout/stderr output for gate execution, got out=%q, err=%q", stdout.String(), stderr.String())
 	}
 }
+
+func TestEvaluateArgs_IngestFlags(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"ingest", "--session", "test-sess", "--turn", "2", "--prompt", "Delete build artifacts"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Session intent recorded") {
+		t.Errorf("expected stderr to mention session intent recorded, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_IngestEqualsSyntax(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"ingest", "--session=equals-sess", "--turn=3", "--prompt=Clean up cache directory"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "equals-sess") || !strings.Contains(stderr.String(), "turn: 3") {
+		t.Errorf("expected stderr to mention equals-sess and turn 3, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_IngestStdin(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(`{"session_id": "piped-sess", "turn_id": 1, "prompt": "Compile app"}`)
+
+	action, code := runner.EvaluateArgs([]string{"ingest"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "piped-sess") {
+		t.Errorf("expected stderr to mention piped-sess, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_IngestAbort(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"ingest", "--session", "abort-sess", "--prompt", "Stop! Cancel all operations"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected stdout to be empty to prevent prompt pollution, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Abort signal recorded") {
+		t.Errorf("expected abort signal notice in stderr, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_IngestTerminalWithoutPrompt(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return true }) // interactive terminal
+
+	action, code := runner.EvaluateArgs([]string{"ingest"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v", action)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "requires a non-empty prompt") {
+		t.Errorf("expected error message about non-empty prompt, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_ClearIntent(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	// First ingest
+	_, _ = runner.EvaluateArgs([]string{"ingest", "--session", "to-clear", "--prompt", "Test"})
+	stdout.Reset()
+
+	// Clear specific
+	action, code := runner.EvaluateArgs([]string{"clear-intent", "--session", "to-clear"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "Session intent cleared") {
+		t.Errorf("expected clear output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_ClearIntentEqualsSyntax(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	// First ingest
+	_, _ = runner.EvaluateArgs([]string{"ingest", "--session=to-clear-eq", "--prompt=Test"})
+	stdout.Reset()
+
+	// Clear specific using equals syntax
+	action, code := runner.EvaluateArgs([]string{"clear-intent", "--session=to-clear-eq"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "Session intent cleared for session 'to-clear-eq'") {
+		t.Errorf("expected clear output for to-clear-eq, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheClearAlias(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache", "clear"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "cleared") {
+		t.Errorf("expected clear output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheNoArgs(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "jev-guard status:") {
+		t.Errorf("expected status output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheStatus(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache", "status"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "jev-guard status:") {
+		t.Errorf("expected status output, got %q", stdout.String())
+	}
+}
+
+func TestEvaluateArgs_CacheUnknown(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	action, code := runner.EvaluateArgs([]string{"cache", "invalid"})
+	if action != ActionHandled || code != 1 {
+		t.Fatalf("expected ActionHandled with code 1, got %v, %d", action, code)
+	}
+	if !strings.Contains(stderr.String(), "unrecognized flag or command") {
+		t.Errorf("expected error output, got %q", stderr.String())
+	}
+}
+
+func TestEvaluateArgs_Status(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+
+	// Ingest one session
+	_, _ = runner.EvaluateArgs([]string{"ingest", "--session", "status-sess", "--prompt", "Working on tests"})
+	stdout.Reset()
+
+	action, code := runner.EvaluateArgs([]string{"status"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
+	}
+	if !strings.Contains(stdout.String(), "status-sess") {
+		t.Errorf("expected status output to list status-sess, got %q", stdout.String())
+	}
+}
