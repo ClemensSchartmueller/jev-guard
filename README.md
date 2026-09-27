@@ -303,12 +303,19 @@ Configure `PreInvocation` to capture turn intent and `PreToolUse` for tool-level
     "PreToolUse": [
       {
         "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
-        "command": "jev-guard"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review.
 
 ---
 
