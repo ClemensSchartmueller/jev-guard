@@ -2,7 +2,7 @@ package fastpath
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -110,22 +110,22 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 	if isFileURI(targetRaw) {
 		targetRaw = extractFilePathFromURI(targetRaw)
 	}
-	target := filepath.ToSlash(strings.ToLower(targetRaw))
-	cmd := filepath.ToSlash(strings.ToLower(call.Command))
-	baseName := strings.ToLower(filepath.Base(targetRaw))
+	target := strings.ToLower(normalizePathSeparators(targetRaw))
+	cmd := strings.ToLower(normalizePathSeparators(call.Command))
+	baseName := strings.ToLower(path.Base(target))
 	cmdTokens := strings.Fields(cmd)
 
 	for _, s := range f.sensitiveFiles {
-		lowerPattern := filepath.ToSlash(strings.ToLower(s))
+		lowerPattern := strings.ToLower(normalizePathSeparators(s))
 
 		// 1. Glob matching on target path / basename
 		if baseName != "" && baseName != "." {
-			if matched, _ := filepath.Match(lowerPattern, baseName); matched {
+			if matched, _ := path.Match(lowerPattern, baseName); matched {
 				return "Access to sensitive file or credential pattern: " + s
 			}
 		}
 		if target != "" {
-			if matched, _ := filepath.Match(lowerPattern, target); matched {
+			if matched, _ := path.Match(lowerPattern, target); matched {
 				return "Access to sensitive file or credential pattern: " + s
 			}
 		}
@@ -134,8 +134,8 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 		if strings.Contains(lowerPattern, "*") || strings.Contains(lowerPattern, "?") {
 			for _, token := range cmdTokens {
 				cleanToken := strings.Trim(token, `"'`)
-				tokenBase := strings.ToLower(filepath.Base(cleanToken))
-				if matched, _ := filepath.Match(lowerPattern, tokenBase); matched {
+				tokenBase := strings.ToLower(path.Base(normalizePathSeparators(cleanToken)))
+				if matched, _ := path.Match(lowerPattern, tokenBase); matched {
 					return "Access to sensitive file or credential pattern: " + s
 				}
 			}
@@ -159,6 +159,10 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 		}
 	}
 	return ""
+}
+
+func normalizePathSeparators(value string) string {
+	return strings.ReplaceAll(value, `\`, "/")
 }
 
 func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
