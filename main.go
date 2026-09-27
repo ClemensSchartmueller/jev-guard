@@ -18,6 +18,10 @@ import (
 )
 
 func main() {
+	if err := config.EnsureUserConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
+		os.Exit(2)
+	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	action, exitCode := runner.EvaluateArgs(os.Args[1:])
 	if action == cli.ActionHandled {

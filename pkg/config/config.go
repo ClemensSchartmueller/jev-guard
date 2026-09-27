@@ -179,9 +179,9 @@ func LoadConfigWithPathsAndRoots(candidateDirs, workspaceRoots []string, userCon
 	return cfg
 }
 
-// UserConfigPath returns the selected user-owned policy file path. It deliberately uses the
+// UserConfigPath returns the user-owned policy file path. It deliberately uses the
 // system account profile rather than environment variables that a repository or hook process
-// can override. The legacy path is used only when the canonical file is absent.
+// can override.
 func UserConfigPath() string {
 	current, err := user.Current()
 	if err != nil || strings.TrimSpace(current.HomeDir) == "" {
@@ -191,14 +191,90 @@ func UserConfigPath() string {
 }
 
 func userConfigPathForHome(home string) string {
-	canonical := filepath.Join(home, ".jevguard.json")
-	if _, err := os.Lstat(canonical); os.IsNotExist(err) {
-		legacy := filepath.Join(home, ".jevguard", "config.json")
-		if _, legacyErr := os.Lstat(legacy); !os.IsNotExist(legacyErr) {
-			return legacy
-		}
+	return filepath.Join(home, ".jevguard", ".jevguard.json")
+}
+
+// EnsureUserConfig creates the user-owned configuration on first launch.
+// Existing files are checked but never changed, including files created by a
+// concurrent launch. An invalid or unsafe path stops startup.
+func EnsureUserConfig() error {
+	path := UserConfigPath()
+	if path == "" {
+		return fmt.Errorf("system user home directory is unavailable")
 	}
-	return canonical
+	return ensureUserConfigAt(path)
+}
+
+func ensureUserConfigAt(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect config directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("config directory must be a directory, not a symlink: %s", dir)
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return validateExistingUserConfig(path)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect user config: %w", err)
+	}
+
+	defaults := DefaultConfig()
+	template := struct {
+		Mode                    string   `json:"mode"`
+		TimeoutMs               int      `json:"timeout_ms"`
+		FastpathEnabled         bool     `json:"fastpath_enabled"`
+		ContextAwarenessEnabled bool     `json:"context_awareness_enabled"`
+		SensitiveFiles          []string `json:"sensitive_files"`
+		TrustedCommands         []string `json:"trusted_commands"`
+	}{defaults.Mode, defaults.TimeoutMs, defaults.IsFastpathEnabled(), defaults.IsContextAwarenessEnabled(), defaults.SensitiveFiles, defaults.TrustedCommands}
+	data, err := json.MarshalIndent(template, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode user config: %w", err)
+	}
+	file, err := os.CreateTemp(dir, ".jevguard-*")
+	if err != nil {
+		return fmt.Errorf("prepare user config: %w", err)
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.Write(append(data, '\n')); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write user config: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("close user config: %w", err)
+	}
+	// A hard link publishes the complete file atomically and fails if any path,
+	// including a symlink, already occupies the destination.
+	if err = os.Link(file.Name(), path); os.IsExist(err) {
+		return validateExistingUserConfig(path)
+	} else if err != nil {
+		return fmt.Errorf("publish user config: %w", err)
+	}
+	return nil
+}
+
+func validateExistingUserConfig(path string) error {
+	if err := rejectSymlinkFileOrParent(path); err != nil {
+		return err
+	}
+	data, err := readConfigFile(path)
+	if err != nil {
+		return err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil || object == nil {
+		return fmt.Errorf("user config must be a JSON object: %s", path)
+	}
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return fmt.Errorf("invalid user config: %w", err)
+	}
+	return nil
 }
 
 // TrustRegistryPath returns the user-owned registry that approves exact project config contents.

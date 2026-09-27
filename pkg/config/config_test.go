@@ -39,63 +39,54 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 }
 
-func TestUserConfigPathSelection(t *testing.T) {
+func TestUserConfigPath(t *testing.T) {
 	clearConfigEnvironment(t)
 	for _, tc := range []struct {
-		name           string
-		canonical      string
-		legacy         string
-		canonicalDir   bool
-		selectedLegacy bool
-		wantMode       string
-		wantAuditDir   string
+		name         string
+		canonical    string
+		oldHome      string
+		oldDirectory string
+		wantMode     string
+		wantAudit    bool
 	}{
-		{name: "no config", wantMode: "enforcing", wantAuditDir: ""},
-		{name: "legacy only", legacy: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, selectedLegacy: true, wantMode: "audit", wantAuditDir: "legacy"},
-		{name: "canonical only", canonical: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, wantMode: "audit", wantAuditDir: "home"},
-		{name: "canonical wins", canonical: `{"mode":"enforcing","audit_log_path":"audit.jsonl"}`, legacy: `{"mode":"audit"}`, wantMode: "enforcing", wantAuditDir: "home"},
-		{name: "invalid canonical does not load legacy", canonical: `{`, legacy: `{"mode":"audit"}`, wantMode: "enforcing"},
-		{name: "nonregular canonical does not load legacy", canonicalDir: true, legacy: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "no config", wantMode: "enforcing"},
+		{name: "old home file ignored", oldHome: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "old directory file ignored", oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "canonical only", canonical: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, wantMode: "audit", wantAudit: true},
+		{name: "canonical wins", canonical: `{"mode":"enforcing","audit_log_path":"audit.jsonl"}`, oldHome: `{"mode":"audit"}`, oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing", wantAudit: true},
+		{name: "invalid canonical does not load old files", canonical: `{`, oldHome: `{"mode":"audit"}`, oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
-			canonical := filepath.Join(home, ".jevguard.json")
-			legacyDir := filepath.Join(home, ".jevguard")
-			legacy := filepath.Join(legacyDir, "config.json")
-			if tc.canonicalDir {
-				if err := os.Mkdir(canonical, 0700); err != nil {
-					t.Fatal(err)
-				}
-			} else if tc.canonical != "" {
+			configDir := filepath.Join(home, ".jevguard")
+			if err := os.Mkdir(configDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			canonical := filepath.Join(configDir, ".jevguard.json")
+			if tc.canonical != "" {
 				if err := os.WriteFile(canonical, []byte(tc.canonical), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if tc.legacy != "" {
-				if err := os.Mkdir(legacyDir, 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(legacy, []byte(tc.legacy), 0600); err != nil {
+			if tc.oldHome != "" {
+				if err := os.WriteFile(filepath.Join(home, ".jevguard.json"), []byte(tc.oldHome), 0600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			selected := canonical
-			if tc.selectedLegacy {
-				selected = legacy
-			}
-			if got := userConfigPathForHome(home); got != selected {
-				t.Fatalf("selected path = %q, want %q", got, selected)
-			}
-			cfg := LoadConfigWithPaths(nil, selected, filepath.Join(legacyDir, "trusted-project-configs.json"))
-			if cfg.UserConfigPath != selected || cfg.Mode != tc.wantMode {
-				t.Fatalf("path = %q, mode = %q; want %q, %q", cfg.UserConfigPath, cfg.Mode, selected, tc.wantMode)
-			}
-			if tc.wantAuditDir != "" {
-				base := home
-				if tc.wantAuditDir == "legacy" {
-					base = legacyDir
+			if tc.oldDirectory != "" {
+				if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(tc.oldDirectory), 0600); err != nil {
+					t.Fatal(err)
 				}
-				if want := filepath.Join(base, "audit.jsonl"); cfg.AuditLogPath != want {
+			}
+			if got := userConfigPathForHome(home); got != canonical {
+				t.Fatalf("user config path = %q, want %q", got, canonical)
+			}
+			cfg := LoadConfigWithPaths(nil, canonical, filepath.Join(configDir, "trusted-project-configs.json"))
+			if cfg.UserConfigPath != canonical || cfg.Mode != tc.wantMode {
+				t.Fatalf("path = %q, mode = %q; want %q, %q", cfg.UserConfigPath, cfg.Mode, canonical, tc.wantMode)
+			}
+			if tc.wantAudit {
+				if want := filepath.Join(configDir, "audit.jsonl"); cfg.AuditLogPath != want {
 					t.Fatalf("audit log path = %q, want %q", cfg.AuditLogPath, want)
 				}
 			}
