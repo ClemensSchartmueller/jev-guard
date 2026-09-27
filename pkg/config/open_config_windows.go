@@ -19,7 +19,7 @@ func openRegularConfigFile(path string) (*os.File, error) {
 		syscall.FILE_SHARE_READ,
 		nil,
 		syscall.OPEN_EXISTING,
-		syscall.FILE_FLAG_OPEN_REPARSE_POINT|syscall.FILE_FLAG_OVERLAPPED,
+		syscall.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
 	if err != nil {
