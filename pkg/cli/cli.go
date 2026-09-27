@@ -94,6 +94,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleStatus()
 	case "config":
 		return r.handleConfig(args[1:])
+	case "init":
+		return r.handleInit(args[1:])
 	default:
 		return r.handleUnknown(args[0])
 	}
@@ -414,6 +416,7 @@ Usage:
   <payload-json> | jev-guard
 
 Commands:
+  init            Configure agent hooks in the current project
   ingest          Ingest active user prompt/intent into session cache
   clear-intent    Clear active user intent for a session (or all sessions)
   cache clear     Alias for clear-intent
@@ -441,7 +444,7 @@ Description:
   and outputs evaluation verdicts (ALLOW, ASK, or DENY).
 
   With context awareness enabled, jev-guard can ingest active user prompts
-  via 'jev-guard ingest' (invoked by UserPromptSubmit or PreInvocation hooks)
+  via 'jev-guard ingest' (invoked by Claude Code's UserPromptSubmit hook)
   to authorize explicitly requested operations and prevent false denials.`
 }
 

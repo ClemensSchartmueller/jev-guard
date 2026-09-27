@@ -63,6 +63,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Verify npm package version matches tag
+        run: |
+          test "v$(node -p "require('./npm/jev-guard/package.json').version")" = "${GITHUB_REF_NAME}"
+
       - name: Download Artifacts
         uses: actions/download-artifact@v7
         with:
@@ -83,3 +90,32 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    name: Publish npm launcher
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: npm/jev-guard
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Test and inspect npm package
+        run: |
+          npm test
+          npm pack --dry-run
+
+      - name: Publish npm package
+        run: npm publish --access public

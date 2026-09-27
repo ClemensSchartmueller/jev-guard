@@ -103,7 +103,7 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 	}, nil
 }
 
-// ParseIngestPayload parses a JSON payload from UserPromptSubmit (Claude) or PreInvocation (Antigravity).
+// ParseIngestPayload parses prompt-bearing hook payloads or explicit ingest JSON.
 func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	clean := bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
 	if len(strings.TrimSpace(string(clean))) == 0 {
