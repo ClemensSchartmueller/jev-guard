@@ -17,7 +17,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
   - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
   - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`) are strictly routed to TypeSafe AI System One for semantic evaluation.
-  - **Bypass Toggle**: Fully configurable via `"fastpath_enabled": false` or `JEV_GUARD_FASTPATH_ENABLED=0` to route 100% of operations directly to Jev.
+  - **User-controlled Bypass Toggle**: Set `"fastpath_enabled": false` in `~/.jevguard/config.json` to route operations directly to Jev.
 - **Platform-Specific Safety Enforcement**:
   - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
   - **Claude Code & Codex Fail-Safe Blocking**: In Claude Code and Codex, autonomous/bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) disable interactive prompts. `jev-guard` enforces safety by defaulting all `ASK` and `force_ask` escalations to **exit code 2** (rejection with feedback to `stderr`), preventing sensitive files or boundary escapes from silently executing.
@@ -35,7 +35,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
-  - **Fully Optional & Zero-Guess Fallback**: Configurable via `"context_awareness_enabled": false` or `JEV_GUARD_CONTEXT_AWARENESS_ENABLED=0`. If the cache is cold, `jev-guard` falls back deterministically to strict stateless safety.
+  - **Fully Optional & Zero-Guess Fallback**: Set `"context_awareness_enabled": false` in `~/.jevguard/config.json`. If the cache is cold, `jev-guard` falls back deterministically to strict stateless safety.
 - **Fail-Safe Operation**: If TypeSafe AI is unavailable or network times out, safely falls back to interactive confirmation (`ASK` / `force_ask`).
 
 ---
@@ -116,24 +116,42 @@ cat payload.json | jev-guard
 
 ## Configuration
 
-### Hierarchical Configuration Discovery
+### User-owned security settings
 
-`jev-guard` searches for `.jevguard.json` or `jevguard.json` by inspecting the tool call's working directory (`cwd`), workspace roots, and target file directory, automatically traversing up ancestor directories until a configuration file is found. This allows subdirectories and monorepo packages to automatically inherit the workspace root configuration without duplicate config files.
+Security settings are read from `~/.jevguard/config.json` (on Windows, `%USERPROFILE%\.jevguard\config.json`). This file owns the enforcement mode, API endpoint, model, timeout, API key, audit log path, fastpath, context awareness, sensitive-file patterns, and trusted commands. Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
+
+Repository files named `.jevguard.json` or `jevguard.json` are ignored until their exact contents are explicitly trusted. Even after trust, only additive `sensitive_files` entries are applied. Project values for `mode`, `base_url`, API keys, `fastpath_enabled`, `context_awareness_enabled`, and `trusted_commands` are ignored. Discovery checks the tool call's working directory and walks up to the nearest declared workspace root, inclusive. It also checks declared workspace roots directly. If no workspace root contains the working directory, discovery is bounded by the nearest `.git` directory or file; without one, it checks only the candidate directory. When a hook payload has neither a working directory nor workspace roots, the process working directory is the fallback and uses the same bounds. Target file directories are never used for config discovery.
+
+Relative `audit_log_path` values in the user config are anchored to `~/.jevguard`, outside the project tree.
+
+Use the CLI to inspect effective values and prepare or revoke a trust record:
 
 ```text
-my-project/
-├── .jevguard.json          # Root safety policy & settings (inherited by subdirectories)
-├── .jevguard.log           # Anchored audit log (if audit_log_path is configured)
-├── packages/
-│   └── app/                # Commands run here automatically inherit root .jevguard.json
-└── ...
+jev-guard config show
+jev-guard config trust .jevguard.json
+jev-guard config untrust .jevguard.json
 ```
 
-Relative audit log paths (such as `"audit_log_path": ".jevguard.log"`) are automatically anchored to the directory containing the resolved configuration file, ensuring audit entries are centralized in a single log rather than split across child directories.
+`config trust` prints the file's canonical path, root, SHA-256 digest, supported settings, and the registry entry to review. It does not grant trust. To approve it, manually add that entry to `~/.jevguard/trusted-project-configs.json`:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "project_root": "/path/to/project",
+      "config_path": "/path/to/project/.jevguard.json",
+      "sha256": "digest-printed-by-config-trust"
+    }
+  ]
+}
+```
+
+The digest is checked on every invocation. Editing or replacing the config requires a new reviewed record. `config untrust` identifies the user-owned registry entry to remove. The CLI does not write trust approvals because a confirmation typed into an agent-controlled shell would not prove that the user reviewed them. This design assumes the agent process cannot write `~/.jevguard/config.json` or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as the user, manual approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
 
 ### Operating Modes
 
-`jev-guard` supports two operational modes configured via `"mode"` in `.jevguard.json` or the `JEV_GUARD_MODE` environment variable:
+`jev-guard` supports two operational modes configured via `"mode"` in the user-owned config:
 
 - **`enforcing`** (default): Active safety gating.
   - Catastrophic operations or security violations are blocked (`DENY` / exit code 2).
@@ -148,16 +166,17 @@ Relative audit log paths (such as `"audit_log_path": ".jevguard.log"`) are autom
 
 ### Configuration Options
 
-You can configure your TypeSafe AI API key either via environment variable:
+Create `~/.jevguard/config.json` for user-owned settings. The API key can be supplied there or through the credential-only environment variable:
 ```bash
 export TYPESAFE_API_KEY="your-typesafe-api-key"
 ```
 
-Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) along with optional policy parameters:
+Example user config:
 ```json
 {
   "mode": "enforcing",
-  "typesafe_api_key": "your-typesafe-api-key",
+  "base_url": "https://api.typesafe.ai/v1/systemone",
+  "api_key": "your-typesafe-api-key",
   "timeout_ms": 1500,
   "model": "jev-latest",
   "fastpath_enabled": true,
@@ -175,17 +194,14 @@ Or directly inside `.jevguard.json` (using `"typesafe_api_key"` or `"api_key"`) 
 }
 ```
 
-> [!TIP]
-> If you embed `typesafe_api_key` inside `.jevguard.json`, remember to add `.jevguard.json` and `.jevguard.log` to your `.gitignore`, or configure `TYPESAFE_API_KEY` globally as an environment variable instead.
+The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. API requests do not follow redirects. `TYPESAFE_API_KEY` supplies credentials; environment variables cannot change mode, endpoint, model, timeout, or other policy settings.
 
 ### Recommended `.gitignore` Entries
 
 To protect your TypeSafe AI credentials and prevent committing local telemetry logs, add the following to your project's `.gitignore`:
 
 ```gitignore
-# jev-guard configuration (contains private API key) & audit logs
-.jevguard.json
-jevguard.json
+# Optional project additions and local audit logs
 .jevguard.log
 *.jevguard.log
 ```
@@ -194,22 +210,23 @@ jevguard.json
 
 | Setting | Configuration Key | Environment Variable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| **Mode** | `mode` | `JEV_GUARD_MODE` | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
-| **API Key** | `typesafe_api_key` / `api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
-| **Base URL** | `base_url` | `TYPESAFE_API_URL` | `"https://api.typesafe.ai/v1/systemone"` | TypeSafe API endpoint URL |
-| **Model** | `model` | `TYPESAFE_MODEL` | `"jev-latest"` | System One evaluation model |
-| **Timeout** | `timeout_ms` | `JEV_GUARD_TIMEOUT_MS` | `1500` | Evaluation HTTP timeout in milliseconds |
-| **Fastpath** | `fastpath_enabled` | `JEV_GUARD_FASTPATH_ENABLED` | `true` | Enable sub-1ms local fastpath filter |
-| **Context Awareness** | `context_awareness_enabled` | `JEV_GUARD_CONTEXT_AWARENESS_ENABLED` | `true` | Enable session intent caching & intent-aware evaluation |
+| **Mode** | `mode` | — | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
+| **API Key** | `api_key` / `typesafe_api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
+| **Base URL** | `base_url` | — | TypeSafe API default | HTTPS endpoint, or loopback HTTP endpoint |
+| **Model** | `model` | — | `"jev-latest"` | System One evaluation model |
+| **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
+| **Fastpath** | `fastpath_enabled` | — | `true` | Enable sub-1ms local fastpath filter |
+| **Context Awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching & intent-aware evaluation |
 | **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
-| **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | Array of substrings/globs to prompt confirmation on |
-| **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | Array of command prefixes cached for zero-latency approval |
+| **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; trusted project config can only add more |
+| **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes cached for zero-latency approval |
 
 ### Configuration Precedence
 
-1. **Environment Variables** (`TYPESAFE_API_KEY`, `TYPESAFE_API_URL`, `TYPESAFE_MODEL`, `JEV_GUARD_MODE`, `JEV_GUARD_TIMEOUT_MS`, `JEV_GUARD_FASTPATH_ENABLED`, `JEV_GUARD_CONTEXT_AWARENESS_ENABLED`) override file settings.
-2. **Project Configuration** (`.jevguard.json` or `jevguard.json` discovered safely in `cwd` or declared workspace roots, avoiding untrusted target directory hijacking).
-3. **Built-in Defaults** (`mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, standard sensitive file patterns and read commands).
+1. **User config** (`~/.jevguard/config.json`) owns policy and endpoint settings.
+2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
+3. **Trusted project config** can add `sensitive_files` only when the canonical path and exact SHA-256 digest match the user trust registry.
+4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, standard sensitive file patterns, and read commands.
 
 ### Audit Log Schema
 

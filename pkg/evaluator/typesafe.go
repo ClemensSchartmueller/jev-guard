@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
@@ -20,8 +21,9 @@ const (
 )
 
 var (
-	ErrMissingAPIKey = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY environment variable or typesafe_api_key in .jevguard.json)")
-	ErrAPIFailure    = errors.New("typesafe system one api returned error")
+	ErrMissingAPIKey  = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY or api_key in ~/.jevguard/config.json)")
+	ErrAPIFailure     = errors.New("typesafe system one api returned error")
+	ErrUnsafeEndpoint = errors.New("typesafe api endpoint must use HTTPS or loopback HTTP and cannot contain credentials, a query, or a fragment")
 )
 
 // JevJudgments stores decomposed semantic judgments from Jev.
@@ -31,7 +33,7 @@ type JevJudgments struct {
 	DestructiveConfidence float64
 	ViolationCategory     string
 	ViolationConfidence   float64
-	IntentAlignment       string  // "explicitly_requested", "incidental_or_unclear", "unprompted_or_contrary"
+	IntentAlignment       string // "explicitly_requested", "incidental_or_unclear", "unprompted_or_contrary"
 	IntentConfidence      float64
 }
 
@@ -61,12 +63,18 @@ func NewClient(apiKey, baseURL, model string, timeout time.Duration) *Client {
 		Model:   model,
 		HTTPClient: &http.Client{
 			Timeout: timeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
 
 // Evaluate evaluates a normalized tool call against TypeSafe System One Jev model.
 func (c *Client) Evaluate(ctx context.Context, call *harness.NormalizedToolCall) (*JevJudgments, error) {
+	if config.ValidateBaseURL(c.BaseURL) != nil {
+		return nil, ErrUnsafeEndpoint
+	}
 	if c.APIKey == "" {
 		return nil, ErrMissingAPIKey
 	}
@@ -84,7 +92,11 @@ func (c *Client) Evaluate(ctx context.Context, call *harness.NormalizedToolCall)
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	httpClient := *c.HTTPClient
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request to typesafe api failed: %w", err)
 	}

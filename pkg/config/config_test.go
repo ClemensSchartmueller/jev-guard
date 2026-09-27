@@ -40,6 +40,7 @@ func TestConfig_Defaults(t *testing.T) {
 }
 
 func TestConfig_LoadConfigFile(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -52,11 +53,12 @@ func TestConfig_LoadConfigFile(t *testing.T) {
 		"timeout_ms": 2500,
 		"sensitive_files": [".secrets.yaml"]
 	}`
-	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+	userConfigPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(userConfigPath, []byte(configJSON), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
+	cfg := LoadConfigWithPaths(nil, userConfigPath, filepath.Join(tempDir, "trusted-project-configs.json"))
 	if cfg.Mode != "audit" {
 		t.Errorf("expected audit mode, got %s", cfg.Mode)
 	}
@@ -69,6 +71,7 @@ func TestConfig_LoadConfigFile(t *testing.T) {
 }
 
 func TestConfig_LoadConfig_TypesafeAPIKey(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-key-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -78,17 +81,19 @@ func TestConfig_LoadConfig_TypesafeAPIKey(t *testing.T) {
 	configJSON := `{
 		"typesafe_api_key": "my-secret-jev-key"
 	}`
-	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+	userConfigPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(userConfigPath, []byte(configJSON), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
+	cfg := LoadConfigWithPaths(nil, userConfigPath, filepath.Join(tempDir, "trusted-project-configs.json"))
 	if cfg.APIKey != "my-secret-jev-key" {
 		t.Errorf("expected APIKey 'my-secret-jev-key', got %s", cfg.APIKey)
 	}
 }
 
 func TestConfig_LoadConfig_AncestorHierarchy(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempRoot, err := os.MkdirTemp("", "jev-config-ancestor-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -107,17 +112,18 @@ func TestConfig_LoadConfig_AncestorHierarchy(t *testing.T) {
 		t.Fatalf("failed to create subdirectories: %v", err)
 	}
 
-	// Load config from the deep child directory
-	cfg := LoadConfig(subChild)
-	if cfg.APIKey != "ancestor-key" {
-		t.Errorf("expected APIKey 'ancestor-key' from ancestor traversal, got %s", cfg.APIKey)
+	// Project policy inherited from an ancestor remains inactive until explicitly trusted.
+	cfg := LoadConfigWithPaths([]string{subChild}, filepath.Join(tempRoot, "user-config.json"), filepath.Join(tempRoot, "trusted-project-configs.json"))
+	if cfg.APIKey != "" {
+		t.Errorf("unexpected APIKey from untrusted ancestor config: %s", cfg.APIKey)
 	}
-	if cfg.Mode != "audit" {
-		t.Errorf("expected Mode 'audit', got %s", cfg.Mode)
+	if cfg.Mode != "enforcing" {
+		t.Errorf("expected enforcing mode for untrusted ancestor config, got %s", cfg.Mode)
 	}
 }
 
 func TestConfig_LoadConfig_AlternateFilename(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-altname-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -130,13 +136,14 @@ func TestConfig_LoadConfig_AlternateFilename(t *testing.T) {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
-	if cfg.APIKey != "alt-filename-key" {
-		t.Errorf("expected APIKey 'alt-filename-key', got %s", cfg.APIKey)
+	cfg := LoadConfigWithPaths([]string{tempDir}, filepath.Join(tempDir, "user-config.json"), filepath.Join(tempDir, "trusted-project-configs.json"))
+	if cfg.APIKey != "" {
+		t.Errorf("unexpected APIKey from an untrusted alternate config: %s", cfg.APIKey)
 	}
 }
 
 func TestConfig_LoadConfigForCall_WorkspaceRootsFallback(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-ws-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -154,9 +161,9 @@ func TestConfig_LoadConfigForCall_WorkspaceRootsFallback(t *testing.T) {
 		WorkspaceRoots: []string{tempDir},
 	}
 
-	cfg := LoadConfigForCall(call)
-	if cfg.APIKey != "ws-key" {
-		t.Errorf("expected APIKey 'ws-key' from WorkspaceRoots fallback, got %s", cfg.APIKey)
+	cfg := LoadConfigWithPaths(call.WorkspaceRoots, filepath.Join(tempDir, "user-config.json"), filepath.Join(tempDir, "trusted-project-configs.json"))
+	if cfg.APIKey != "" {
+		t.Errorf("unexpected APIKey from untrusted workspace config: %s", cfg.APIKey)
 	}
 }
 
@@ -244,6 +251,7 @@ func TestConfig_FastpathEnabled_Default(t *testing.T) {
 }
 
 func TestConfig_FastpathEnabled_FromFile(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-fastpath-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -255,11 +263,12 @@ func TestConfig_FastpathEnabled_FromFile(t *testing.T) {
 		"trusted_commands": ["my-custom-check"],
 		"sensitive_files": [".custom-secret"]
 	}`
-	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+	userConfigPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(userConfigPath, []byte(configJSON), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
+	cfg := LoadConfigWithPaths(nil, userConfigPath, filepath.Join(tempDir, "trusted-project-configs.json"))
 	if cfg.IsFastpathEnabled() {
 		t.Errorf("expected FastpathEnabled to be false when set in config file")
 	}
@@ -288,18 +297,19 @@ func TestConfig_FastpathEnabled_FromFile(t *testing.T) {
 	}
 }
 
-func TestConfig_FastpathEnabled_FromEnv(t *testing.T) {
-	os.Setenv("JEV_GUARD_FASTPATH_ENABLED", "0")
-	defer os.Unsetenv("JEV_GUARD_FASTPATH_ENABLED")
+func TestConfig_FastpathEnabled_IgnoresEnvironmentOverride(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("JEV_GUARD_FASTPATH_ENABLED", "0")
 
 	cfg := DefaultConfig()
 	loadEnvironment(cfg)
-	if cfg.IsFastpathEnabled() {
-		t.Errorf("expected FastpathEnabled to be false when JEV_GUARD_FASTPATH_ENABLED=0")
+	if !cfg.IsFastpathEnabled() {
+		t.Errorf("environment override unexpectedly disabled the user-owned fastpath setting")
 	}
 }
 
 func TestConfig_AuditLogPath_AnchoredToConfigDir(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-audit-anchor-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -309,11 +319,12 @@ func TestConfig_AuditLogPath_AnchoredToConfigDir(t *testing.T) {
 	configJSON := `{
 		"audit_log_path": ".custom_audit.log"
 	}`
-	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+	userConfigPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(userConfigPath, []byte(configJSON), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
+	cfg := LoadConfigWithPaths(nil, userConfigPath, filepath.Join(tempDir, "trusted-project-configs.json"))
 	expectedPath := filepath.Join(tempDir, ".custom_audit.log")
 	if cfg.AuditLogPath != expectedPath {
 		t.Errorf("expected AuditLogPath %q, got %q", expectedPath, cfg.AuditLogPath)
@@ -364,6 +375,7 @@ func TestConfig_ContextAwarenessEnabled_Default(t *testing.T) {
 }
 
 func TestConfig_ContextAwarenessEnabled_FromFile(t *testing.T) {
+	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-ctx-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -371,24 +383,25 @@ func TestConfig_ContextAwarenessEnabled_FromFile(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	configJSON := `{"context_awareness_enabled": false}`
-	if err := os.WriteFile(filepath.Join(tempDir, ".jevguard.json"), []byte(configJSON), 0644); err != nil {
+	userConfigPath := filepath.Join(tempDir, "config.json")
+	if err := os.WriteFile(userConfigPath, []byte(configJSON), 0600); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg := LoadConfig(tempDir)
+	cfg := LoadConfigWithPaths(nil, userConfigPath, filepath.Join(tempDir, "trusted-project-configs.json"))
 	if cfg.IsContextAwarenessEnabled() {
 		t.Errorf("expected ContextAwarenessEnabled to be false when set in config file")
 	}
 }
 
-func TestConfig_ContextAwarenessEnabled_FromEnv(t *testing.T) {
-	os.Setenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED", "0")
-	defer os.Unsetenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED")
+func TestConfig_ContextAwarenessEnabled_IgnoresEnvironmentOverride(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("JEV_GUARD_CONTEXT_AWARENESS_ENABLED", "0")
 
 	cfg := DefaultConfig()
 	loadEnvironment(cfg)
-	if cfg.IsContextAwarenessEnabled() {
-		t.Errorf("expected ContextAwarenessEnabled to be false when JEV_GUARD_CONTEXT_AWARENESS_ENABLED=0")
+	if !cfg.IsContextAwarenessEnabled() {
+		t.Errorf("environment override unexpectedly disabled user-owned context awareness")
 	}
 }
 
