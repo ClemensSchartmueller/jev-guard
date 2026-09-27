@@ -33,7 +33,7 @@ func TestFastPath_CatastrophicDelegatesToSemantic(t *testing.T) {
 }
 
 func TestFastPath_SensitiveFiles(t *testing.T) {
-	filter := NewDefaultFilter()
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
 
 	call1 := &harness.NormalizedToolCall{
 		ToolName: "Bash",
@@ -61,6 +61,8 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	resWinSSH := filter.Evaluate(callWinSSH)
 	if resWinSSH == nil || resWinSSH.Decision != harness.DecisionAsk {
 		t.Errorf("expected ASK for Windows .ssh path, got %+v", resWinSSH)
+	} else if resWinSSH.Source != "fastpath_sensitive" {
+		t.Errorf("expected sensitive-file match for Windows .ssh path, got source %q", resWinSSH.Source)
 	}
 
 	callWinAWS := &harness.NormalizedToolCall{
@@ -70,6 +72,16 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	resWinAWS := filter.Evaluate(callWinAWS)
 	if resWinAWS == nil || resWinAWS.Decision != harness.DecisionAsk {
 		t.Errorf("expected ASK for Windows .aws path, got %+v", resWinAWS)
+	} else if resWinAWS.Source != "fastpath_sensitive" {
+		t.Errorf("expected sensitive-file match for Windows .aws path, got source %q", resWinAWS.Source)
+	}
+}
+
+func TestNormalizePathSeparators(t *testing.T) {
+	got := normalizePathSeparators(`C:\Users\User\.aws\credentials`)
+	want := "C:/Users/User/.aws/credentials"
+	if got != want {
+		t.Errorf("normalizePathSeparators() = %q, want %q", got, want)
 	}
 }
 
@@ -523,5 +535,3 @@ func TestFastPath_ReadResource_FileURIs(t *testing.T) {
 		t.Fatalf("expected nil (delegation to Jev) for external URI, got %+v", resExt)
 	}
 }
-
-
