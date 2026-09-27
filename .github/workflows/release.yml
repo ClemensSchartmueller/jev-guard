@@ -33,12 +33,13 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Build Binary
         env:
@@ -49,7 +50,7 @@ jobs:
           go build -trimpath -ldflags="-s -w -X jev-guard/pkg/cli.Version=${{ github.ref_name }} -X jev-guard/pkg/cli.Commit=${{ github.sha }} -X 'jev-guard/pkg/cli.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" -o dist/${{ matrix.output }} main.go
 
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binary-${{ matrix.output }}
           path: dist/${{ matrix.output }}
@@ -63,7 +64,7 @@ jobs:
       contents: write
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: dist
@@ -75,7 +76,7 @@ jobs:
           sha256sum jev-guard-* > checksums.txt
 
       - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*
