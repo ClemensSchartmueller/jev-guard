@@ -14,7 +14,7 @@ import (
 
 // Version information configured at compile-time or defaulted.
 var (
-	Version = "0.1.0"
+	Version = "0.2.0"
 	Commit  = "none"
 	Date    = "unknown"
 )
