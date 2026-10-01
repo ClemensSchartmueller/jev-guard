@@ -39,6 +39,61 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestUserConfigPath(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, tc := range []struct {
+		name         string
+		canonical    string
+		oldHome      string
+		oldDirectory string
+		wantMode     string
+		wantAudit    bool
+	}{
+		{name: "no config", wantMode: "enforcing"},
+		{name: "old home file ignored", oldHome: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "old directory file ignored", oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing"},
+		{name: "canonical only", canonical: `{"mode":"audit","audit_log_path":"audit.jsonl"}`, wantMode: "audit", wantAudit: true},
+		{name: "canonical wins", canonical: `{"mode":"enforcing","audit_log_path":"audit.jsonl"}`, oldHome: `{"mode":"audit"}`, oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing", wantAudit: true},
+		{name: "invalid canonical does not load old files", canonical: `{`, oldHome: `{"mode":"audit"}`, oldDirectory: `{"mode":"audit"}`, wantMode: "enforcing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			configDir := filepath.Join(home, ".jevguard")
+			if err := os.Mkdir(configDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			canonical := filepath.Join(configDir, ".jevguard.json")
+			if tc.canonical != "" {
+				if err := os.WriteFile(canonical, []byte(tc.canonical), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.oldHome != "" {
+				if err := os.WriteFile(filepath.Join(home, ".jevguard.json"), []byte(tc.oldHome), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.oldDirectory != "" {
+				if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(tc.oldDirectory), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := userConfigPathForHome(home); got != canonical {
+				t.Fatalf("user config path = %q, want %q", got, canonical)
+			}
+			cfg := LoadConfigWithPaths(nil, canonical, filepath.Join(configDir, "trusted-project-configs.json"))
+			if cfg.UserConfigPath != canonical || cfg.Mode != tc.wantMode {
+				t.Fatalf("path = %q, mode = %q; want %q, %q", cfg.UserConfigPath, cfg.Mode, canonical, tc.wantMode)
+			}
+			if tc.wantAudit {
+				if want := filepath.Join(configDir, "audit.jsonl"); cfg.AuditLogPath != want {
+					t.Fatalf("audit log path = %q, want %q", cfg.AuditLogPath, want)
+				}
+			}
+		})
+	}
+}
+
 func TestConfig_LoadConfigFile(t *testing.T) {
 	clearConfigEnvironment(t)
 	tempDir, err := os.MkdirTemp("", "jev-config-test-*")

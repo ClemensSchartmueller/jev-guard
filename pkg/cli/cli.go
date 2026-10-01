@@ -123,7 +123,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	cwd, _ := os.Getwd()
 	cfg := config.LoadConfig(cwd)
 	fmt.Fprintln(r.Stdout, "jev-guard effective configuration:")
-	fmt.Fprintf(r.Stdout, "  User config:          %s\n", config.UserConfigPath())
+	fmt.Fprintf(r.Stdout, "  User config:          %s\n", cfg.UserConfigPath)
 	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", config.TrustRegistryPath())
 	fmt.Fprintf(r.Stdout, "  Mode:                 %s (%s)\n", cfg.Mode, cfg.Sources["mode"])
 	fmt.Fprintf(r.Stdout, "  Base URL:             %s (%s)\n", effectiveBaseURL(cfg.BaseURL), cfg.Sources["base_url"])
