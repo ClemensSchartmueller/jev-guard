@@ -186,6 +186,9 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
 	}
 
 	if !contained {
+		if isClaudeSessionToolResult(call) {
+			return ""
+		}
 		return fmt.Sprintf("Target path escapes workspace boundaries: %s", target)
 	}
 
@@ -261,11 +264,19 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 			return false
 		}
 
+		// PowerShell accepts -Param:value syntax; any colon in a flag defers to semantic evaluation.
+		if strings.HasPrefix(cleanArg, "-") && strings.Contains(cleanArg, ":") {
+			return false
+		}
+
 		// Inspect --flag=path syntax
 		if strings.HasPrefix(cleanArg, "-") {
 			if strings.Contains(cleanArg, "=") {
 				parts := strings.SplitN(cleanArg, "=", 2)
 				val := strings.Trim(parts[1], `"'`)
+				if isUnsafeShellArg(val) {
+					return false
+				}
 				if isPotentialPath(val) {
 					contained, err := checker.IsPathContained(val, call.Cwd)
 					if err != nil || !contained {
@@ -276,6 +287,9 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 			continue
 		}
 
+		if isUnsafeShellArg(cleanArg) {
+			return false
+		}
 		if isPotentialPath(cleanArg) {
 			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
 			if err != nil || !contained {
@@ -300,13 +314,32 @@ func isPotentialPath(arg string) bool {
 	return false
 }
 
+// isUnsafeShellArg reports whether a command argument must defer to semantic
+// evaluation because it cannot be boundary-checked locally: PowerShell provider
+// qualifiers (env:, HKCU:\, cert:, Registry::...) and home-relative paths (~).
+// A Windows drive-letter path (C:, C:\x, C:/x) is not considered unsafe here;
+// it is boundary-checked by the caller.
+func isUnsafeShellArg(arg string) bool {
+	if strings.HasPrefix(arg, "~") {
+		return true
+	}
+	idx := strings.Index(arg, ":")
+	if idx < 0 {
+		return false
+	}
+	if idx == 1 && isDriveLetter(arg[0]) && !strings.Contains(arg[2:], ":") {
+		return false
+	}
+	return true
+}
+
 func isSafeReadTool(call *harness.NormalizedToolCall) bool {
 	if call == nil {
 		return false
 	}
 	toolName := strings.ToLower(strings.TrimSpace(call.ToolName))
 	switch toolName {
-	case "view_file", "view", "read_file", "readlocalfile",
+	case "view_file", "view", "read", "read_file", "readlocalfile",
 		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob":
 		return true
 	case "read_resource":

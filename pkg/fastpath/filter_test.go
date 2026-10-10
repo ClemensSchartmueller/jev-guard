@@ -535,3 +535,20 @@ func TestFastPath_ReadResource_FileURIs(t *testing.T) {
 		t.Fatalf("expected nil (delegation to Jev) for external URI, got %+v", resExt)
 	}
 }
+
+func TestFastPath_ClaudeToolCoverage(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Read", TargetPath: "pkg/fastpath/filter.go", WorkspaceRoots: []string{"."}}); res == nil || res.Decision != harness.DecisionAllow {
+		t.Errorf("expected ALLOW for in-workspace Read, got %+v", res)
+	}
+	if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Read", TargetPath: ".env", WorkspaceRoots: []string{"."}}); res == nil || res.Decision == harness.DecisionAllow {
+		t.Errorf("expected non-ALLOW for Read of .env, got %+v", res)
+	}
+	if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "PowerShell", Command: "echo (Remove-Item x)", WorkspaceRoots: []string{"."}}); res != nil && res.Decision == harness.DecisionAllow {
+		t.Errorf("PowerShell subexpression must not be fastpath allowed, got %+v", res)
+	}
+	if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com", WorkspaceRoots: []string{"."}}); res != nil {
+		t.Errorf("WebFetch must defer to semantic evaluation, got %+v", res)
+	}
+}
