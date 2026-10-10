@@ -140,10 +140,28 @@ jev-guard doctor --offline   # skip the network check
 
 # Test gate evaluation manually by piping a tool call payload JSON
 cat payload.json | jev-guard
+
+# Simulate how a tool call would be judged, without a live agent (supports --flag value and --flag=value)
+jev-guard eval --cmd "git diff .env"
+jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
+jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
+jev-guard eval --cmd "cat .env" --json
+jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
 ```
 
 > [!NOTE]
 > When executed directly in an interactive terminal without piped input or flags, `jev-guard` displays help and usage guidance instead of blocking on stdin.
+
+`jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fastpath, TypeSafe, policy, harness formatting):
+
+- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
+- `--cwd DIR` sets the working directory (default: current directory).
+- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written.
+- `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
+- `--explain` prints the config and mode, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
+- `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
+- `eval` never writes session state, ingests intents, or writes audit-log entries.
+- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); non-zero (`2`) on usage errors or unreadable payloads.
 
 ---
 
