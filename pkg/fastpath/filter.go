@@ -306,7 +306,7 @@ func isSafeReadTool(call *harness.NormalizedToolCall) bool {
 	}
 	toolName := strings.ToLower(strings.TrimSpace(call.ToolName))
 	switch toolName {
-	case "view_file", "view", "read_file", "readlocalfile",
+	case "view_file", "view", "read", "read_file", "readlocalfile",
 		"list_dir", "ls", "grep_search", "grep", "find_by_name", "glob":
 		return true
 	case "read_resource":
