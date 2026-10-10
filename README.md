@@ -134,6 +134,10 @@ jev-guard status
 jev-guard cache status
 jev-guard cache
 
+# Diagnose config, API key, network, audit log, and hook setup (exit 1 on any [FAIL])
+jev-guard doctor
+jev-guard doctor --offline   # skip the network check
+
 # Test gate evaluation manually by piping a tool call payload JSON
 cat payload.json | jev-guard
 ```
