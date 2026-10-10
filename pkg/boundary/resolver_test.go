@@ -124,4 +124,3 @@ func TestIsSubPathForOS(t *testing.T) {
 		t.Errorf("sibling directory app-secrets should not be considered inside app")
 	}
 }
-
