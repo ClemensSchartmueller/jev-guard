@@ -283,11 +283,16 @@ func (r *Runner) handleUnknown(arg string) (Action, int) {
 func (r *Runner) handleIngest(args []string) (Action, int) {
 	var sessionID string
 	var turnID int
+	var turnKey string
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
 		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
 			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "--turn-key", "--turn_key"); ok {
+			turnKey = val
 			continue
 		}
 		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
@@ -320,6 +325,9 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 				if turnID == 0 {
 					turnID = parsedState.TurnID
 				}
+				if turnKey == "" {
+					turnKey = parsedState.TurnKey
+				}
 				if prompt == "" {
 					prompt = parsedState.Prompt
 				}
@@ -339,6 +347,7 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	state := &session.SessionState{
 		SessionID: sessionID,
 		TurnID:    turnID,
+		TurnKey:   turnKey,
 		Prompt:    prompt,
 	}
 
@@ -494,7 +503,7 @@ Usage:
 Commands:
   init            Configure agent hooks in the current project
   ingest          Ingest active user prompt/intent into session cache
-  end-turn        Clear the session intent when a reply ends (Claude Code Stop hook)
+  end-turn        Clear the session intent when a reply ends (Claude Code / Codex Stop hook)
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
@@ -511,6 +520,7 @@ Flags:
 Ingest Flags:
   -s, --session <id>   Session / Conversation ID (defaults to "default")
   -t, --turn <num>     Turn / Invocation sequence number
+      --turn-key <id>  Opaque string turn ID (Codex turn_id) for exact turn scoping
   -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
 
 Eval Flags:

@@ -90,8 +90,8 @@ func (r *Runner) handleInit(args []string) (Action, int) {
 		return ActionHandled, 1
 	}
 	fmt.Fprintln(r.Stdout, "Run `jev-guard config show` to check policy and API key status.")
-	if scope == "project" && (agent == "codex" || agent == "all" || containsAgent(selected, "codex")) {
-		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hook with `/hooks` before it can run.")
+	if agent == "codex" || agent == "all" || containsAgent(selected, "codex") {
+		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hooks with `/hooks` before they can run. New or changed hooks (including UserPromptSubmit and Stop) must be re-trusted.")
 	}
 	return ActionHandled, 0
 }
@@ -231,7 +231,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 			}
 		}
 	}
-	if agent == "claude" {
+	if agent == "claude" || agent == "codex" {
 		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false)
 		if err != nil {
 			return false, err

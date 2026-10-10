@@ -31,7 +31,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Codex CLI is supported too through its `UserPromptSubmit` and `Stop` hooks. Intent is scoped to a single reply: the `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -83,7 +83,7 @@ export TYPESAFE_API_KEY="your-typesafe-api-key" # Linux / macOS
 $env:TYPESAFE_API_KEY = "your-typesafe-api-key" # PowerShell, current session
 ```
 
-Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex project hooks, review and trust the new hook through `/hooks` in Codex before it runs.
+Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex hooks, review and trust the new hooks (`PreToolUse`, `UserPromptSubmit`, `Stop`) through `/hooks` in Codex before they run; hooks added or changed by `init` must be re-trusted.
 
 ### Prebuilt Binaries
 
@@ -382,6 +382,17 @@ Antigravity's documented `PreInvocation` payload includes a transcript path but 
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [{ "type": "command", "command": "jev-guard ingest" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "jev-guard end-turn" }]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
@@ -397,7 +408,9 @@ Antigravity's documented `PreInvocation` payload includes a transcript path but 
 }
 ```
 
-Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review.
+Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review. New hooks added by `jev-guard init` (`UserPromptSubmit`, `Stop`) also need re-trusting via `/hooks`.
+
+Codex intent is scoped exactly by `turn_id`: `ingest` stores the string `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` only uses that intent when its own `turn_id` matches, so an interrupted or older turn's intent is never applied. `ingest` prints nothing to stdout (Codex would inject it into model context), `end-turn` prints nothing and exits 0, and every `ASK`/`force_ask`/`DENY` verdict exits 2 with the reason on stderr (Codex does not support `permissionDecision: "ask"`).
 
 ---
 

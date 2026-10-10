@@ -13,6 +13,8 @@ func TestResolveUserIntent(t *testing.T) {
 	tests := []struct {
 		name          string
 		callTurnID    int
+		callTurnKey   string
+		sessionKey    string
 		sessionTurnID int
 		prompt        string
 		expected      string
@@ -52,16 +54,29 @@ func TestResolveUserIntent(t *testing.T) {
 			prompt:        "stale previous turn prompt",
 			expected:      "",
 		},
+		{name: "matching turn keys", callTurnKey: "t1", sessionKey: "t1", prompt: "p", expected: "p"},
+		{name: "different turn keys", callTurnKey: "t2", sessionKey: "t1", prompt: "p", expected: ""},
+		{name: "call key but session has none", callTurnKey: "t1", prompt: "p", expected: ""},
+		{name: "session key only (Claude call)", sessionKey: "t1", prompt: "p", expected: "p"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveUserIntent(tc.callTurnID, tc.sessionTurnID, tc.prompt)
+			got := resolveUserIntent(tc.callTurnID, tc.sessionTurnID, tc.callTurnKey, tc.sessionKey, tc.prompt)
 			if got != tc.expected {
 				t.Errorf("resolveUserIntent(%d, %d, %q) = %q; want %q",
 					tc.callTurnID, tc.sessionTurnID, tc.prompt, got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestAbortFromOtherTurn(t *testing.T) {
+	if !abortFromOtherTurn("t2", "t1") {
+		t.Error("different keys should be another turn")
+	}
+	if abortFromOtherTurn("t1", "t1") || abortFromOtherTurn("", "t1") || abortFromOtherTurn("t1", "") || abortFromOtherTurn("", "") {
+		t.Error("equal or missing keys must keep the abort hold")
 	}
 }
 

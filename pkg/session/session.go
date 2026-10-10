@@ -74,6 +74,7 @@ func isReservedWindowsName(name string) bool {
 type SessionState struct {
 	SessionID string    `json:"session_id"`
 	TurnID    int       `json:"turn_id"`
+	TurnKey   string    `json:"turn_key,omitempty"`
 	Prompt    string    `json:"prompt"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Aborted   bool      `json:"aborted,omitempty"`

@@ -91,8 +91,16 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		}
 	}
 
+	// Codex sends turn_id as a string on turn-scoped events; Claude Code does not send it.
+	harnessType := HarnessClaudeCode
+	if payload.TurnID.Key != "" {
+		harnessType = HarnessCodex
+	}
+
 	return &NormalizedToolCall{
-		Harness:        HarnessClaudeCode,
+		Harness:        harnessType,
+		TurnID:         payload.TurnID.Num,
+		TurnKey:        payload.TurnID.Key,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
@@ -123,7 +131,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 		sid = "default"
 	}
 
-	turn := payload.TurnID
+	turn := payload.TurnID.Num
 	if turn == 0 {
 		turn = payload.InvocationNum
 	}
@@ -142,6 +150,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	return &session.SessionState{
 		SessionID: sid,
 		TurnID:    turn,
+		TurnKey:   payload.TurnID.Key,
 		Prompt:    prompt,
 	}, nil
 }
