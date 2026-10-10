@@ -50,6 +50,7 @@ func runGate() int {
 	}
 
 	if cfg.IsContextAwarenessEnabled() {
+		session.SetSessionTTL(cfg.IntentTTL())
 		sessionID := call.SessionID
 		if sessionID == "" {
 			sessionID = "default"

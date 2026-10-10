@@ -237,6 +237,11 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 			return false, err
 		}
 		changed = changed || c
+		c, err = ensureHook(section, "Stop", "", command+" end-turn", false)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || c
 	} else if agent == "antigravity" {
 		// Antigravity's documented PreInvocation payload does not expose prompt text.
 		// Remove the older managed ingest hook instead of installing a hook that
@@ -341,24 +346,22 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 				continue
 			}
 			if old, ok := obj["command"].(string); ok && managedHookCommand(old, command) {
-				if old == command && item["matcher"] == matcher {
+				currentMatcher, _ := item["matcher"].(string)
+				if old == command && currentMatcher == matcher {
 					return false, nil
 				}
 				if len(hooks) == 1 {
 					obj["command"] = command
-					item["matcher"] = matcher
+					setMatcher(item, matcher)
 					return true, nil
 				}
-				if item["matcher"] == matcher {
+				if currentMatcher == matcher {
 					obj["command"] = command
 					return true, nil
 				}
 				// Keep the shared matcher's behavior for unrelated handlers.
 				item["hooks"] = append(hooks[:index:index], hooks[index+1:]...)
-				section[event] = append(entries, map[string]interface{}{
-					"matcher": matcher,
-					"hooks":   []interface{}{map[string]interface{}{"type": "command", "command": command}},
-				})
+				section[event] = append(entries, newHookEntry(matcher, command))
 				return true, nil
 			}
 		}
@@ -367,10 +370,25 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 	if direct {
 		entry = map[string]interface{}{"type": "command", "command": command}
 	} else {
-		entry = map[string]interface{}{"matcher": matcher, "hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
+		entry = newHookEntry(matcher, command)
 	}
 	section[event] = append(entries, entry)
 	return true, nil
+}
+
+// newHookEntry builds a command hook group; an empty matcher is omitted (events such as Stop take none).
+func newHookEntry(matcher, command string) map[string]interface{} {
+	entry := map[string]interface{}{"hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
+	setMatcher(entry, matcher)
+	return entry
+}
+
+func setMatcher(item map[string]interface{}, matcher string) {
+	if matcher == "" {
+		delete(item, "matcher")
+		return
+	}
+	item["matcher"] = matcher
 }
 
 func removeManagedDirectHook(section map[string]interface{}, event, command string) (bool, error) {
@@ -409,10 +427,16 @@ func managedHookCommand(existing, desired string) bool {
 	if existing == desired {
 		return true
 	}
-	if strings.HasSuffix(existing, " ingest") != strings.HasSuffix(desired, " ingest") {
-		return false
+	subcommand := ""
+	for _, suffix := range []string{" ingest", " end-turn"} {
+		if strings.HasSuffix(desired, suffix) {
+			subcommand = suffix
+		}
+		if strings.HasSuffix(existing, suffix) != strings.HasSuffix(desired, suffix) {
+			return false
+		}
 	}
-	base := strings.TrimSuffix(existing, " ingest")
+	base := strings.TrimSuffix(existing, subcommand)
 	base = strings.Trim(base, `"'`)
 	base = strings.ReplaceAll(base, `\`, "/")
 	name := filepath.Base(base)

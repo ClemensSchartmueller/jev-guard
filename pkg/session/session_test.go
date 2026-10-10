@@ -333,3 +333,32 @@ func TestSession_TempFileCleanup(t *testing.T) {
 		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
 	}
 }
+
+func TestSession_ConfiguredTTL(t *testing.T) {
+	setupTestJevguardDir(t)
+	t.Cleanup(func() { SetSessionTTL(0) })
+
+	if SessionTTL() != DefaultSessionTTL || DefaultSessionTTL != 30*time.Minute {
+		t.Fatalf("expected 30m default TTL, got %v (const %v)", SessionTTL(), DefaultSessionTTL)
+	}
+
+	state := &SessionState{SessionID: "ttl", Prompt: "p", UpdatedAt: time.Now().UTC().Add(-10 * time.Minute)}
+	if err := SaveSession(state); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, _ := LoadSession("ttl"); loaded == nil {
+		t.Fatal("10 minute old session should be valid under the 30 minute default")
+	}
+
+	SetSessionTTL(5 * time.Minute)
+	if list, _ := ListSessions(); len(list) != 0 {
+		t.Fatalf("expected session older than 5m TTL to be expired in list, got %d", len(list))
+	}
+
+	if err := SaveSession(state); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, _ := LoadSession("ttl"); loaded != nil {
+		t.Fatal("session older than configured TTL should be expired")
+	}
+}

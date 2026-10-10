@@ -32,6 +32,7 @@ type Config struct {
 	AuditLogPath            string             `json:"audit_log_path,omitempty"`
 	FastpathEnabled         *bool              `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
 	ContextAwarenessEnabled *bool              `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
+	IntentTTLMinutes        *int               `json:"intent_ttl_minutes,omitempty"`        // backstop lifetime of a stored prompt intent (1-1440)
 	SensitiveFiles          []string           `json:"sensitive_files,omitempty"`
 	TrustedCommands         []string           `json:"trusted_commands,omitempty"`
 	Sources                 map[string]string  `json:"-"`
@@ -43,23 +44,32 @@ type Config struct {
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
 var ConfigFileNames = []string{".jevguard.json", "jevguard.json"}
 
+// DefaultIntentTTLMinutes is the default backstop lifetime of a stored prompt intent.
+const DefaultIntentTTLMinutes = 30
+
+// MaxIntentTTLMinutes is the largest accepted intent_ttl_minutes value.
+const MaxIntentTTLMinutes = 1440
+
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	enabled := true
 	contextAwareness := true
+	intentTTL := DefaultIntentTTLMinutes
 	return &Config{
 		Mode:                    "enforcing",
 		Timeout:                 1500 * time.Millisecond,
 		TimeoutMs:               1500,
 		FastpathEnabled:         &enabled,
 		ContextAwarenessEnabled: &contextAwareness,
+		IntentTTLMinutes:        &intentTTL,
 		SensitiveFiles:          DefaultSensitiveFiles(),
 		TrustedCommands:         DefaultTrustedCommands(),
 		Sources: map[string]string{
 			"mode": "built-in default", "base_url": "built-in default", "api_key": "environment or user config",
 			"model": "built-in default", "timeout_ms": "built-in default", "audit_log_path": "built-in default",
 			"fastpath_enabled": "built-in default", "context_awareness_enabled": "built-in default",
-			"sensitive_files": "built-in defaults", "trusted_commands": "built-in defaults",
+			"intent_ttl_minutes": "built-in default",
+			"sensitive_files":    "built-in defaults", "trusted_commands": "built-in defaults",
 		},
 	}
 }
@@ -78,6 +88,14 @@ func (c *Config) IsContextAwarenessEnabled() bool {
 		return true
 	}
 	return *c.ContextAwarenessEnabled
+}
+
+// IntentTTL returns the configured intent backstop lifetime (defaults to 30 minutes).
+func (c *Config) IntentTTL() time.Duration {
+	if c.IntentTTLMinutes == nil || *c.IntentTTLMinutes < 1 || *c.IntentTTLMinutes > MaxIntentTTLMinutes {
+		return DefaultIntentTTLMinutes * time.Minute
+	}
+	return time.Duration(*c.IntentTTLMinutes) * time.Minute
 }
 
 // DefaultSensitiveFiles returns standard sensitive filename fragments protected by default.
@@ -229,9 +247,10 @@ func ensureUserConfigAt(path string) error {
 		TimeoutMs               int      `json:"timeout_ms"`
 		FastpathEnabled         bool     `json:"fastpath_enabled"`
 		ContextAwarenessEnabled bool     `json:"context_awareness_enabled"`
+		IntentTTLMinutes        int      `json:"intent_ttl_minutes"`
 		SensitiveFiles          []string `json:"sensitive_files"`
 		TrustedCommands         []string `json:"trusted_commands"`
-	}{defaults.Mode, defaults.TimeoutMs, defaults.IsFastpathEnabled(), defaults.IsContextAwarenessEnabled(), defaults.SensitiveFiles, defaults.TrustedCommands}
+	}{defaults.Mode, defaults.TimeoutMs, defaults.IsFastpathEnabled(), defaults.IsContextAwarenessEnabled(), DefaultIntentTTLMinutes, defaults.SensitiveFiles, defaults.TrustedCommands}
 	data, err := json.MarshalIndent(template, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode user config: %w", err)
@@ -597,6 +616,14 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 	if fileCfg.ContextAwarenessEnabled != nil {
 		cfg.ContextAwarenessEnabled = fileCfg.ContextAwarenessEnabled
 		cfg.Sources["context_awareness_enabled"] = "user config"
+	}
+	if fileCfg.IntentTTLMinutes != nil {
+		if minutes := *fileCfg.IntentTTLMinutes; minutes >= 1 && minutes <= MaxIntentTTLMinutes {
+			cfg.IntentTTLMinutes = &minutes
+			cfg.Sources["intent_ttl_minutes"] = "user config"
+		} else {
+			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config intent_ttl_minutes ignored: expected an integer from 1 to %d, using default %d", MaxIntentTTLMinutes, DefaultIntentTTLMinutes))
+		}
 	}
 	if len(fileCfg.SensitiveFiles) > 0 {
 		cfg.SensitiveFiles = mergeUniqueStrings(DefaultSensitiveFiles(), fileCfg.SensitiveFiles)
