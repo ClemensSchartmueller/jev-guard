@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"jev-guard/pkg/session"
 )
 
 func TestEvaluateArgs_Version(t *testing.T) {
@@ -263,7 +265,7 @@ func TestEvaluateArgs_CacheClearAlias(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })
 
-	action, code := runner.EvaluateArgs([]string{"cache", "clear"})
+	action, code := runner.EvaluateArgs([]string{"cache", "clear", "--all"})
 	if action != ActionHandled || code != 0 {
 		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
 	}
@@ -333,5 +335,102 @@ func TestEvaluateArgs_Status(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "status-sess") {
 		t.Errorf("expected status output to list status-sess, got %q", stdout.String())
+	}
+}
+
+func newStdinRunner(stdin string) (*Runner, *bytes.Buffer, *bytes.Buffer) {
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(stdin)
+	return runner, &stdout, &stderr
+}
+
+func TestEndTurn_ClearsOnlyNamedSession(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	for _, id := range []string{"a", "b"} {
+		if err := session.SaveSession(&session.SessionState{SessionID: id, Prompt: "do it"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner, stdout, _ := newStdinRunner(`{"session_id":"a","hook_event_name":"Stop"}`)
+	action, code := runner.EvaluateArgs([]string{"end-turn"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("got %v, %d", action, code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout must be empty, got %q", stdout.String())
+	}
+	if s, _ := session.LoadSession("a"); s != nil {
+		t.Fatal("session a should be cleared")
+	}
+	if s, _ := session.LoadSession("b"); s == nil {
+		t.Fatal("session b must survive")
+	}
+}
+
+func TestEndTurn_ExplicitSessionFlagAndAbortCleared(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "x", Prompt: "stop"})
+	_ = session.SaveSession(&session.SessionState{SessionID: "y", Prompt: "keep"})
+	runner, stdout, _ := newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"end-turn", "--session", "x"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout must be empty, got %q", stdout.String())
+	}
+	if s, _ := session.LoadSession("x"); s != nil {
+		t.Fatal("aborted session x should be cleared")
+	}
+	if s, _ := session.LoadSession("y"); s == nil {
+		t.Fatal("session y must survive")
+	}
+}
+
+func TestEndTurn_EmptyStdinIsNoOp(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "keep", Prompt: "p"})
+	_ = session.SaveSession(&session.SessionState{SessionID: "default", Prompt: "p"})
+	for _, in := range []string{"", "  \n", "not json"} {
+		runner, stdout, _ := newStdinRunner(in)
+		action, code := runner.EvaluateArgs([]string{"end-turn"})
+		if action != ActionHandled || code != 0 {
+			t.Fatalf("input %q: got %v, %d", in, action, code)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout must be empty, got %q", stdout.String())
+		}
+	}
+	for _, id := range []string{"keep", "default"} {
+		if s, _ := session.LoadSession(id); s == nil {
+			t.Fatalf("session %s must survive a no-op end-turn", id)
+		}
+	}
+}
+
+func TestClearIntent_NoFlagsDoesNotClearAll(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "s1", Prompt: "p"})
+	runner, stdout, stderr := newStdinRunner("")
+	_, code := runner.EvaluateArgs([]string{"clear-intent"})
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "--all") {
+		t.Fatalf("expected usage on stderr only, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	runner, _, _ = newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"cache", "clear"}); code != 1 {
+		t.Fatalf("cache clear without flags: expected exit 1, got %d", code)
+	}
+	if s, _ := session.LoadSession("s1"); s == nil {
+		t.Fatal("session must survive clear-intent without flags")
+	}
+	runner, _, _ = newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"clear-intent", "--all"}); code != 0 {
+		t.Fatalf("--all: exit %d", code)
+	}
+	if s, _ := session.LoadSession("s1"); s != nil {
+		t.Fatal("--all should clear everything")
 	}
 }
