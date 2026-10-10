@@ -32,6 +32,8 @@ type NormalizedToolCall struct {
 	SessionID      string
 	TurnID         int
 	UserIntent     string
+	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
+	ModelName      string // Antigravity only
 }
 
 // ClaudePayload represents the payload sent by Claude Code and Codex hooks.
@@ -50,6 +52,8 @@ type AntigravityPayload struct {
 	StepIdx        int                 `json:"stepIdx,omitempty"`
 	InvocationNum  int                 `json:"invocationNum,omitempty"`
 	Cwd            string              `json:"cwd"`
+	TranscriptPath string              `json:"transcriptPath,omitempty"`
+	ModelName      string              `json:"modelName,omitempty"`
 }
 
 // IngestPayload represents prompt-bearing hook payloads or explicit ingest JSON.
@@ -91,8 +95,8 @@ type AntigravityDecisionOutput struct {
 
 // EvaluationResult contains the decision, reason, and telemetry for the invocation.
 type EvaluationResult struct {
-	Decision  Decision
-	Reason    string
-	Source    string // "fastpath", "typesafe", or "policy_fallback"
+	Decision   Decision
+	Reason     string
+	Source     string // "fastpath", "typesafe", or "policy_fallback"
 	Confidence float64
 }

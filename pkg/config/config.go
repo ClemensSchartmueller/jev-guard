@@ -22,23 +22,24 @@ const MaxConfigFileSize = 1 << 20
 
 // Config encapsulates runtime parameters loaded from environment and configuration files.
 type Config struct {
-	Mode                    string             `json:"mode"`                       // "enforcing" or "audit"
-	APIKey                  string             `json:"api_key,omitempty"`          // from TYPESAFE_API_KEY or file
-	TypesafeAPIKey          string             `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
-	BaseURL                 string             `json:"base_url,omitempty"`         // API endpoint
-	Model                   string             `json:"model,omitempty"`            // e.g. "jev-latest"
-	Timeout                 time.Duration      `json:"-"`
-	TimeoutMs               int                `json:"timeout_ms,omitempty"`
-	AuditLogPath            string             `json:"audit_log_path,omitempty"`
-	FastpathEnabled         *bool              `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
-	ContextAwarenessEnabled *bool              `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
-	IntentTTLMinutes        *int               `json:"intent_ttl_minutes,omitempty"`        // backstop lifetime of a stored prompt intent (1-1440)
-	SensitiveFiles          []string           `json:"sensitive_files,omitempty"`
-	TrustedCommands         []string           `json:"trusted_commands,omitempty"`
-	Sources                 map[string]string  `json:"-"`
-	Diagnostics             []string           `json:"-"`
-	ProjectConfig           *ProjectConfigInfo `json:"-"`
-	UserConfigPath          string             `json:"-"`
+	Mode                        string             `json:"mode"`                       // "enforcing" or "audit"
+	APIKey                      string             `json:"api_key,omitempty"`          // from TYPESAFE_API_KEY or file
+	TypesafeAPIKey              string             `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
+	BaseURL                     string             `json:"base_url,omitempty"`         // API endpoint
+	Model                       string             `json:"model,omitempty"`            // e.g. "jev-latest"
+	Timeout                     time.Duration      `json:"-"`
+	TimeoutMs                   int                `json:"timeout_ms,omitempty"`
+	AuditLogPath                string             `json:"audit_log_path,omitempty"`
+	FastpathEnabled             *bool              `json:"fastpath_enabled,omitempty"`              // whether local fastpath filter is active
+	ContextAwarenessEnabled     *bool              `json:"context_awareness_enabled,omitempty"`     // whether session intent cache and context awareness are active
+	IntentTTLMinutes            *int               `json:"intent_ttl_minutes,omitempty"`            // backstop lifetime of a stored prompt intent (1-1440)
+	AntigravityTranscriptIntent *bool              `json:"antigravity_transcript_intent,omitempty"` // derive Antigravity prompt intent from the conversation transcript (user config only)
+	SensitiveFiles              []string           `json:"sensitive_files,omitempty"`
+	TrustedCommands             []string           `json:"trusted_commands,omitempty"`
+	Sources                     map[string]string  `json:"-"`
+	Diagnostics                 []string           `json:"-"`
+	ProjectConfig               *ProjectConfigInfo `json:"-"`
+	UserConfigPath              string             `json:"-"`
 }
 
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
@@ -55,21 +56,23 @@ func DefaultConfig() *Config {
 	enabled := true
 	contextAwareness := true
 	intentTTL := DefaultIntentTTLMinutes
+	transcriptIntent := true
 	return &Config{
-		Mode:                    "enforcing",
-		Timeout:                 1500 * time.Millisecond,
-		TimeoutMs:               1500,
-		FastpathEnabled:         &enabled,
-		ContextAwarenessEnabled: &contextAwareness,
-		IntentTTLMinutes:        &intentTTL,
-		SensitiveFiles:          DefaultSensitiveFiles(),
-		TrustedCommands:         DefaultTrustedCommands(),
+		Mode:                        "enforcing",
+		Timeout:                     1500 * time.Millisecond,
+		TimeoutMs:                   1500,
+		FastpathEnabled:             &enabled,
+		ContextAwarenessEnabled:     &contextAwareness,
+		IntentTTLMinutes:            &intentTTL,
+		AntigravityTranscriptIntent: &transcriptIntent,
+		SensitiveFiles:              DefaultSensitiveFiles(),
+		TrustedCommands:             DefaultTrustedCommands(),
 		Sources: map[string]string{
 			"mode": "built-in default", "base_url": "built-in default", "api_key": "environment or user config",
 			"model": "built-in default", "timeout_ms": "built-in default", "audit_log_path": "built-in default",
 			"fastpath_enabled": "built-in default", "context_awareness_enabled": "built-in default",
-			"intent_ttl_minutes": "built-in default",
-			"sensitive_files":    "built-in defaults", "trusted_commands": "built-in defaults",
+			"intent_ttl_minutes": "built-in default", "antigravity_transcript_intent": "built-in default",
+			"sensitive_files": "built-in defaults", "trusted_commands": "built-in defaults",
 		},
 	}
 }
@@ -88,6 +91,14 @@ func (c *Config) IsContextAwarenessEnabled() bool {
 		return true
 	}
 	return *c.ContextAwarenessEnabled
+}
+
+// IsAntigravityTranscriptIntentEnabled reports whether Antigravity prompt intent may be read from the conversation transcript (defaults to true).
+func (c *Config) IsAntigravityTranscriptIntentEnabled() bool {
+	if c.AntigravityTranscriptIntent == nil {
+		return true
+	}
+	return *c.AntigravityTranscriptIntent
 }
 
 // IntentTTL returns the configured intent backstop lifetime (defaults to 30 minutes).
@@ -243,14 +254,15 @@ func ensureUserConfigAt(path string) error {
 
 	defaults := DefaultConfig()
 	template := struct {
-		Mode                    string   `json:"mode"`
-		TimeoutMs               int      `json:"timeout_ms"`
-		FastpathEnabled         bool     `json:"fastpath_enabled"`
-		ContextAwarenessEnabled bool     `json:"context_awareness_enabled"`
-		IntentTTLMinutes        int      `json:"intent_ttl_minutes"`
-		SensitiveFiles          []string `json:"sensitive_files"`
-		TrustedCommands         []string `json:"trusted_commands"`
-	}{defaults.Mode, defaults.TimeoutMs, defaults.IsFastpathEnabled(), defaults.IsContextAwarenessEnabled(), DefaultIntentTTLMinutes, defaults.SensitiveFiles, defaults.TrustedCommands}
+		Mode                        string   `json:"mode"`
+		TimeoutMs                   int      `json:"timeout_ms"`
+		FastpathEnabled             bool     `json:"fastpath_enabled"`
+		ContextAwarenessEnabled     bool     `json:"context_awareness_enabled"`
+		IntentTTLMinutes            int      `json:"intent_ttl_minutes"`
+		AntigravityTranscriptIntent bool     `json:"antigravity_transcript_intent"`
+		SensitiveFiles              []string `json:"sensitive_files"`
+		TrustedCommands             []string `json:"trusted_commands"`
+	}{defaults.Mode, defaults.TimeoutMs, defaults.IsFastpathEnabled(), defaults.IsContextAwarenessEnabled(), DefaultIntentTTLMinutes, defaults.IsAntigravityTranscriptIntentEnabled(), defaults.SensitiveFiles, defaults.TrustedCommands}
 	data, err := json.MarshalIndent(template, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode user config: %w", err)
@@ -624,6 +636,10 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 		} else {
 			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config intent_ttl_minutes ignored: expected an integer from 1 to %d, using default %d", MaxIntentTTLMinutes, DefaultIntentTTLMinutes))
 		}
+	}
+	if fileCfg.AntigravityTranscriptIntent != nil {
+		cfg.AntigravityTranscriptIntent = fileCfg.AntigravityTranscriptIntent
+		cfg.Sources["antigravity_transcript_intent"] = "user config"
 	}
 	if len(fileCfg.SensitiveFiles) > 0 {
 		cfg.SensitiveFiles = mergeUniqueStrings(DefaultSensitiveFiles(), fileCfg.SensitiveFiles)
