@@ -606,3 +606,14 @@ func TestFormatResponse_CodexBlockedVerdictsExitTwo(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePayload_AntigravityTranscriptPath(t *testing.T) {
+	raw := []byte(`{"toolCall":{"name":"run_command","args":{"CommandLine":"ls"}},"conversationId":"c1","transcriptPath":"/h/t.jsonl","modelName":"m1"}`)
+	got, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TranscriptPath != "/h/t.jsonl" || got.ModelName != "m1" {
+		t.Errorf("got transcriptPath=%q modelName=%q", got.TranscriptPath, got.ModelName)
+	}
+}

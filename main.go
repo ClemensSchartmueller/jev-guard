@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
 	"jev-guard/pkg/session"
+	"jev-guard/pkg/transcript"
 )
 
 func main() {
@@ -52,22 +54,30 @@ func runGate() int {
 
 	if cfg.IsContextAwarenessEnabled() {
 		session.SetSessionTTL(cfg.IntentTTL())
-		sessionID := call.SessionID
-		if sessionID == "" {
-			sessionID = "default"
+		held := func() int {
+			result := abortedSessionResult()
+			_ = cfg.LogAudit(call, result)
+			return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 		}
-		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
-			if sessState.Aborted && !abortFromOtherTurn(call.TurnKey, sessState.TurnKey) {
-				result := abortedSessionResult()
-				_ = cfg.LogAudit(call, result)
-				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+		if call.Harness == harness.HarnessAntigravity {
+			if home, homeErr := os.UserHomeDir(); homeErr == nil && applyTranscriptIntent(call, cfg, home) {
+				return held()
 			}
-			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
-				call.UserIntent = intent
+		} else {
+			sessionID := call.SessionID
+			if sessionID == "" {
+				sessionID = "default"
+			}
+			if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
+				if sessState.Aborted && !abortFromOtherTurn(call.TurnKey, sessState.TurnKey) {
+					return held()
+				}
+				if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
+					call.UserIntent = intent
+				}
 			}
 		}
 	}
-
 	result := executeGateEvaluation(call, cfg)
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
@@ -85,6 +95,28 @@ func abortedSessionResult() *harness.EvaluationResult {
 		Source:     "session_aborted",
 		Confidence: 1.0,
 	}
+}
+
+// applyTranscriptIntent reads the latest user request from the Antigravity transcript when
+// the harness and the antigravity_transcript_intent setting allow it.
+// It sets call.UserIntent and returns false normally, or returns true when that request
+// is a stop/abort command. Any error leaves the call without intent (stateless gating).
+func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config, home string) bool {
+	if call.Harness != harness.HarnessAntigravity || !cfg.IsAntigravityTranscriptIntentEnabled() {
+		return false
+	}
+	text, err := transcript.LatestUserInput(call.TranscriptPath, call.SessionID, home)
+	if err != nil {
+		if !errors.Is(err, transcript.ErrNoUserInput) {
+			fmt.Fprintf(os.Stderr, "jev-guard: antigravity transcript intent unavailable: %v\n", err)
+		}
+		return false
+	}
+	if session.IsNegativeIntent(text) {
+		return true
+	}
+	call.UserIntent = text
+	return false
 }
 
 func readStandardInput() ([]byte, error) {

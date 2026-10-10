@@ -579,3 +579,13 @@ func TestConfig_IntentTTL(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_AntigravityTranscriptIntent(t *testing.T) {
+	if !DefaultConfig().IsAntigravityTranscriptIntentEnabled() {
+		t.Fatal("expected default true")
+	}
+	var c Config
+	if !c.IsAntigravityTranscriptIntentEnabled() {
+		t.Fatal("expected nil to mean true")
+	}
+}

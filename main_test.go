@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"jev-guard/pkg/boundary"
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
@@ -129,5 +130,71 @@ func TestIsLocalPathVerified(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func writeTranscript(t *testing.T, convID, lastUser string) (home, path string) {
+	t.Helper()
+	home = t.TempDir()
+	dir := filepath.Join(home, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, "transcript.jsonl")
+	body := `{"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","content":"` + lastUser + `"}` + "\n" +
+		`{"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":"ok"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home, path
+}
+
+func TestApplyTranscriptIntent(t *testing.T) {
+	home, path := writeTranscript(t, "conv-1", "refactor the parser")
+	newCall := func() *harness.NormalizedToolCall {
+		return &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-1", TranscriptPath: path}
+	}
+
+	call := newCall()
+	if applyTranscriptIntent(call, config.DefaultConfig(), home) || call.UserIntent != "refactor the parser" {
+		t.Fatalf("expected intent to be set, got held/intent %q", call.UserIntent)
+	}
+
+	off := false
+	cfg := config.DefaultConfig()
+	cfg.AntigravityTranscriptIntent = &off
+	call = newCall()
+	if applyTranscriptIntent(call, cfg, home) || call.UserIntent != "" {
+		t.Fatalf("setting disabled must leave no intent, got %q", call.UserIntent)
+	}
+
+	call = newCall()
+	call.TranscriptPath = filepath.Join(t.TempDir(), "transcript.jsonl")
+	if applyTranscriptIntent(call, config.DefaultConfig(), home) || call.UserIntent != "" {
+		t.Fatal("invalid path must yield no intent")
+	}
+
+	claude := newCall()
+	claude.Harness = harness.HarnessClaudeCode
+	if applyTranscriptIntent(claude, config.DefaultConfig(), home) || claude.UserIntent != "" {
+		t.Fatal("non-Antigravity calls must be unaffected")
+	}
+}
+
+func TestApplyTranscriptIntent_StopIsHeld(t *testing.T) {
+	home, path := writeTranscript(t, "conv-2", "stop")
+	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-2", TranscriptPath: path}
+	if !applyTranscriptIntent(call, config.DefaultConfig(), home) {
+		t.Fatal("expected stop request to hold the action")
+	}
+	if call.UserIntent != "" {
+		t.Fatalf("held call must not carry intent, got %q", call.UserIntent)
+	}
+
+	off := false
+	cfg := config.DefaultConfig()
+	cfg.AntigravityTranscriptIntent = &off
+	if applyTranscriptIntent(call, cfg, home) {
+		t.Fatal("setting disabled must not hold")
 	}
 }

@@ -31,7 +31,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Codex CLI is supported too through its `UserPromptSubmit` and `Stop` hooks. Intent is scoped to a single reply: the `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's and Codex CLI's `UserPromptSubmit` hooks into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's hook payload does not include prompt text, but it does carry a `transcriptPath`: at `PreToolUse` time `jev-guard` reads the latest explicit user request from that conversation transcript (see the Antigravity section below). Intent is scoped to a single reply: the `Stop` hook (Claude Code and Codex) runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -239,6 +239,7 @@ Example user config:
   "fastpath_enabled": true,
   "context_awareness_enabled": true,
   "intent_ttl_minutes": 30,
+  "antigravity_transcript_intent": true,
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
@@ -275,7 +276,8 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 | **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fastpath** | `fastpath_enabled` | — | `true` | Enable sub-1ms local fastpath filter |
 | **Context Awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching & intent-aware evaluation |
-| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1-1440); the Claude `Stop` hook normally ends it sooner. User config only |
+| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1-1440); the `Stop` hook (Claude Code, Codex) normally ends it sooner. User config only |
+| **Antigravity Transcript Intent** | `antigravity_transcript_intent` | — | `true` | Derive Antigravity prompt intent from the conversation transcript at `PreToolUse` time; set `false` to use stateless gating. User config only |
 | **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
 | **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; trusted project config can only add more |
 | **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes cached for zero-latency approval |
@@ -285,7 +287,7 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
 2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
 3. **Trusted project config** can add `sensitive_files` only when the canonical path and exact SHA-256 digest match the user trust registry.
-4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, standard sensitive file patterns, and read commands.
+4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, `antigravity_transcript_intent: true`, standard sensitive file patterns, and read commands.
 
 ### Audit Log Schema
 
@@ -358,7 +360,11 @@ Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/setting
 
 Configure `PreToolUse` for tool-level gating:
 
-Antigravity's documented `PreInvocation` payload includes a transcript path but does not include the prompt text or document the transcript JSONL format. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
+Antigravity's documented `PreInvocation` payload includes a transcript path but not the prompt text. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook; no session cache or `Stop` hook is involved.
+
+**Transcript-based intent.** When context awareness is enabled, each Antigravity `PreToolUse` call reads the latest explicit user request (the last `USER_INPUT` / `USER_EXPLICIT` record) from `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`. The payload's `transcriptPath` is only used if it resolves exactly to that location for the payload's conversation id and is a regular file; the file is scanned backwards (at most 8 MB) and the text is capped at 8 KB. If the request is a stop/abort command the action is held for confirmation, otherwise it becomes the intent used for evaluation.
+
+This relies on an **undocumented transcript format** and fails closed: any validation error, truncated record, unreadable file, or missing user input yields no intent, i.e. the previous stateless gating (validation errors print one diagnostic on stderr). To disable the feature, set `antigravity_transcript_intent: false` in `~/.jevguard/.jevguard.json`. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
 
 ```json
 {

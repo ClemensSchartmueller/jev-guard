@@ -57,6 +57,8 @@ func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
 		RawArgs:        payload.ToolCall.Args,
 		SessionID:      payload.ConversationID,
 		TurnID:         payload.InvocationNum,
+		TranscriptPath: payload.TranscriptPath,
+		ModelName:      payload.ModelName,
 	}, nil
 }
 
