@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"jev-guard/pkg/boundary"
@@ -115,34 +116,82 @@ func SaveSession(state *SessionState) error {
 	}
 
 	targetPath := SessionFilePath(state.SessionID)
-	tempPath := fmt.Sprintf("%s.tmp.%d", targetPath, time.Now().UnixNano())
+	tempPath := fmt.Sprintf("%s.tmp.%d.%d.%d", targetPath, os.Getpid(), time.Now().UnixNano(), tempSeq.Add(1))
 
 	if err := os.WriteFile(tempPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temporary session file: %w", err)
 	}
 
-	var renameErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		renameErr = os.Rename(tempPath, targetPath)
-		if renameErr == nil {
+	if err := renameWithRetry(tempPath, targetPath); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("failed to commit session file: %w", err)
+	}
+	return nil
+}
+
+// tempSeq guarantees unique temp file names across concurrent saves.
+var tempSeq atomic.Uint64
+
+// renameAttempts and renameBackoff bound the retry of os.Rename. Variables so tests can shrink them.
+var (
+	renameAttempts = 10
+	renameBackoff  = 5 * time.Millisecond
+	renameMaxSleep = 50 * time.Millisecond
+	renameSleep    = time.Sleep
+	renameFunc     = os.Rename
+)
+
+// renameWithRetry replaces dst with src. The target is never removed first, so
+// concurrent readers always see either the old or the new file. Transient
+// failures (e.g. Windows sharing violations while a reader has dst open) are
+// retried with a short bounded backoff.
+func renameWithRetry(src, dst string) error {
+	var err error
+	delay := renameBackoff
+	for attempt := 0; attempt < renameAttempts; attempt++ {
+		if err = renameFunc(src, dst); err == nil {
+			return nil
+		}
+		if attempt == renameAttempts-1 {
 			break
 		}
-		_ = os.Remove(targetPath)
-		time.Sleep(time.Duration(10*(attempt+1)) * time.Millisecond)
+		renameSleep(delay)
+		delay *= 2
+		if delay > renameMaxSleep {
+			delay = renameMaxSleep
+		}
 	}
+	return err
+}
 
-	if renameErr != nil {
-		_ = os.Remove(tempPath)
-		return fmt.Errorf("failed to commit session file: %w", renameErr)
+// readFileWithRetry reads path, retrying transient errors (e.g. a Windows
+// sharing violation while a concurrent save is renaming over the file).
+// A missing file is returned immediately.
+func readFileWithRetry(path string) ([]byte, error) {
+	var data []byte
+	var err error
+	delay := renameBackoff
+	for attempt := 0; attempt < renameAttempts; attempt++ {
+		data, err = os.ReadFile(path)
+		if err == nil || os.IsNotExist(err) {
+			return data, err
+		}
+		if attempt == renameAttempts-1 {
+			break
+		}
+		renameSleep(delay)
+		delay *= 2
+		if delay > renameMaxSleep {
+			delay = renameMaxSleep
+		}
 	}
-
-	return nil
+	return data, err
 }
 
 // LoadSession reads the session state from disk. Returns nil, nil if session does not exist.
 func LoadSession(sessionID string) (*SessionState, error) {
 	targetPath := SessionFilePath(sessionID)
-	data, err := os.ReadFile(targetPath)
+	data, err := readFileWithRetry(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
