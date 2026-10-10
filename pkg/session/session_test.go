@@ -333,3 +333,52 @@ func TestSession_TempFileCleanup(t *testing.T) {
 		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
 	}
 }
+
+func TestSession_NegatedImperativeAborts(t *testing.T) {
+	tests := []struct {
+		prompt string
+		want   bool
+	}{
+		{"do not run this", true},
+		{"don't delete that", true},
+		{"Don't push anything", true},
+		{"never mind", true},
+		{"nevermind, don't do it", true},
+		{"dont deploy it", true},
+		{"don't proceed with the migration", true},
+		{"do not continue the deploy", true},
+		{"never commit this.", true},
+		{"don't forget to run the tests", false},
+		{"make sure it doesn't stop the server", false},
+		{"fix the stop button", false},
+		{"add a cancel endpoint", false},
+		{"please delete the build folder", false},
+		{"dont modify package.json", false},
+		// Typographic (U+2019) and missing apostrophes.
+		{"don’t run this", true},
+		{"Don’t proceed", true},
+		{"dont run this", true},
+		{"don’t forget to run the tests", false},
+		// Lead-in interjections.
+		{"Stop, don't run this", true},
+		{"No, don't run this", true},
+		{"no don't push it", true},
+		{"Wait, don't do that", true},
+		{"No, wait, don't run that", true},
+		// Trailing adverbs.
+		{"don't run this yet", true},
+		{"never do that again", true},
+		{"don't deploy it now", true},
+		// Scoped instructions and ordinary prompts stay positive.
+		{"don't push to main", false},
+		{"never run this on production", false},
+		{"no need to run the tests, just commit", false},
+		{"wait for CI then push", false},
+		{"stop the docker container named my-app", false},
+	}
+	for _, tc := range tests {
+		if got := IsNegativeIntent(tc.prompt); got != tc.want {
+			t.Errorf("IsNegativeIntent(%q) = %v, want %v", tc.prompt, got, tc.want)
+		}
+	}
+}
