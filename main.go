@@ -23,6 +23,7 @@ func main() {
 		os.Exit(2)
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
+	runner.Eval = runEval
 	action, exitCode := runner.EvaluateArgs(os.Args[1:])
 	if action == cli.ActionHandled {
 		os.Exit(exitCode)
@@ -84,27 +85,56 @@ func readStandardInput() ([]byte, error) {
 	return io.ReadAll(os.Stdin)
 }
 
+// gateTrace records the intermediate results of the gate pipeline so that both the
+// hook path and `jev-guard eval --explain` share a single implementation.
+type gateTrace struct {
+	FastpathRan      bool
+	Fastpath         *harness.EvaluationResult
+	Contained        bool
+	SemanticRan      bool
+	Judgments        *evaluator.JevJudgments
+	EvalErr          error
+	WouldSendToJudge bool
+	Final            *harness.EvaluationResult
+}
+
 func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
+	return traceGateEvaluation(call, cfg, false).Final
+}
+
+// traceGateEvaluation runs boundary, fastpath, semantic evaluation, and policy.
+// When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
+func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
+	trace := &gateTrace{}
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
 		checker = resolver
 	}
+	trace.Contained = checkWorkspaceBoundary(call, resolver)
 
 	if cfg.IsFastpathEnabled() {
+		trace.FastpathRan = true
 		fastFilter := fastpath.NewFilter(checker, cfg)
 		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
-			return applyAuditMode(fastResult, cfg.Mode)
+			trace.Fastpath = fastResult
+			trace.Final = applyAuditMode(fastResult, cfg.Mode)
+			return trace
 		}
 	}
 
-	contained := checkWorkspaceBoundary(call, resolver)
-	judgments, evalErr := performSemanticEvaluation(call, cfg)
+	if offline {
+		trace.WouldSendToJudge = true
+		return trace
+	}
+
+	trace.SemanticRan = true
+	trace.Judgments, trace.EvalErr = performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
-	resolved := pol.Resolve(judgments, contained, evalErr)
-
-	return applyAuditMode(resolved, cfg.Mode)
+	resolved := pol.Resolve(trace.Judgments, trace.Contained, trace.EvalErr)
+	trace.Final = applyAuditMode(resolved, cfg.Mode)
+	return trace
 }
 
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {

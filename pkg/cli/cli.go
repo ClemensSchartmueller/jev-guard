@@ -35,6 +35,8 @@ type Runner struct {
 	Stderr     io.Writer
 	Stdin      io.Reader
 	IsTerminal func() bool
+	// Eval implements the eval subcommand; it lives in package main because it reuses the gate pipeline.
+	Eval func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 }
 
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
@@ -96,6 +98,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleConfig(args[1:])
 	case "init":
 		return r.handleInit(args[1:])
+	case "eval":
+		return r.handleEval(args[1:])
 	default:
 		return r.handleUnknown(args[0])
 	}
@@ -420,6 +424,7 @@ Commands:
   ingest          Ingest active user prompt/intent into session cache
   clear-intent    Clear active user intent for a session (or all sessions)
   cache clear     Alias for clear-intent
+  eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
   status          Display active sessions and jev-guard environment status
   config show     Show effective policy and its source without printing secrets
   config trust    Print a digest-bound registry record for manual user approval
@@ -433,6 +438,17 @@ Ingest Flags:
   -s, --session <id>   Session / Conversation ID (defaults to "default")
   -t, --turn <num>     Turn / Invocation sequence number
   -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
+
+Eval Flags:
+  --cmd <command>      Simulate a Bash tool call
+  --tool <name>        Simulate a call to this tool (requires --target)
+  --target <path>      Target path for --tool
+  --payload <file>     Raw hook JSON payload (any harness; '-' for stdin)
+  --cwd <dir>          Working directory (defaults to current directory)
+  --offline            Skip the TypeSafe network call
+  --explain            Show every pipeline stage
+  --json               Machine-readable output
+  Exit code is 0 whenever evaluation succeeded (any decision), non-zero on usage errors.
 
 Clear-Intent Flags:
   -s, --session <id>   Session ID to clear (omitting clears all sessions)
@@ -469,4 +485,16 @@ func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// handleEval delegates to the injected eval implementation.
+func (r *Runner) handleEval(args []string) (Action, int) {
+	if r.Eval == nil {
+		return r.handleUnknown("eval")
+	}
+	stdin := r.Stdin
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	return ActionHandled, r.Eval(args, stdin, r.Stdout, r.Stderr)
 }
