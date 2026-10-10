@@ -1,9 +1,11 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -359,5 +361,75 @@ func TestSession_NegatedImperativeAborts(t *testing.T) {
 		if got := IsNegativeIntent(tc.prompt); got != tc.want {
 			t.Errorf("IsNegativeIntent(%q) = %v, want %v", tc.prompt, got, tc.want)
 		}
+	}
+}
+
+func TestSaveSession_OverwriteAndNoTempLeft(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	for i, prompt := range []string{"first", "second"} {
+		if err := SaveSession(&SessionState{SessionID: "ow", TurnID: i, Prompt: prompt}); err != nil {
+			t.Fatalf("SaveSession failed: %v", err)
+		}
+	}
+	loaded, err := LoadSession("ow")
+	if err != nil || loaded == nil || loaded.Prompt != "second" {
+		t.Fatalf("unexpected load: %+v, %v", loaded, err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestSaveSession_RetriesThenCleansUp(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	oldRename, oldSleep := renameFunc, renameSleep
+	defer func() { renameFunc, renameSleep = oldRename, oldSleep }()
+	calls := 0
+	renameSleep = func(time.Duration) {}
+	renameFunc = func(a, b string) error { calls++; return os.ErrPermission }
+	if err := SaveSession(&SessionState{SessionID: "fail", Prompt: "x"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != renameAttempts {
+		t.Fatalf("expected %d attempts, got %d", renameAttempts, calls)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	if len(entries) != 0 {
+		t.Fatalf("expected empty sessions dir, got %d entries", len(entries))
+	}
+}
+
+func TestSaveSession_ConcurrentSaveLoadNeverMissing(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "cc", Prompt: "init"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan string, 200)
+	for g := 0; g < 20; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				if g%2 == 0 {
+					if err := SaveSession(&SessionState{SessionID: "cc", TurnID: i, Prompt: "p"}); err != nil {
+						errs <- "save: " + err.Error()
+					}
+				} else {
+					s, err := LoadSession("cc")
+					if err != nil || s == nil {
+						errs <- fmt.Sprintf("load: %v %v", s, err)
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }
