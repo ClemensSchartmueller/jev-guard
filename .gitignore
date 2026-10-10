@@ -15,6 +15,9 @@ jevguard.json
 *.local.json
 .env*
 
+# Agent worktrees (Claude Code subagent isolation)
+/.claude/worktrees/
+
 # Test coverage
 *.out
 coverage.html
