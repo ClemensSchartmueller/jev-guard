@@ -77,6 +77,29 @@ func TestFastPath_SensitiveFiles(t *testing.T) {
 	}
 }
 
+func TestFastPath_SensitiveFiles_DockerAndGitconfig(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	flagged := []struct {
+		name string
+		path string
+	}{
+		{"windows docker config", `C:\Users\u\.docker\config.json`},
+		{"posix docker config", "/home/u/.docker/config.json"},
+		{"posix gitconfig", "/home/u/.gitconfig"},
+	}
+	for _, tc := range flagged {
+		res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "view_file", TargetPath: tc.path})
+		if res == nil || res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+			t.Errorf("%s (%s): expected sensitive-file ASK, got %+v", tc.name, tc.path, res)
+		}
+	}
+
+	res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/project/config.json"})
+	if res != nil && res.Source == "fastpath_sensitive" {
+		t.Errorf("expected generic config.json NOT to be flagged sensitive, got %+v", res)
+	}
+}
 func TestNormalizePathSeparators(t *testing.T) {
 	got := normalizePathSeparators(`C:\Users\User\.aws\credentials`)
 	want := "C:/Users/User/.aws/credentials"
