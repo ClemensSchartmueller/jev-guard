@@ -9,16 +9,52 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"jev-guard/pkg/boundary"
 )
 
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
-const DefaultSessionTTL = 60 * time.Minute
+// It is the fallback used when no TTL has been configured via SetSessionTTL.
+const DefaultSessionTTL = 30 * time.Minute
+
+var sessionTTL = DefaultSessionTTL
+
+// SetSessionTTL overrides the intent TTL used by LoadSession and ListSessions.
+// Non-positive values restore DefaultSessionTTL.
+func SetSessionTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	sessionTTL = ttl
+}
+
+// SessionTTL returns the intent TTL currently in effect.
+func SessionTTL() time.Duration {
+	return sessionTTL
+}
+
+// Named sub-patterns for abort detection; combined into abortPattern.
+const (
+	// abortAffirmative matches imperatives such as "stop", "please cancel the build", "wait, abort!".
+	abortAffirmative = `(?i)^\s*(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))`
+
+	// abortNegatedLegacy matches "don't/do not" + proceed-like verbs; any trailing text is accepted\n	// (e.g. "don't proceed with the migration").\n	abortNegatedLegacy = `(?i)^\s*(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute|go\s+ahead)\b`\n\n	// abortNegatedLegacy matches "don't/do not" + proceed-like verbs; any trailing text is accepted
+	// (e.g. "don't proceed with the migration").
+	abortNegatedLegacy = `(?i)^\s*(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute|go\s+ahead)\b`
+
+	// abortNegatedImperative matches "don't/do not/never" + verb + optional vague object,
+	// e.g. "do not run this", "don't push anything", "never delete that".
+	// A specific object ("dont modify package.json") is a scoped instruction, not an abort.
+	abortNegatedImperative = `(?i)^\s*(?:(?:don'?t|do\s+not|never)\s+(?:run|execute|delete|remove|rm|drop|push|commit|deploy|overwrite|change|modify|touch|do|proceed|continue)(?:\s+(?:this|that|it|these|those|anything|everything)(?:\s+(?:command|task|build|process|operation|change|changes))?)?\s*(?:[!.,]|$|\bplease\b))`
+
+	// abortNeverMind matches "never mind" / "nevermind", optionally followed by more text.
+	abortNeverMind = `(?i)^\s*never\s*mind\b`
+)
 
 var (
-	abortPattern       = regexp.MustCompile(`(?i)^\s*(?:(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))|(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute)\b)`)
+	abortPattern       = regexp.MustCompile(abortAffirmative + `|` + abortNegatedLegacy + `|` + abortNegatedImperative + `|` + abortNeverMind)
 	safeSessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 	reservedWindowsNames = map[string]bool{
@@ -38,6 +74,7 @@ func isReservedWindowsName(name string) bool {
 type SessionState struct {
 	SessionID string    `json:"session_id"`
 	TurnID    int       `json:"turn_id"`
+	TurnKey   string    `json:"turn_key,omitempty"`
 	Prompt    string    `json:"prompt"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Aborted   bool      `json:"aborted,omitempty"`
@@ -115,34 +152,82 @@ func SaveSession(state *SessionState) error {
 	}
 
 	targetPath := SessionFilePath(state.SessionID)
-	tempPath := fmt.Sprintf("%s.tmp.%d", targetPath, time.Now().UnixNano())
+	tempPath := fmt.Sprintf("%s.tmp.%d.%d.%d", targetPath, os.Getpid(), time.Now().UnixNano(), tempSeq.Add(1))
 
 	if err := os.WriteFile(tempPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temporary session file: %w", err)
 	}
 
-	var renameErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		renameErr = os.Rename(tempPath, targetPath)
-		if renameErr == nil {
+	if err := renameWithRetry(tempPath, targetPath); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("failed to commit session file: %w", err)
+	}
+	return nil
+}
+
+// tempSeq guarantees unique temp file names across concurrent saves.
+var tempSeq atomic.Uint64
+
+// renameAttempts and renameBackoff bound the retry of os.Rename. Variables so tests can shrink them.
+var (
+	renameAttempts = 10
+	renameBackoff  = 5 * time.Millisecond
+	renameMaxSleep = 50 * time.Millisecond
+	renameSleep    = time.Sleep
+	renameFunc     = os.Rename
+)
+
+// renameWithRetry replaces dst with src. The target is never removed first, so
+// concurrent readers always see either the old or the new file. Transient
+// failures (e.g. Windows sharing violations while a reader has dst open) are
+// retried with a short bounded backoff.
+func renameWithRetry(src, dst string) error {
+	var err error
+	delay := renameBackoff
+	for attempt := 0; attempt < renameAttempts; attempt++ {
+		if err = renameFunc(src, dst); err == nil {
+			return nil
+		}
+		if attempt == renameAttempts-1 {
 			break
 		}
-		_ = os.Remove(targetPath)
-		time.Sleep(time.Duration(10*(attempt+1)) * time.Millisecond)
+		renameSleep(delay)
+		delay *= 2
+		if delay > renameMaxSleep {
+			delay = renameMaxSleep
+		}
 	}
+	return err
+}
 
-	if renameErr != nil {
-		_ = os.Remove(tempPath)
-		return fmt.Errorf("failed to commit session file: %w", renameErr)
+// readFileWithRetry reads path, retrying transient errors (e.g. a Windows
+// sharing violation while a concurrent save is renaming over the file).
+// A missing file is returned immediately.
+func readFileWithRetry(path string) ([]byte, error) {
+	var data []byte
+	var err error
+	delay := renameBackoff
+	for attempt := 0; attempt < renameAttempts; attempt++ {
+		data, err = os.ReadFile(path)
+		if err == nil || os.IsNotExist(err) {
+			return data, err
+		}
+		if attempt == renameAttempts-1 {
+			break
+		}
+		renameSleep(delay)
+		delay *= 2
+		if delay > renameMaxSleep {
+			delay = renameMaxSleep
+		}
 	}
-
-	return nil
+	return data, err
 }
 
 // LoadSession reads the session state from disk. Returns nil, nil if session does not exist.
 func LoadSession(sessionID string) (*SessionState, error) {
 	targetPath := SessionFilePath(sessionID)
-	data, err := os.ReadFile(targetPath)
+	data, err := readFileWithRetry(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -156,7 +241,7 @@ func LoadSession(sessionID string) (*SessionState, error) {
 	}
 
 	// Verify TTL
-	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > DefaultSessionTTL {
+	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 		_ = os.Remove(targetPath)
 		return nil, nil
 	}
@@ -232,7 +317,7 @@ func ListSessions() ([]*SessionState, error) {
 			continue
 		}
 
-		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > DefaultSessionTTL {
+		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 			_ = os.Remove(fullPath)
 			continue
 		}

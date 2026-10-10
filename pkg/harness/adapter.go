@@ -57,6 +57,8 @@ func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
 		RawArgs:        payload.ToolCall.Args,
 		SessionID:      payload.ConversationID,
 		TurnID:         payload.InvocationNum,
+		TranscriptPath: payload.TranscriptPath,
+		ModelName:      payload.ModelName,
 	}, nil
 }
 
@@ -91,8 +93,16 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		}
 	}
 
+	// Codex sends turn_id as a string on turn-scoped events; Claude Code does not send it.
+	harnessType := HarnessClaudeCode
+	if payload.TurnID.Key != "" {
+		harnessType = HarnessCodex
+	}
+
 	return &NormalizedToolCall{
-		Harness:        HarnessClaudeCode,
+		Harness:        harnessType,
+		TurnID:         payload.TurnID.Num,
+		TurnKey:        payload.TurnID.Key,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
@@ -123,7 +133,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 		sid = "default"
 	}
 
-	turn := payload.TurnID
+	turn := payload.TurnID.Num
 	if turn == 0 {
 		turn = payload.InvocationNum
 	}
@@ -142,6 +152,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	return &session.SessionState{
 		SessionID: sid,
 		TurnID:    turn,
+		TurnKey:   payload.TurnID.Key,
 		Prompt:    prompt,
 	}, nil
 }
@@ -187,7 +198,7 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 
 	var target string
 	pathKeys := []string{
-		"TargetFile", "AbsolutePath", "file_path", "filePath",
+		"TargetFile", "AbsolutePath", "file_path", "filePath", "notebook_path",
 		"SearchPath", "search_path", "SearchDirectory",
 		"DirectoryPath", "dir_path", "directory",
 		"path", "target_path", "targetPath", "target",

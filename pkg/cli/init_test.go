@@ -272,3 +272,152 @@ func TestQuoteHookExecutableForOS(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallAgentHooksUpgradesOldClaudeMatcher(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	command := `"/new path/jev-guard"`
+	original := `{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob","hooks":[{"type":"command","command":"\"/new path/jev-guard\""}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := installAgentHooks(path, "claude", command)
+	if err != nil || !changed {
+		t.Fatalf("install: changed=%v err=%v", changed, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	entries := root["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("got %d PreToolUse entries, want one", len(entries))
+	}
+	matcher, _ := entries[0].(map[string]interface{})["matcher"].(string)
+	for _, tool := range []string{"Read", "PowerShell", "MultiEdit", "NotebookEdit", "WebFetch"} {
+		if !strings.Contains("|"+matcher+"|", "|"+tool+"|") {
+			t.Errorf("matcher %q missing %s", matcher, tool)
+		}
+	}
+}
+
+func TestInstallClaudeHooksAddsStopHookOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	original := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-stop"}]}],"SubagentStop":[{"hooks":[{"type":"command","command":"user-sub"}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := installAgentHooks(path, "claude", "/bin/jev-guard"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	hooks := root["hooks"].(map[string]interface{})
+	if got := strings.Count(string(data), "/bin/jev-guard end-turn"); got != 1 {
+		t.Fatalf("expected one end-turn hook, got %d: %s", got, data)
+	}
+	if !strings.Contains(string(data), "user-stop") || !strings.Contains(string(data), "user-sub") {
+		t.Fatal("user hooks lost")
+	}
+	if len(hooks["SubagentStop"].([]interface{})) != 1 {
+		t.Fatal("SubagentStop must be untouched")
+	}
+
+	// A fresh install must not create SubagentStop at all.
+	fresh := filepath.Join(t.TempDir(), "settings.json")
+	if _, err := installAgentHooks(fresh, "claude", "/bin/jev-guard"); err != nil {
+		t.Fatal(err)
+	}
+	freshData, _ := os.ReadFile(fresh)
+	if strings.Contains(string(freshData), "SubagentStop") {
+		t.Fatal("unexpected SubagentStop hook")
+	}
+	if strings.Contains(string(freshData), `"matcher": ""`) {
+		t.Fatal("Stop hook must not carry an empty matcher")
+	}
+}
+
+func TestInstallClaudeHooksUpgradesStopHookPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	old := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"jev-guard end-turn"}]}]}}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installAgentHooks(path, "claude", "/abs/jev-guard"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Count(string(data), "end-turn") != 1 || !strings.Contains(string(data), "/abs/jev-guard end-turn") {
+		t.Fatalf("expected in-place upgrade, got %s", data)
+	}
+}
+
+func TestInstallAgentHooksCodexIntentHooksIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	command := `"/bin/jev-guard"`
+	if changed, err := installAgentHooks(path, "codex", command); err != nil || !changed {
+		t.Fatalf("first install: changed=%v err=%v", changed, err)
+	}
+	if changed, err := installAgentHooks(path, "codex", command); err != nil || changed {
+		t.Fatalf("second install: changed=%v err=%v", changed, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	hooks := root["hooks"].(map[string]interface{})
+	for event, want := range map[string]string{"UserPromptSubmit": command + " ingest", "Stop": command + " end-turn", "PreToolUse": command} {
+		entries := hooks[event].([]interface{})
+		if len(entries) != 1 {
+			t.Fatalf("%s: got %d entries, want 1", event, len(entries))
+		}
+		got := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})["command"]
+		if got != want {
+			t.Fatalf("%s command = %v, want %s", event, got, want)
+		}
+	}
+	if _, ok := hooks["Interrupt"]; ok {
+		t.Fatal("Interrupt hook must not be installed")
+	}
+}
+
+func TestInstallAgentHooksCodexUpgradesIntentHooksInPlace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	original := `{"hooks":{"UserPromptSubmit":[{"matcher":".*","hooks":[{"type":"command","command":"/old/jev-guard ingest"}]}],"Stop":[{"hooks":[{"type":"command","command":"/old/jev-guard end-turn"}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := "/new/jev-guard"
+	if _, err := installAgentHooks(path, "codex", command); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	hooks := root["hooks"].(map[string]interface{})
+	for _, event := range []string{"UserPromptSubmit", "Stop"} {
+		if n := len(hooks[event].([]interface{})); n != 1 {
+			t.Fatalf("%s: got %d entries, want 1", event, n)
+		}
+	}
+	if !strings.Contains(string(data), command+" ingest") || !strings.Contains(string(data), command+" end-turn") {
+		t.Fatalf("hooks not upgraded: %s", data)
+	}
+}

@@ -1,5 +1,7 @@
 package harness
 
+import "encoding/json"
+
 // HarnessType represents the calling agent platform.
 type HarnessType string
 
@@ -31,7 +33,11 @@ type NormalizedToolCall struct {
 	RawArgs        map[string]interface{}
 	SessionID      string
 	TurnID         int
+	// TurnKey is an opaque string turn identifier (Codex turn_id). Empty for Claude/Antigravity.
+	TurnKey        string
 	UserIntent     string
+	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
+	ModelName      string // Antigravity only
 }
 
 // ClaudePayload represents the payload sent by Claude Code and Codex hooks.
@@ -40,6 +46,7 @@ type ClaudePayload struct {
 	ToolInput map[string]interface{} `json:"tool_input"`
 	Cwd       string                 `json:"cwd"`
 	SessionID string                 `json:"session_id,omitempty"`
+	TurnID    TurnValue              `json:"turn_id,omitempty"`
 }
 
 // AntigravityPayload represents the payload sent by Antigravity pre-tool hooks.
@@ -50,18 +57,42 @@ type AntigravityPayload struct {
 	StepIdx        int                 `json:"stepIdx,omitempty"`
 	InvocationNum  int                 `json:"invocationNum,omitempty"`
 	Cwd            string              `json:"cwd"`
+	TranscriptPath string              `json:"transcriptPath,omitempty"`
+	ModelName      string              `json:"modelName,omitempty"`
 }
 
 // IngestPayload represents prompt-bearing hook payloads or explicit ingest JSON.
 type IngestPayload struct {
-	SessionID      string `json:"session_id,omitempty"`
-	ConversationID string `json:"conversationId,omitempty"`
-	TurnID         int    `json:"turn_id,omitempty"`
-	InvocationNum  int    `json:"invocationNum,omitempty"`
-	StepIdx        int    `json:"stepIdx,omitempty"`
-	Prompt         string `json:"prompt,omitempty"`
-	UserPrompt     string `json:"user_prompt,omitempty"`
-	UserMessage    string `json:"userMessage,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
+	ConversationID string    `json:"conversationId,omitempty"`
+	TurnID         TurnValue `json:"turn_id,omitempty"`
+	InvocationNum  int       `json:"invocationNum,omitempty"`
+	StepIdx        int       `json:"stepIdx,omitempty"`
+	Prompt         string    `json:"prompt,omitempty"`
+	UserPrompt     string    `json:"user_prompt,omitempty"`
+	UserMessage    string    `json:"userMessage,omitempty"`
+}
+
+// TurnValue accepts a JSON turn_id that is either a number (integer turn) or a
+// string (opaque Codex turn key) without failing to unmarshal.
+type TurnValue struct {
+	Num int
+	Key string
+}
+
+// UnmarshalJSON implements json.Unmarshaler. Unsupported shapes are ignored.
+func (t *TurnValue) UnmarshalJSON(data []byte) error {
+	*t = TurnValue{}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		t.Key = s
+		return nil
+	}
+	var n float64
+	if err := json.Unmarshal(data, &n); err == nil {
+		t.Num = int(n)
+	}
+	return nil
 }
 
 // AntigravityToolCall holds the tool call name and arguments from Antigravity.
@@ -91,8 +122,8 @@ type AntigravityDecisionOutput struct {
 
 // EvaluationResult contains the decision, reason, and telemetry for the invocation.
 type EvaluationResult struct {
-	Decision  Decision
-	Reason    string
-	Source    string // "fastpath", "typesafe", or "policy_fallback"
+	Decision   Decision
+	Reason     string
+	Source     string // "fastpath", "typesafe", or "policy_fallback"
 	Confidence float64
 }

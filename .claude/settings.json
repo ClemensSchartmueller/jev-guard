@@ -11,9 +11,19 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard end-turn"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
+        "matcher": "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|View|ReadLocalFile|LS",
         "hooks": [
           {
             "type": "command",

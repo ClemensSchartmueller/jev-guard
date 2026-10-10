@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -540,4 +541,79 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	}
 }
 
+func TestParsePayload_ClaudeNewTools(t *testing.T) {
+	cases := []struct{ name, payload, cmd, target string }{
+		{"Read", `{"tool_name":"Read","tool_input":{"file_path":"/w/.env"}}`, "", "/w/.env"},
+		{"PowerShell", `{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem"}}`, "Get-ChildItem", ""},
+		{"MultiEdit", `{"tool_name":"MultiEdit","tool_input":{"file_path":"/w/a.go","edits":[]}}`, "", "/w/a.go"},
+		{"NotebookEdit", `{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/w/n.ipynb"}}`, "", "/w/n.ipynb"},
+		{"WebFetch", `{"tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"x"}}`, "", "https://example.com"},
+	}
+	for _, tc := range cases {
+		call, err := ParsePayload([]byte(tc.payload))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if call.ToolName != tc.name || call.Command != tc.cmd || call.TargetPath != tc.target {
+			t.Errorf("%s: got tool=%q cmd=%q target=%q", tc.name, call.ToolName, call.Command, call.TargetPath)
+		}
+	}
+}
 
+func TestParseIngestPayload_CodexStringTurnID(t *testing.T) {
+	state, err := ParseIngestPayload([]byte(`{"session_id":"s","turn_id":"019-abc","prompt":"hi","hook_event_name":"UserPromptSubmit"}`))
+	if err != nil {
+		t.Fatalf("string turn_id must not fail: %v", err)
+	}
+	if state.TurnKey != "019-abc" || state.TurnID != 0 {
+		t.Errorf("unexpected state %+v", state)
+	}
+	state, err = ParseIngestPayload([]byte(`{"session_id":"s","turn_id":7,"prompt":"hi"}`))
+	if err != nil || state.TurnID != 7 || state.TurnKey != "" {
+		t.Errorf("numeric turn_id: state=%+v err=%v", state, err)
+	}
+}
+
+func TestParsePayload_CodexTurnKey(t *testing.T) {
+	call, err := ParsePayload([]byte(`{"session_id":"s","turn_id":"t-9","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Harness != HarnessCodex || call.TurnKey != "t-9" {
+		t.Errorf("got harness=%s key=%q", call.Harness, call.TurnKey)
+	}
+	claude, err := ParsePayload([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claude.Harness != HarnessClaudeCode || claude.TurnKey != "" || claude.TurnID != 0 {
+		t.Errorf("claude payload changed: %+v", claude)
+	}
+}
+
+func TestFormatResponse_CodexBlockedVerdictsExitTwo(t *testing.T) {
+	call := &NormalizedToolCall{Harness: HarnessCodex, TurnKey: "t1"}
+	for _, d := range []Decision{DecisionAsk, DecisionForceAsk, DecisionDeny} {
+		code, out, err := FormatResponseForCall(call, EvaluationResult{Decision: d, Reason: "because"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 2 || string(out) != "because" {
+			t.Errorf("%s: code=%d out=%q, want 2 with plain reason", d, code, out)
+		}
+		if strings.Contains(string(out), "permissionDecision") {
+			t.Errorf("%s: must not emit JSON ask", d)
+		}
+	}
+}
+
+func TestParsePayload_AntigravityTranscriptPath(t *testing.T) {
+	raw := []byte(`{"toolCall":{"name":"run_command","args":{"CommandLine":"ls"}},"conversationId":"c1","transcriptPath":"/h/t.jsonl","modelName":"m1"}`)
+	got, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TranscriptPath != "/h/t.jsonl" || got.ModelName != "m1" {
+		t.Errorf("got transcriptPath=%q modelName=%q", got.TranscriptPath, got.ModelName)
+	}
+}

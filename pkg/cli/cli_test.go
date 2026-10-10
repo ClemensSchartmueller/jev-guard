@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"jev-guard/pkg/session"
 )
 
 func TestEvaluateArgs_Version(t *testing.T) {
@@ -263,7 +265,7 @@ func TestEvaluateArgs_CacheClearAlias(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })
 
-	action, code := runner.EvaluateArgs([]string{"cache", "clear"})
+	action, code := runner.EvaluateArgs([]string{"cache", "clear", "--all"})
 	if action != ActionHandled || code != 0 {
 		t.Fatalf("expected ActionHandled with code 0, got %v, %d", action, code)
 	}
@@ -333,5 +335,173 @@ func TestEvaluateArgs_Status(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "status-sess") {
 		t.Errorf("expected status output to list status-sess, got %q", stdout.String())
+	}
+}
+
+func newStdinRunner(stdin string) (*Runner, *bytes.Buffer, *bytes.Buffer) {
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(stdin)
+	return runner, &stdout, &stderr
+}
+
+func TestEndTurn_ClearsOnlyNamedSession(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	for _, id := range []string{"a", "b"} {
+		if err := session.SaveSession(&session.SessionState{SessionID: id, Prompt: "do it"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner, stdout, _ := newStdinRunner(`{"session_id":"a","hook_event_name":"Stop"}`)
+	action, code := runner.EvaluateArgs([]string{"end-turn"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("got %v, %d", action, code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout must be empty, got %q", stdout.String())
+	}
+	if s, _ := session.LoadSession("a"); s != nil {
+		t.Fatal("session a should be cleared")
+	}
+	if s, _ := session.LoadSession("b"); s == nil {
+		t.Fatal("session b must survive")
+	}
+}
+
+func TestEndTurn_ExplicitSessionFlagAndAbortCleared(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "x", Prompt: "stop"})
+	_ = session.SaveSession(&session.SessionState{SessionID: "y", Prompt: "keep"})
+	runner, stdout, _ := newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"end-turn", "--session", "x"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout must be empty, got %q", stdout.String())
+	}
+	if s, _ := session.LoadSession("x"); s != nil {
+		t.Fatal("aborted session x should be cleared")
+	}
+	if s, _ := session.LoadSession("y"); s == nil {
+		t.Fatal("session y must survive")
+	}
+}
+
+func TestEndTurn_EmptyStdinIsNoOp(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "keep", Prompt: "p"})
+	_ = session.SaveSession(&session.SessionState{SessionID: "default", Prompt: "p"})
+	for _, in := range []string{"", "  \n", "not json"} {
+		runner, stdout, _ := newStdinRunner(in)
+		action, code := runner.EvaluateArgs([]string{"end-turn"})
+		if action != ActionHandled || code != 0 {
+			t.Fatalf("input %q: got %v, %d", in, action, code)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout must be empty, got %q", stdout.String())
+		}
+	}
+	for _, id := range []string{"keep", "default"} {
+		if s, _ := session.LoadSession(id); s == nil {
+			t.Fatalf("session %s must survive a no-op end-turn", id)
+		}
+	}
+}
+
+func TestClearIntent_NoFlagsDoesNotClearAll(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "s1", Prompt: "p"})
+	runner, stdout, stderr := newStdinRunner("")
+	_, code := runner.EvaluateArgs([]string{"clear-intent"})
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "--all") {
+		t.Fatalf("expected usage on stderr only, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	runner, _, _ = newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"cache", "clear"}); code != 1 {
+		t.Fatalf("cache clear without flags: expected exit 1, got %d", code)
+	}
+	if s, _ := session.LoadSession("s1"); s == nil {
+		t.Fatal("session must survive clear-intent without flags")
+	}
+	runner, _, _ = newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"clear-intent", "--all"}); code != 0 {
+		t.Fatalf("--all: exit %d", code)
+	}
+	if s, _ := session.LoadSession("s1"); s != nil {
+		t.Fatal("--all should clear everything")
+	}
+}
+
+func TestIngestCodexStringTurnID(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(`{"session_id":"codex-s","turn_id":"turn-abc","hook_event_name":"UserPromptSubmit","prompt":"Delete the build folder","cwd":"/w","model":"gpt","permission_mode":"default","transcript_path":null}`)
+
+	action, code := runner.EvaluateArgs([]string{"ingest"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("ingest failed: action=%v code=%d stderr=%q", action, code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("ingest must not write to stdout (Codex injects it into context), got %q", stdout.String())
+	}
+	state, err := session.LoadSession("codex-s")
+	if err != nil || state == nil {
+		t.Fatalf("session not stored: %v", err)
+	}
+	if state.TurnKey != "turn-abc" || state.TurnID != 0 || state.Prompt != "Delete the build folder" {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+}
+
+func TestIngestTurnKeyFlag(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	_, code := runner.EvaluateArgs([]string{"ingest", "--session", "s", "--turn-key", "k1", "--prompt", "build it"})
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, stderr.String())
+	}
+	state, _ := session.LoadSession("s")
+	if state == nil || state.TurnKey != "k1" {
+		t.Fatalf("turn key not stored: %+v", state)
+	}
+}
+
+func TestIngestClaudeNumericPayloadUnchanged(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(`{"session_id":"claude-s","prompt":"hello there","turn_id":5}`)
+	_, code := runner.EvaluateArgs([]string{"ingest"})
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, stderr.String())
+	}
+	state, _ := session.LoadSession("claude-s")
+	if state == nil || state.TurnID != 5 || state.TurnKey != "" {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+}
+
+func TestEndTurnCodexPayloadPrintsNothing(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	if err := session.SaveSession(&session.SessionState{SessionID: "codex-s", TurnKey: "t1", Prompt: "do it"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = strings.NewReader(`{"session_id":"codex-s","turn_id":"t1","hook_event_name":"Stop","stop_hook_active":false}`)
+	_, code := runner.EvaluateArgs([]string{"end-turn"})
+	if code != 0 || stdout.Len() != 0 {
+		t.Fatalf("end-turn code=%d stdout=%q", code, stdout.String())
+	}
+	if state, _ := session.LoadSession("codex-s"); state != nil {
+		t.Fatalf("session should be cleared: %+v", state)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
@@ -35,6 +37,11 @@ type Runner struct {
 	Stderr     io.Writer
 	Stdin      io.Reader
 	IsTerminal func() bool
+	// HTTPClient is used by doctor's network check; nil uses a default client.
+	HTTPClient *http.Client
+
+	// Eval implements the eval subcommand; it lives in package main because it reuses the gate pipeline.
+	Eval func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 }
 
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
@@ -77,6 +84,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.printHelp()
 	case "ingest":
 		return r.handleIngest(args[1:])
+	case "end-turn", "end_turn":
+		return r.handleEndTurn(args[1:])
 	case "clear-intent", "clear_intent":
 		return r.handleClearIntent(args[1:])
 	case "cache":
@@ -96,6 +105,11 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleConfig(args[1:])
 	case "init":
 		return r.handleInit(args[1:])
+	case "doctor":
+		return r.handleDoctor(args[1:])
+
+	case "eval":
+		return r.handleEval(args[1:])
 	default:
 		return r.handleUnknown(args[0])
 	}
@@ -132,6 +146,8 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Timeout:              %d ms (%s)\n", effectiveTimeout(cfg.TimeoutMs), cfg.Sources["timeout_ms"])
 	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])
 	fmt.Fprintf(r.Stdout, "  Context awareness:    %t (%s)\n", cfg.IsContextAwarenessEnabled(), cfg.Sources["context_awareness_enabled"])
+	fmt.Fprintf(r.Stdout, "  Intent TTL:           %d minutes (%s)\n", int(cfg.IntentTTL()/time.Minute), cfg.Sources["intent_ttl_minutes"])
+	fmt.Fprintf(r.Stdout, "  Antigravity transcript intent: %t (%s)\n", cfg.IsAntigravityTranscriptIntentEnabled(), cfg.Sources["antigravity_transcript_intent"])
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
@@ -268,11 +284,16 @@ func (r *Runner) handleUnknown(arg string) (Action, int) {
 func (r *Runner) handleIngest(args []string) (Action, int) {
 	var sessionID string
 	var turnID int
+	var turnKey string
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
 		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
 			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "--turn-key", "--turn_key"); ok {
+			turnKey = val
 			continue
 		}
 		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
@@ -305,6 +326,9 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 				if turnID == 0 {
 					turnID = parsedState.TurnID
 				}
+				if turnKey == "" {
+					turnKey = parsedState.TurnKey
+				}
 				if prompt == "" {
 					prompt = parsedState.Prompt
 				}
@@ -324,6 +348,7 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	state := &session.SessionState{
 		SessionID: sessionID,
 		TurnID:    turnID,
+		TurnKey:   turnKey,
 		Prompt:    prompt,
 	}
 
@@ -357,6 +382,16 @@ func (r *Runner) handleClearIntent(args []string) (Action, int) {
 		}
 	}
 
+	if sessionID == "" && !clearAll && r.Stdin != nil && (r.IsTerminal == nil || !r.IsTerminal()) {
+		sessionID = r.sessionFromStdin()
+	}
+
+	if sessionID == "" && !clearAll {
+		fmt.Fprintln(r.Stderr, "Error: clear-intent requires --session <id>, a hook payload on stdin, or --all to clear every session")
+		fmt.Fprintln(r.Stderr, "Usage: jev-guard clear-intent [--session <id> | --all]")
+		return ActionHandled, 1
+	}
+
 	if sessionID != "" && !clearAll {
 		if err := session.ClearSession(sessionID); err != nil {
 			fmt.Fprintf(r.Stderr, "Error: failed to clear session: %v\n", err)
@@ -374,7 +409,58 @@ func (r *Runner) handleClearIntent(args []string) (Action, int) {
 	return ActionHandled, 0
 }
 
+// sessionFromStdin reads a hook payload from stdin and returns its session ID.
+// It returns "" for empty, unreadable, or invalid payloads.
+func (r *Runner) sessionFromStdin() string {
+	stdinBytes, err := io.ReadAll(r.Stdin)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "Error reading stdin: %v\n", err)
+		return ""
+	}
+	if len(strings.TrimSpace(string(stdinBytes))) == 0 {
+		return ""
+	}
+	parsed, err := harness.ParseIngestPayload(stdinBytes)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "Error parsing hook payload: %v\n", err)
+		return ""
+	}
+	if parsed == nil {
+		return ""
+	}
+	return parsed.SessionID
+}
+
+// handleEndTurn clears the intent and abort flag of exactly one session. It is
+// meant for Claude Code's Stop hook: stdout stays empty, diagnostics go to
+// stderr, and it always exits 0 so it can never keep the agent from stopping.
+func (r *Runner) handleEndTurn(args []string) (Action, int) {
+	var sessionID string
+	for i := 0; i < len(args); i++ {
+		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
+			sessionID = val
+		}
+	}
+
+	if sessionID == "" && r.Stdin != nil && (r.IsTerminal == nil || !r.IsTerminal()) {
+		sessionID = r.sessionFromStdin()
+	}
+	if sessionID == "" {
+		return ActionHandled, 0
+	}
+
+	if err := session.ClearSession(sessionID); err != nil {
+		fmt.Fprintf(r.Stderr, "jev-guard: end-turn failed to clear session '%s': %v\n", sessionID, err)
+		return ActionHandled, 0
+	}
+	fmt.Fprintf(r.Stderr, "Session intent ended for session '%s'\n", sessionID)
+	return ActionHandled, 0
+}
+
 func (r *Runner) handleStatus() (Action, int) {
+	if cwd, err := os.Getwd(); err == nil {
+		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+	}
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
 
@@ -418,9 +504,12 @@ Usage:
 Commands:
   init            Configure agent hooks in the current project
   ingest          Ingest active user prompt/intent into session cache
-  clear-intent    Clear active user intent for a session (or all sessions)
+  end-turn        Clear the session intent when a reply ends (Claude Code / Codex Stop hook)
+  clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
+  eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
   status          Display active sessions and jev-guard environment status
+  doctor          Diagnose environment, network, and hook setup (--offline skips network)
   config show     Show effective policy and its source without printing secrets
   config trust    Print a digest-bound registry record for manual user approval
   config untrust  Show which user registry entry to remove to revoke trust
@@ -432,11 +521,26 @@ Flags:
 Ingest Flags:
   -s, --session <id>   Session / Conversation ID (defaults to "default")
   -t, --turn <num>     Turn / Invocation sequence number
+      --turn-key <id>  Opaque string turn ID (Codex turn_id) for exact turn scoping
   -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
 
+Eval Flags:
+  --cmd <command>      Simulate a Bash tool call
+  --tool <name>        Simulate a call to this tool (requires --target)
+  --target <path>      Target path for --tool
+  --payload <file>     Raw hook JSON payload (any harness; '-' for stdin)
+  --cwd <dir>          Working directory (defaults to current directory)
+  --offline            Skip the TypeSafe network call
+  --explain            Show every pipeline stage
+  --json               Machine-readable output
+  Exit code is 0 whenever evaluation succeeded (any decision), non-zero on usage errors.
+
 Clear-Intent Flags:
-  -s, --session <id>   Session ID to clear (omitting clears all sessions)
-  -a, --all            Clear all active session caches
+  -s, --session <id>   Session ID to clear (or pipe a hook payload via stdin)
+  -a, --all            Clear all active session caches (required to clear everything)
+
+End-Turn Flags:
+  -s, --session <id>   Session ID to end (or pipe the Stop hook payload via stdin)
 
 Description:
   jev-guard intercepts AI agent tool calls from Claude Code, Codex CLI,
@@ -445,7 +549,9 @@ Description:
 
   With context awareness enabled, jev-guard can ingest active user prompts
   via 'jev-guard ingest' (invoked by Claude Code's UserPromptSubmit hook)
-  to authorize explicitly requested operations and prevent false denials.`
+  to authorize explicitly requested operations and prevent false denials.
+  The intent is scoped to a single reply: Claude Code's Stop hook runs
+  'jev-guard end-turn' to clear it, with intent_ttl_minutes as a backstop.`
 }
 
 // parseFlagValue extracts the value for a given flag either from --flag=value or from a separate next argument.
@@ -469,4 +575,16 @@ func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// handleEval delegates to the injected eval implementation.
+func (r *Runner) handleEval(args []string) (Action, int) {
+	if r.Eval == nil {
+		return r.handleUnknown("eval")
+	}
+	stdin := r.Stdin
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	return ActionHandled, r.Eval(args, stdin, r.Stdout, r.Stderr)
 }

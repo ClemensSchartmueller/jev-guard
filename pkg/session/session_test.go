@@ -1,9 +1,11 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -331,5 +333,132 @@ func TestSession_TempFileCleanup(t *testing.T) {
 	entries, _ := os.ReadDir(sessionsDir)
 	if len(entries) != 0 {
 		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
+	}
+}
+
+func TestSession_NegatedImperativeAborts(t *testing.T) {
+	tests := []struct {
+		prompt string
+		want   bool
+	}{
+		{"do not run this", true},
+		{"don't delete that", true},
+		{"Don't push anything", true},
+		{"never mind", true},
+		{"nevermind, don't do it", true},
+		{"dont deploy it", true},
+		{"don't proceed with the migration", true},
+		{"do not continue the deploy", true},
+		{"never commit this.", true},
+		{"don't forget to run the tests", false},
+		{"make sure it doesn't stop the server", false},
+		{"fix the stop button", false},
+		{"add a cancel endpoint", false},
+		{"please delete the build folder", false},
+		{"dont modify package.json", false},
+	}
+	for _, tc := range tests {
+		if got := IsNegativeIntent(tc.prompt); got != tc.want {
+			t.Errorf("IsNegativeIntent(%q) = %v, want %v", tc.prompt, got, tc.want)
+		}
+	}
+}
+
+func TestSaveSession_OverwriteAndNoTempLeft(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	for i, prompt := range []string{"first", "second"} {
+		if err := SaveSession(&SessionState{SessionID: "ow", TurnID: i, Prompt: prompt}); err != nil {
+			t.Fatalf("SaveSession failed: %v", err)
+		}
+	}
+	loaded, err := LoadSession("ow")
+	if err != nil || loaded == nil || loaded.Prompt != "second" {
+		t.Fatalf("unexpected load: %+v, %v", loaded, err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestSaveSession_RetriesThenCleansUp(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	oldRename, oldSleep := renameFunc, renameSleep
+	defer func() { renameFunc, renameSleep = oldRename, oldSleep }()
+	calls := 0
+	renameSleep = func(time.Duration) {}
+	renameFunc = func(a, b string) error { calls++; return os.ErrPermission }
+	if err := SaveSession(&SessionState{SessionID: "fail", Prompt: "x"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != renameAttempts {
+		t.Fatalf("expected %d attempts, got %d", renameAttempts, calls)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	if len(entries) != 0 {
+		t.Fatalf("expected empty sessions dir, got %d entries", len(entries))
+	}
+}
+
+func TestSaveSession_ConcurrentSaveLoadNeverMissing(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "cc", Prompt: "init"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan string, 200)
+	for g := 0; g < 20; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				if g%2 == 0 {
+					if err := SaveSession(&SessionState{SessionID: "cc", TurnID: i, Prompt: "p"}); err != nil {
+						errs <- "save: " + err.Error()
+					}
+				} else {
+					s, err := LoadSession("cc")
+					if err != nil || s == nil {
+						errs <- fmt.Sprintf("load: %v %v", s, err)
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+}
+
+func TestSession_ConfiguredTTL(t *testing.T) {
+	setupTestJevguardDir(t)
+	t.Cleanup(func() { SetSessionTTL(0) })
+
+	if SessionTTL() != DefaultSessionTTL || DefaultSessionTTL != 30*time.Minute {
+		t.Fatalf("expected 30m default TTL, got %v (const %v)", SessionTTL(), DefaultSessionTTL)
+	}
+
+	state := &SessionState{SessionID: "ttl", Prompt: "p", UpdatedAt: time.Now().UTC().Add(-10 * time.Minute)}
+	if err := SaveSession(state); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, _ := LoadSession("ttl"); loaded == nil {
+		t.Fatal("10 minute old session should be valid under the 30 minute default")
+	}
+
+	SetSessionTTL(5 * time.Minute)
+	if list, _ := ListSessions(); len(list) != 0 {
+		t.Fatalf("expected session older than 5m TTL to be expired in list, got %d", len(list))
+	}
+
+	if err := SaveSession(state); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, _ := LoadSession("ttl"); loaded != nil {
+		t.Fatal("session older than configured TTL should be expired")
 	}
 }

@@ -90,8 +90,8 @@ func (r *Runner) handleInit(args []string) (Action, int) {
 		return ActionHandled, 1
 	}
 	fmt.Fprintln(r.Stdout, "Run `jev-guard config show` to check policy and API key status.")
-	if scope == "project" && (agent == "codex" || agent == "all" || containsAgent(selected, "codex")) {
-		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hook with `/hooks` before it can run.")
+	if agent == "codex" || agent == "all" || containsAgent(selected, "codex") {
+		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hooks with `/hooks` before they can run. New or changed hooks (including UserPromptSubmit and Stop) must be re-trusted.")
 	}
 	return ActionHandled, 0
 }
@@ -231,8 +231,13 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 			}
 		}
 	}
-	if agent == "claude" {
+	if agent == "claude" || agent == "codex" {
 		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || c
+		c, err = ensureHook(section, "Stop", "", command+" end-turn", false)
 		if err != nil {
 			return false, err
 		}
@@ -248,7 +253,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		changed = changed || c
 	}
 	matcher := map[string]string{
-		"claude":      "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
+		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|View|ReadLocalFile|LS",
 		"codex":       "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
 		"antigravity": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
 	}[agent]
@@ -341,24 +346,22 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 				continue
 			}
 			if old, ok := obj["command"].(string); ok && managedHookCommand(old, command) {
-				if old == command && item["matcher"] == matcher {
+				currentMatcher, _ := item["matcher"].(string)
+				if old == command && currentMatcher == matcher {
 					return false, nil
 				}
 				if len(hooks) == 1 {
 					obj["command"] = command
-					item["matcher"] = matcher
+					setMatcher(item, matcher)
 					return true, nil
 				}
-				if item["matcher"] == matcher {
+				if currentMatcher == matcher {
 					obj["command"] = command
 					return true, nil
 				}
 				// Keep the shared matcher's behavior for unrelated handlers.
 				item["hooks"] = append(hooks[:index:index], hooks[index+1:]...)
-				section[event] = append(entries, map[string]interface{}{
-					"matcher": matcher,
-					"hooks":   []interface{}{map[string]interface{}{"type": "command", "command": command}},
-				})
+				section[event] = append(entries, newHookEntry(matcher, command))
 				return true, nil
 			}
 		}
@@ -367,10 +370,25 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 	if direct {
 		entry = map[string]interface{}{"type": "command", "command": command}
 	} else {
-		entry = map[string]interface{}{"matcher": matcher, "hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
+		entry = newHookEntry(matcher, command)
 	}
 	section[event] = append(entries, entry)
 	return true, nil
+}
+
+// newHookEntry builds a command hook group; an empty matcher is omitted (events such as Stop take none).
+func newHookEntry(matcher, command string) map[string]interface{} {
+	entry := map[string]interface{}{"hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
+	setMatcher(entry, matcher)
+	return entry
+}
+
+func setMatcher(item map[string]interface{}, matcher string) {
+	if matcher == "" {
+		delete(item, "matcher")
+		return
+	}
+	item["matcher"] = matcher
 }
 
 func removeManagedDirectHook(section map[string]interface{}, event, command string) (bool, error) {
@@ -409,10 +427,16 @@ func managedHookCommand(existing, desired string) bool {
 	if existing == desired {
 		return true
 	}
-	if strings.HasSuffix(existing, " ingest") != strings.HasSuffix(desired, " ingest") {
-		return false
+	subcommand := ""
+	for _, suffix := range []string{" ingest", " end-turn"} {
+		if strings.HasSuffix(desired, suffix) {
+			subcommand = suffix
+		}
+		if strings.HasSuffix(existing, suffix) != strings.HasSuffix(desired, suffix) {
+			return false
+		}
 	}
-	base := strings.TrimSuffix(existing, " ingest")
+	base := strings.TrimSuffix(existing, subcommand)
 	base = strings.Trim(base, `"'`)
 	base = strings.ReplaceAll(base, `\`, "/")
 	name := filepath.Base(base)

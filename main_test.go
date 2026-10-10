@@ -1,8 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"jev-guard/pkg/boundary"
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
@@ -10,6 +14,8 @@ func TestResolveUserIntent(t *testing.T) {
 	tests := []struct {
 		name          string
 		callTurnID    int
+		callTurnKey   string
+		sessionKey    string
 		sessionTurnID int
 		prompt        string
 		expected      string
@@ -49,16 +55,29 @@ func TestResolveUserIntent(t *testing.T) {
 			prompt:        "stale previous turn prompt",
 			expected:      "",
 		},
+		{name: "matching turn keys", callTurnKey: "t1", sessionKey: "t1", prompt: "p", expected: "p"},
+		{name: "different turn keys", callTurnKey: "t2", sessionKey: "t1", prompt: "p", expected: ""},
+		{name: "call key but session has none", callTurnKey: "t1", prompt: "p", expected: ""},
+		{name: "session key only (Claude call)", sessionKey: "t1", prompt: "p", expected: "p"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveUserIntent(tc.callTurnID, tc.sessionTurnID, tc.prompt)
+			got := resolveUserIntent(tc.callTurnID, tc.sessionTurnID, tc.callTurnKey, tc.sessionKey, tc.prompt)
 			if got != tc.expected {
 				t.Errorf("resolveUserIntent(%d, %d, %q) = %q; want %q",
 					tc.callTurnID, tc.sessionTurnID, tc.prompt, got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestAbortFromOtherTurn(t *testing.T) {
+	if !abortFromOtherTurn("t2", "t1") {
+		t.Error("different keys should be another turn")
+	}
+	if abortFromOtherTurn("t1", "t1") || abortFromOtherTurn("", "t1") || abortFromOtherTurn("t1", "") || abortFromOtherTurn("", "") {
+		t.Error("equal or missing keys must keep the abort hold")
 	}
 }
 
@@ -76,5 +95,106 @@ func TestApplyAuditMode(t *testing.T) {
 	enforceRes := applyAuditMode(res, "enforce")
 	if enforceRes.Decision != harness.DecisionDeny {
 		t.Errorf("expected DecisionDeny in enforce mode, got %v", enforceRes.Decision)
+	}
+}
+
+func TestIsLocalPathVerified(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := boundary.NewResolver([]string{root}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		call *harness.NormalizedToolCall
+		want bool
+	}{
+		{"write inside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(root, "a.go")}, true},
+		{"unknown tool with path and destination", &harness.NormalizedToolCall{ToolName: "CopyFiles", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"path": filepath.Join(root, "a.go"), "destination": "/etc/x"}}, false},
+		{"bash command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls", TargetPath: filepath.Join(root, "a.go")}, false},
+		{"url target", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com/x"}, false},
+		{"outside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(outside, "b.go")}, false},
+		{"empty target", &harness.NormalizedToolCall{ToolName: "Write"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.call.Cwd = root
+			tt.call.WorkspaceRoots = []string{root}
+			contained := checkWorkspaceBoundary(tt.call, resolver)
+			if got := isLocalPathVerified(tt.call, contained); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func writeTranscript(t *testing.T, convID, lastUser string) (home, path string) {
+	t.Helper()
+	home = t.TempDir()
+	dir := filepath.Join(home, ".gemini", "antigravity", "brain", convID, ".system_generated", "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, "transcript.jsonl")
+	body := `{"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","content":"` + lastUser + `"}` + "\n" +
+		`{"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":"ok"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home, path
+}
+
+func TestApplyTranscriptIntent(t *testing.T) {
+	home, path := writeTranscript(t, "conv-1", "refactor the parser")
+	newCall := func() *harness.NormalizedToolCall {
+		return &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-1", TranscriptPath: path}
+	}
+
+	call := newCall()
+	if applyTranscriptIntent(call, config.DefaultConfig(), home) || call.UserIntent != "refactor the parser" {
+		t.Fatalf("expected intent to be set, got held/intent %q", call.UserIntent)
+	}
+
+	off := false
+	cfg := config.DefaultConfig()
+	cfg.AntigravityTranscriptIntent = &off
+	call = newCall()
+	if applyTranscriptIntent(call, cfg, home) || call.UserIntent != "" {
+		t.Fatalf("setting disabled must leave no intent, got %q", call.UserIntent)
+	}
+
+	call = newCall()
+	call.TranscriptPath = filepath.Join(t.TempDir(), "transcript.jsonl")
+	if applyTranscriptIntent(call, config.DefaultConfig(), home) || call.UserIntent != "" {
+		t.Fatal("invalid path must yield no intent")
+	}
+
+	claude := newCall()
+	claude.Harness = harness.HarnessClaudeCode
+	if applyTranscriptIntent(claude, config.DefaultConfig(), home) || claude.UserIntent != "" {
+		t.Fatal("non-Antigravity calls must be unaffected")
+	}
+}
+
+func TestApplyTranscriptIntent_StopIsHeld(t *testing.T) {
+	home, path := writeTranscript(t, "conv-2", "stop")
+	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-2", TranscriptPath: path}
+	if !applyTranscriptIntent(call, config.DefaultConfig(), home) {
+		t.Fatal("expected stop request to hold the action")
+	}
+	if call.UserIntent != "" {
+		t.Fatalf("held call must not carry intent, got %q", call.UserIntent)
+	}
+
+	off := false
+	cfg := config.DefaultConfig()
+	cfg.AntigravityTranscriptIntent = &off
+	if applyTranscriptIntent(call, cfg, home) {
+		t.Fatal("setting disabled must not hold")
 	}
 }

@@ -9,14 +9,14 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 ## Key Features
 
 - **Multi-Agent Interception**: Automatically detects and handles payload structures from:
-  - **Claude Code**: `Bash`, `Edit`, `Write`, `View`, `ReadLocalFile`, `LS`, `Grep`, `Glob`
+  - **Claude Code**: `Bash`, `PowerShell`, `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch` (plus legacy `View`, `ReadLocalFile`, `LS`)
   - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
   - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
-  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
+  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `.gitconfig`, `.docker/config.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
   - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
-  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`) are strictly routed to TypeSafe AI System One for semantic evaluation.
+  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`, `WebFetch`) are strictly routed to TypeSafe AI System One for semantic evaluation.
   - **User-controlled Bypass Toggle**: Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to route operations directly to Jev.
 - **Platform-Specific Safety Enforcement**:
   - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
@@ -31,7 +31,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's and Codex CLI's `UserPromptSubmit` hooks into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's hook payload does not include prompt text, but it does carry a `transcriptPath`: at `PreToolUse` time `jev-guard` reads the latest explicit user request from that conversation transcript (see the Antigravity section below). Intent is scoped to a single reply: the `Stop` hook (Claude Code and Codex) runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -83,7 +83,7 @@ export TYPESAFE_API_KEY="your-typesafe-api-key" # Linux / macOS
 $env:TYPESAFE_API_KEY = "your-typesafe-api-key" # PowerShell, current session
 ```
 
-Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex project hooks, review and trust the new hook through `/hooks` in Codex before it runs.
+Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex hooks, review and trust the new hooks (`PreToolUse`, `UserPromptSubmit`, `Stop`) through `/hooks` in Codex before they run; hooks added or changed by `init` must be re-trusted.
 
 ### Prebuilt Binaries
 
@@ -123,7 +123,13 @@ jev-guard ingest --session="my-session" --turn=1 --prompt="Delete the build fold
 # Or pipe a hook event JSON payload directly on stdin
 cat hook_payload.json | jev-guard ingest
 
-# Clear active intent for a specific session (or all sessions)
+# End the current reply for the session named in a hook payload on stdin (Claude Code Stop hook).
+# Clears only that session, prints nothing to stdout, and always exits 0.
+cat stop_payload.json | jev-guard end-turn
+jev-guard end-turn --session "my-session"
+
+# Clear active intent for a specific session, or every session with --all.
+# Without --session, a stdin payload, or --all, clear-intent prints usage and exits 1.
 jev-guard clear-intent --session "my-session"
 jev-guard clear-intent --session="my-session"
 jev-guard clear-intent --all
@@ -134,12 +140,34 @@ jev-guard status
 jev-guard cache status
 jev-guard cache
 
+# Diagnose config, API key, network, audit log, and hook setup (exit 1 on any [FAIL])
+jev-guard doctor
+jev-guard doctor --offline   # skip the network check
+
 # Test gate evaluation manually by piping a tool call payload JSON
 cat payload.json | jev-guard
+
+# Simulate how a tool call would be judged, without a live agent (supports --flag value and --flag=value)
+jev-guard eval --cmd "git diff .env"
+jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
+jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
+jev-guard eval --cmd "cat .env" --json
+jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
 ```
 
 > [!NOTE]
 > When executed directly in an interactive terminal without piped input or flags, `jev-guard` displays help and usage guidance instead of blocking on stdin.
+
+`jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fastpath, TypeSafe, policy, harness formatting):
+
+- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
+- `--cwd DIR` sets the working directory (default: current directory).
+- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written.
+- `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
+- `--explain` prints the config and mode, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
+- `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
+- `eval` never writes session state, ingests intents, or writes audit-log entries.
+- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); non-zero (`2`) on usage errors or unreadable payloads.
 
 ---
 
@@ -210,6 +238,8 @@ Example user config:
   "model": "jev-latest",
   "fastpath_enabled": true,
   "context_awareness_enabled": true,
+  "intent_ttl_minutes": 30,
+  "antigravity_transcript_intent": true,
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
@@ -246,6 +276,8 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 | **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fastpath** | `fastpath_enabled` | — | `true` | Enable sub-1ms local fastpath filter |
 | **Context Awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching & intent-aware evaluation |
+| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1-1440); the `Stop` hook (Claude Code, Codex) normally ends it sooner. User config only |
+| **Antigravity Transcript Intent** | `antigravity_transcript_intent` | — | `true` | Derive Antigravity prompt intent from the conversation transcript at `PreToolUse` time; set `false` to use stateless gating. User config only |
 | **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
 | **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; trusted project config can only add more |
 | **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes cached for zero-latency approval |
@@ -255,7 +287,7 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
 2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
 3. **Trusted project config** can add `sensitive_files` only when the canonical path and exact SHA-256 digest match the user trust registry.
-4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, standard sensitive file patterns, and read commands.
+4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, `antigravity_transcript_intent: true`, standard sensitive file patterns, and read commands.
 
 ### Audit Log Schema
 
@@ -280,7 +312,7 @@ When `"audit_log_path"` is configured, every tool evaluation produces a JSONL en
 
 ### Claude Code (`.claude/settings.json`)
 
-Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/settings.json` (global). Configure `UserPromptSubmit` to ingest human instructions into the session cache, and `PreToolUse` to enforce safety:
+Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/settings.json` (global). Configure `UserPromptSubmit` to ingest human instructions into the session cache, `Stop` to end that intent when the reply finishes, and `PreToolUse` to enforce safety. Do not add `SubagentStop`: subagents finishing must not cut off the main reply's intent.
 
 ```json
 {
@@ -296,9 +328,19 @@ Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/setting
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard end-turn"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
+        "matcher": "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|View|ReadLocalFile|LS",
         "hooks": [
           {
             "type": "command",
@@ -318,7 +360,11 @@ Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/setting
 
 Configure `PreToolUse` for tool-level gating:
 
-Antigravity's documented `PreInvocation` payload includes a transcript path but does not include the prompt text or document the transcript JSONL format. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
+Antigravity's documented `PreInvocation` payload includes a transcript path but not the prompt text. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook; no session cache or `Stop` hook is involved.
+
+**Transcript-based intent.** When context awareness is enabled, each Antigravity `PreToolUse` call reads the latest explicit user request (the last `USER_INPUT` / `USER_EXPLICIT` record) from `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`. The payload's `transcriptPath` is only used if it resolves exactly to that location for the payload's conversation id and is a regular file; the file is scanned backwards (at most 8 MB) and the text is capped at 8 KB. If the request is a stop/abort command the action is held for confirmation, otherwise it becomes the intent used for evaluation.
+
+This relies on an **undocumented transcript format** and fails closed: any validation error, truncated record, unreadable file, or missing user input yields no intent, i.e. the previous stateless gating (validation errors print one diagnostic on stderr). To disable the feature, set `antigravity_transcript_intent: false` in `~/.jevguard/.jevguard.json`. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
 
 ```json
 {
@@ -342,6 +388,17 @@ Antigravity's documented `PreInvocation` payload includes a transcript path but 
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [{ "type": "command", "command": "jev-guard ingest" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "jev-guard end-turn" }]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
@@ -357,7 +414,9 @@ Antigravity's documented `PreInvocation` payload includes a transcript path but 
 }
 ```
 
-Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review.
+Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review. New hooks added by `jev-guard init` (`UserPromptSubmit`, `Stop`) also need re-trusting via `/hooks`.
+
+Codex intent is scoped exactly by `turn_id`: `ingest` stores the string `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` only uses that intent when its own `turn_id` matches, so an interrupted or older turn's intent is never applied. `ingest` prints nothing to stdout (Codex would inject it into model context), `end-turn` prints nothing and exits 0, and every `ASK`/`force_ask`/`DENY` verdict exits 2 with the reason on stderr (Codex does not support `permissionDecision: "ask"`).
 
 ---
 
@@ -373,6 +432,8 @@ When context awareness is enabled and intent is ingested, TypeSafe AI classifies
 | **Privilege / Persistence** (system profile edits, root escalations) | **DENY** (Hard block) | **DENY** (Hard block) | **`force_ask`** (Mandatory confirmation) |
 | **Workspace Boundary Escape** (`../../` traversal) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) |
 | **Anti-Tampering** (`~/.jevguard/` cache access) | **DENY** (Strict invariant) | **DENY** (Strict invariant) | **DENY** (Strict invariant) |
+
+For file-path tools (`Edit`/`Write`/`Read`), a deterministic local boundary proof that the target is inside the workspace is authoritative over the model's containment probability, so a low `IsWorkspaceContained` score alone no longer triggers a Workspace Boundary Escape prompt; shell commands are unaffected.
 
 > [!IMPORTANT]
 > **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto. This catastrophic invariant takes precedence over all violation categories (including credential access).
