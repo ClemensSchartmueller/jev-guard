@@ -99,10 +99,11 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 	}
 
 	contained := checkWorkspaceBoundary(call, resolver)
+	pathVerified := isLocalPathVerified(call, contained)
 	judgments, evalErr := performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
-	resolved := pol.Resolve(judgments, contained, evalErr)
+	resolved := pol.ResolveWithEvidence(judgments, policy.BoundaryEvidence{Contained: contained, PathVerified: pathVerified}, evalErr)
 
 	return applyAuditMode(resolved, cfg.Mode)
 }
@@ -119,6 +120,26 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary
 		return false
 	}
 	return contained
+}
+
+// singleTargetFileTools is the allowlist of tools whose only path argument is
+// the TargetPath, so the resolver result covers everything the tool touches.
+// Tools with several path args (source/destination) are not listed because the
+// adapter keeps only the first matching key.
+var singleTargetFileTools = map[string]bool{
+	"Read": true, "Edit": true, "MultiEdit": true, "Write": true, "NotebookEdit": true,
+	"write_to_file": true, "replace_file_content": true, "view_file": true,
+}
+
+// isLocalPathVerified reports whether the local resolver positively proved a
+// filesystem target is inside the workspace. Shell commands, empty targets
+// (where checkWorkspaceBoundary is vacuously true) and URLs never qualify.
+func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool {
+	target := strings.TrimSpace(call.TargetPath)
+	if !contained || !singleTargetFileTools[call.ToolName] || target == "" || strings.TrimSpace(call.Command) != "" {
+		return false
+	}
+	return !strings.Contains(target, "://")
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/harness"
 )
 
@@ -76,5 +79,40 @@ func TestApplyAuditMode(t *testing.T) {
 	enforceRes := applyAuditMode(res, "enforce")
 	if enforceRes.Decision != harness.DecisionDeny {
 		t.Errorf("expected DecisionDeny in enforce mode, got %v", enforceRes.Decision)
+	}
+}
+
+func TestIsLocalPathVerified(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := boundary.NewResolver([]string{root}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		call *harness.NormalizedToolCall
+		want bool
+	}{
+		{"write inside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(root, "a.go")}, true},
+		{"unknown tool with path and destination", &harness.NormalizedToolCall{ToolName: "CopyFiles", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"path": filepath.Join(root, "a.go"), "destination": "/etc/x"}}, false},
+		{"bash command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls", TargetPath: filepath.Join(root, "a.go")}, false},
+		{"url target", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com/x"}, false},
+		{"outside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(outside, "b.go")}, false},
+		{"empty target", &harness.NormalizedToolCall{ToolName: "Write"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.call.Cwd = root
+			tt.call.WorkspaceRoots = []string{root}
+			contained := checkWorkspaceBoundary(tt.call, resolver)
+			if got := isLocalPathVerified(tt.call, contained); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
