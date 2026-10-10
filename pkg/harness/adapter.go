@@ -187,7 +187,7 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 
 	var target string
 	pathKeys := []string{
-		"TargetFile", "AbsolutePath", "file_path", "filePath",
+		"TargetFile", "AbsolutePath", "file_path", "filePath", "notebook_path",
 		"SearchPath", "search_path", "SearchDirectory",
 		"DirectoryPath", "dir_path", "directory",
 		"path", "target_path", "targetPath", "target",
