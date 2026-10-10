@@ -122,24 +122,70 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary
 	return contained
 }
 
-// singleTargetFileTools is the allowlist of tools whose only path argument is
-// the TargetPath, so the resolver result covers everything the tool touches.
-// Tools with several path args (source/destination) are not listed because the
-// adapter keeps only the first matching key.
-var singleTargetFileTools = map[string]bool{
-	"Read": true, "Edit": true, "MultiEdit": true, "Write": true, "NotebookEdit": true,
-	"write_to_file": true, "replace_file_content": true, "view_file": true,
+// singleTargetFileTools maps each allowlisted file tool to its canonical path
+// argument. A call is only verified when TargetPath came from that argument
+// and no other path-like argument is present, so a payload cannot smuggle a
+// higher-priority in-workspace key past the resolver while the tool acts on
+// its real (out-of-workspace) argument.
+var singleTargetFileTools = map[string]string{
+	"Read": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path",
+	"NotebookEdit":  "notebook_path",
+	"write_to_file": "TargetFile", "replace_file_content": "TargetFile", "view_file": "AbsolutePath",
+}
+
+// executionSensitiveDirs are in-workspace directories whose contents execute
+// code or configure agents/hooks; writes there are never locally verified.
+var executionSensitiveDirs = map[string]bool{
+	".git": true, ".github": true, ".husky": true, ".devcontainer": true,
+	".claude": true, ".codex": true, ".cursor": true, ".gemini": true, ".agent": true,
+	".agents": true, ".windsurf": true, ".vscode": true, ".idea": true, ".jevguard": true,
+}
+
+// executionSensitiveFiles are basenames of agent instruction/config files.
+var executionSensitiveFiles = map[string]bool{
+	"claude.md": true, "agents.md": true, "gemini.md": true, ".mcp.json": true, ".envrc": true,
+}
+
+// isExecutionSensitivePath reports whether target lies in a directory or file
+// that runs code or configures the agent. Matching is case-insensitive and
+// accepts both slash styles.
+func isExecutionSensitivePath(target string) bool {
+	segments := strings.Split(strings.ReplaceAll(target, "\\", "/"), "/")
+	for i, seg := range segments {
+		seg = strings.ToLower(strings.TrimSpace(seg))
+		if executionSensitiveDirs[seg] {
+			return true
+		}
+		if i == len(segments)-1 && executionSensitiveFiles[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 // isLocalPathVerified reports whether the local resolver positively proved a
 // filesystem target is inside the workspace. Shell commands, empty targets
-// (where checkWorkspaceBoundary is vacuously true) and URLs never qualify.
+// (where checkWorkspaceBoundary is vacuously true), URLs, mixed path
+// arguments and execution-sensitive paths never qualify.
 func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool {
+	key, ok := singleTargetFileTools[call.ToolName]
 	target := strings.TrimSpace(call.TargetPath)
-	if !contained || !singleTargetFileTools[call.ToolName] || target == "" || strings.TrimSpace(call.Command) != "" {
+	if !contained || !ok || target == "" || strings.TrimSpace(call.Command) != "" || strings.Contains(target, "://") {
 		return false
 	}
-	return !strings.Contains(target, "://")
+	raw, isString := call.RawArgs[key].(string)
+	if !isString || strings.TrimSpace(raw) != target {
+		return false
+	}
+	for _, k := range harness.PathArgKeys {
+		if k == key {
+			continue
+		}
+		if _, present := call.RawArgs[k]; present {
+			return false
+		}
+	}
+	return !isExecutionSensitivePath(target)
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {

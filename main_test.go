@@ -88,6 +88,9 @@ func TestIsLocalPathVerified(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "nb.ipynb"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	resolver, err := boundary.NewResolver([]string{root}, root)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +101,11 @@ func TestIsLocalPathVerified(t *testing.T) {
 		call *harness.NormalizedToolCall
 		want bool
 	}{
-		{"write inside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(root, "a.go")}, true},
+		{"write inside workspace", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"file_path": filepath.Join(root, "a.go")}}, true},
+		{"mixed path args", &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"TargetFile": filepath.Join(root, "a.go"), "file_path": filepath.Join(outside, "x")}}, false},
+		{"non-canonical key", &harness.NormalizedToolCall{ToolName: "write_to_file", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"file_path": filepath.Join(root, "a.go")}}, false},
+		{"canonical TargetFile", &harness.NormalizedToolCall{ToolName: "write_to_file", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"TargetFile": filepath.Join(root, "a.go")}}, true},
+		{"notebook edit", &harness.NormalizedToolCall{ToolName: "NotebookEdit", TargetPath: filepath.Join(root, "nb.ipynb"), RawArgs: map[string]interface{}{"notebook_path": filepath.Join(root, "nb.ipynb")}}, true},
 		{"unknown tool with path and destination", &harness.NormalizedToolCall{ToolName: "CopyFiles", TargetPath: filepath.Join(root, "a.go"), RawArgs: map[string]interface{}{"path": filepath.Join(root, "a.go"), "destination": "/etc/x"}}, false},
 		{"bash command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls", TargetPath: filepath.Join(root, "a.go")}, false},
 		{"url target", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com/x"}, false},
@@ -114,5 +121,31 @@ func TestIsLocalPathVerified(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsLocalPathVerifiedSensitivePaths(t *testing.T) {
+	sensitive := []string{
+		"/repo/.git/hooks/pre-commit",
+		"/repo/.claude/settings.json",
+		"/repo/.claude/settings.local.json",
+		"/repo/.vscode/tasks.json",
+		"/repo/.codex/config.toml",
+		"/repo/.github/workflows/ci.yml",
+		`C:\repo\.Git\hooks\post-checkout`,
+		"/repo/CLAUDE.md",
+		"/repo/.mcp.json",
+	}
+	for _, p := range sensitive {
+		call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: p, RawArgs: map[string]interface{}{"file_path": p}}
+		if isLocalPathVerified(call, true) {
+			t.Errorf("isLocalPathVerified(%q) = true; want false", p)
+		}
+	}
+
+	p := "/repo/src/main.go"
+	call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: p, RawArgs: map[string]interface{}{"file_path": p}}
+	if !isLocalPathVerified(call, true) {
+		t.Errorf("isLocalPathVerified(%q) = false; want true", p)
 	}
 }
