@@ -428,6 +428,8 @@ func managedHookCommand(existing, desired string) bool {
 		return true
 	}
 	subcommand := ""
+	// Both commands must end in the same managed subcommand (or neither does);
+	// remember desired's suffix so it can be stripped before comparing binaries.
 	for _, suffix := range []string{" ingest", " end-turn"} {
 		if strings.HasSuffix(desired, suffix) {
 			subcommand = suffix

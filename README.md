@@ -31,7 +31,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -124,7 +124,8 @@ jev-guard ingest --session="my-session" --turn=1 --prompt="Delete the build fold
 cat hook_payload.json | jev-guard ingest
 
 # End the current reply for the session named in a hook payload on stdin (Claude Code Stop hook).
-# Clears only that session, prints nothing to stdout, and always exits 0.
+# Clears only that session's intent, prints nothing to stdout, and always exits 0.
+# A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it.
 cat stop_payload.json | jev-guard end-turn
 jev-guard end-turn --session "my-session"
 
