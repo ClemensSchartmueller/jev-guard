@@ -40,11 +40,12 @@ func (r *Runner) handleDoctor(args []string) (Action, int) {
 		fmt.Fprintf(r.Stderr, "Error: find current directory: %v\n", err)
 		return ActionHandled, 1
 	}
-	return ActionHandled, r.runDoctor(config.LoadConfig(cwd), cwd, offline)
+	home, _ := os.UserHomeDir()
+	return ActionHandled, r.runDoctor(config.LoadConfig(cwd), cwd, home, offline)
 }
 
 // runDoctor prints one line per check and returns 1 if any check failed, else 0.
-func (r *Runner) runDoctor(cfg *config.Config, cwd string, offline bool) int {
+func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) int {
 	failed := false
 	report := func(level, format string, a ...interface{}) {
 		if level == doctorFail {
@@ -55,17 +56,28 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd string, offline bool) int {
 
 	// 1. User config and mode.
 	path := cfg.UserConfigPath
+	var userDiags, projectDiags []string
+	for _, d := range cfg.Diagnostics {
+		if strings.HasPrefix(d, "project config") || strings.HasPrefix(d, "trusted project config") {
+			projectDiags = append(projectDiags, d)
+		} else {
+			userDiags = append(userDiags, d)
+		}
+	}
 	switch {
 	case path == "":
 		report(doctorFail, "User config: path unavailable")
 	default:
 		if _, err := os.Stat(path); err != nil {
 			report(doctorWarn, "User config: %s not found; using built-in defaults", path)
-		} else if len(cfg.Diagnostics) > 0 {
-			report(doctorFail, "User config: %s problem: %s", path, strings.Join(cfg.Diagnostics, "; "))
+		} else if len(userDiags) > 0 {
+			report(doctorFail, "User config: %s problem: %s", path, strings.Join(userDiags, "; "))
 		} else {
 			report(doctorOK, "User config: %s loaded", path)
 		}
+	}
+	if len(projectDiags) > 0 {
+		report(doctorWarn, "Project config: %s", strings.Join(projectDiags, "; "))
 	}
 	if cfg.Mode == "audit" {
 		report(doctorWarn, "Mode: audit (decisions are logged but not enforced)")
@@ -119,30 +131,53 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd string, offline bool) int {
 	// 6. Audit log directory.
 	if cfg.AuditLogPath == "" {
 		report(doctorOK, "Audit log: not configured")
-	} else if err := checkDirWritable(filepath.Dir(cfg.AuditLogPath)); err != nil {
-		report(doctorFail, "Audit log: directory for %s not writable: %v", cfg.AuditLogPath, err)
 	} else {
-		report(doctorOK, "Audit log: directory for %s is writable", cfg.AuditLogPath)
+		dir := filepath.Dir(cfg.AuditLogPath)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			// Logging creates the directory (MkdirAll), so only the nearest existing ancestor must be writable.
+			ancestor := nearestExistingDir(dir)
+			if err := checkDirWritable(ancestor); err != nil {
+				report(doctorFail, "Audit log: directory for %s does not exist and %s is not writable: %v", cfg.AuditLogPath, ancestor, err)
+			} else {
+				report(doctorOK, "Audit log: directory for %s will be created on first write", cfg.AuditLogPath)
+			}
+		} else if err := checkDirWritable(dir); err != nil {
+			report(doctorFail, "Audit log: directory for %s not writable: %v", cfg.AuditLogPath, err)
+		} else {
+			report(doctorOK, "Audit log: directory for %s is writable", cfg.AuditLogPath)
+		}
 	}
 
 	// 7. Hooks.
 	for _, agent := range doctorAgents {
-		hookPath := initSettingsPath(agent, "project", cwd, "")
-		command, status := findPreToolUseCommand(hookPath, agent)
-		switch status {
-		case "missing":
-			report(doctorWarn, "Hooks (%s): %s not found; run `jev-guard init --agent %s`", agent, hookPath, agent)
-		case "invalid":
-			report(doctorFail, "Hooks (%s): %s is not valid JSON", agent, hookPath)
-		case "none":
-			report(doctorWarn, "Hooks (%s): %s has no jev-guard PreToolUse entry", agent, hookPath)
-		default:
-			exe := hookExecutable(command)
-			if resolved, ok := resolveExecutable(exe); ok {
-				report(doctorOK, "Hooks (%s): PreToolUse registered in %s; command %s", agent, hookPath, resolved)
-			} else {
-				report(doctorFail, "Hooks (%s): PreToolUse registered in %s but command %q not found", agent, hookPath, exe)
+		type hookScope struct{ name, path string }
+		scopes := []hookScope{{"project", initSettingsPath(agent, "project", cwd, "")}}
+		if home != "" {
+			if userPath := initSettingsPath(agent, "user", cwd, home); userPath != scopes[0].path {
+				scopes = append(scopes, hookScope{"user", userPath})
 			}
+		}
+		found := false
+		var checked []string
+		for _, s := range scopes {
+			checked = append(checked, s.path)
+			command, status := findPreToolUseCommand(s.path, agent)
+			switch status {
+			case "invalid":
+				found = true
+				report(doctorFail, "Hooks (%s): %s scope settings %s is not valid JSON", agent, s.name, s.path)
+			case "found":
+				found = true
+				exe := hookExecutable(command)
+				if resolved, ok := resolveExecutable(exe); ok {
+					report(doctorOK, "Hooks (%s): PreToolUse registered in %s scope (%s); command %s", agent, s.name, s.path, resolved)
+				} else {
+					report(doctorFail, "Hooks (%s): PreToolUse registered in %s scope (%s) but command %q not found", agent, s.name, s.path, exe)
+				}
+			}
+		}
+		if !found {
+			report(doctorWarn, "Hooks (%s): no jev-guard PreToolUse entry in %s; run `jev-guard init --agent %s`", agent, strings.Join(checked, " or "), agent)
 		}
 	}
 
@@ -183,8 +218,23 @@ func checkDirWritable(dir string) error {
 	return os.Remove(name)
 }
 
+// nearestExistingDir returns dir or its closest ancestor that exists.
+func nearestExistingDir(dir string) string {
+	curr := filepath.Clean(dir)
+	for {
+		if _, err := os.Stat(curr); err == nil {
+			return curr
+		}
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			return curr
+		}
+		curr = parent
+	}
+}
+
 // findPreToolUseCommand returns the jev-guard PreToolUse command and a status of
-// "found", "missing" (no file), "invalid" (bad JSON) or "none" (no entry).
+// "found", "missing" (no file), "invalid" (bad JSON) or "none" (no jev-guard entry).
 func findPreToolUseCommand(path, agent string) (string, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -211,7 +261,7 @@ func findPreToolUseCommand(path, agent string) (string, string) {
 			if !ok {
 				continue
 			}
-			if cmd, ok := obj["command"].(string); ok && managedHookCommand(cmd, cmd) && !strings.HasSuffix(cmd, " ingest") {
+			if cmd, ok := obj["command"].(string); ok && managedHookCommand(cmd, "jev-guard") && !strings.HasSuffix(cmd, " ingest") {
 				return cmd, "found"
 			}
 		}
@@ -219,19 +269,31 @@ func findPreToolUseCommand(path, agent string) (string, string) {
 	return "", "none"
 }
 
-// hookExecutable extracts the executable from a hook command, honoring quotes.
+// hookExecutable extracts the first shell word of a hook command. It handles
+// concatenated single- and double-quoted segments (as written by
+// quoteHookExecutableForOS); backslashes are kept literally so Windows paths survive.
 func hookExecutable(command string) string {
 	command = strings.TrimSpace(command)
-	if command != "" && (command[0] == '"' || command[0] == '\'') {
-		if end := strings.IndexByte(command[1:], command[0]); end >= 0 {
-			return command[1 : end+1]
+	var b strings.Builder
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				b.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ' ' || c == '\t':
+			return b.String()
+		default:
+			b.WriteByte(c)
 		}
-		return command[1:]
 	}
-	if fields := strings.Fields(command); len(fields) > 0 {
-		return fields[0]
-	}
-	return ""
+	return b.String()
 }
 
 func resolveExecutable(exe string) (string, bool) {
