@@ -248,7 +248,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		changed = changed || c
 	}
 	matcher := map[string]string{
-		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|View|ReadLocalFile|LS",
+		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
 		"codex":       "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
 		"antigravity": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
 	}[agent]

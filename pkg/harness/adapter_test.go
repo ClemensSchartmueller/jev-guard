@@ -540,8 +540,6 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	}
 }
 
-
-
 func TestParsePayload_ClaudeNewTools(t *testing.T) {
 	cases := []struct{ name, payload, cmd, target string }{
 		{"Read", `{"tool_name":"Read","tool_input":{"file_path":"/w/.env"}}`, "", "/w/.env"},

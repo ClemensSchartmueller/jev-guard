@@ -9,14 +9,15 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
 ## Key Features
 
 - **Multi-Agent Interception**: Automatically detects and handles payload structures from:
-  - **Claude Code**: `Bash`, `PowerShell`, `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch` (plus legacy `View`, `ReadLocalFile`, `LS`)
+  - **Claude Code**: `Bash`, `PowerShell`, `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch` (plus legacy `View`, `ReadLocalFile`, `LS`)
+  - MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-guard.
   - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
   - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
   - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
   - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
-  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`, `WebFetch`) are strictly routed to TypeSafe AI System One for semantic evaluation.
+  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`, `WebFetch`, `WebSearch`) are strictly routed to TypeSafe AI System One for semantic evaluation.
   - **User-controlled Bypass Toggle**: Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to route operations directly to Jev.
 - **Platform-Specific Safety Enforcement**:
   - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
@@ -298,7 +299,7 @@ Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/setting
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|View|ReadLocalFile|LS",
+        "matcher": "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
         "hooks": [
           {
             "type": "command",

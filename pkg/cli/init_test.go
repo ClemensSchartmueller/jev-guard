@@ -297,7 +297,7 @@ func TestInstallAgentHooksUpgradesOldClaudeMatcher(t *testing.T) {
 		t.Fatalf("got %d PreToolUse entries, want one", len(entries))
 	}
 	matcher, _ := entries[0].(map[string]interface{})["matcher"].(string)
-	for _, tool := range []string{"Read", "PowerShell", "MultiEdit", "NotebookEdit", "WebFetch"} {
+	for _, tool := range []string{"Read", "PowerShell", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"} {
 		if !strings.Contains("|"+matcher+"|", "|"+tool+"|") {
 			t.Errorf("matcher %q missing %s", matcher, tool)
 		}
