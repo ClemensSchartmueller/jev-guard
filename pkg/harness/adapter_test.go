@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -540,4 +541,49 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	}
 }
 
+func TestParseIngestPayload_CodexStringTurnID(t *testing.T) {
+	state, err := ParseIngestPayload([]byte(`{"session_id":"s","turn_id":"019-abc","prompt":"hi","hook_event_name":"UserPromptSubmit"}`))
+	if err != nil {
+		t.Fatalf("string turn_id must not fail: %v", err)
+	}
+	if state.TurnKey != "019-abc" || state.TurnID != 0 {
+		t.Errorf("unexpected state %+v", state)
+	}
+	state, err = ParseIngestPayload([]byte(`{"session_id":"s","turn_id":7,"prompt":"hi"}`))
+	if err != nil || state.TurnID != 7 || state.TurnKey != "" {
+		t.Errorf("numeric turn_id: state=%+v err=%v", state, err)
+	}
+}
 
+func TestParsePayload_CodexTurnKey(t *testing.T) {
+	call, err := ParsePayload([]byte(`{"session_id":"s","turn_id":"t-9","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Harness != HarnessCodex || call.TurnKey != "t-9" {
+		t.Errorf("got harness=%s key=%q", call.Harness, call.TurnKey)
+	}
+	claude, err := ParsePayload([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claude.Harness != HarnessClaudeCode || claude.TurnKey != "" || claude.TurnID != 0 {
+		t.Errorf("claude payload changed: %+v", claude)
+	}
+}
+
+func TestFormatResponse_CodexBlockedVerdictsExitTwo(t *testing.T) {
+	call := &NormalizedToolCall{Harness: HarnessCodex, TurnKey: "t1"}
+	for _, d := range []Decision{DecisionAsk, DecisionForceAsk, DecisionDeny} {
+		code, out, err := FormatResponseForCall(call, EvaluationResult{Decision: d, Reason: "because"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 2 || string(out) != "because" {
+			t.Errorf("%s: code=%d out=%q, want 2 with plain reason", d, code, out)
+		}
+		if strings.Contains(string(out), "permissionDecision") {
+			t.Errorf("%s: must not emit JSON ask", d)
+		}
+	}
+}

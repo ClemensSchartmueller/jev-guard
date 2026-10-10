@@ -56,7 +56,7 @@ func runGate() int {
 			sessionID = "default"
 		}
 		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
-			if sessState.Aborted {
+			if sessState.Aborted && !abortFromOtherTurn(call.TurnKey, sessState.TurnKey) {
 				result := &harness.EvaluationResult{
 					Decision:   harness.DecisionForceAsk,
 					Reason:     "Action held: an active abort/stop signal was recorded for this session",
@@ -66,7 +66,7 @@ func runGate() int {
 				_ = cfg.LogAudit(call, result)
 				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 			}
-			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
+			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
 				call.UserIntent = intent
 			}
 		}
@@ -172,7 +172,20 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	return outputHarnessVerdict(call, res)
 }
 
-func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) string {
+// abortFromOtherTurn reports whether an abort flag was recorded for a different
+// turn than the current call. Only provable (both keys present, different) mismatches count.
+func abortFromOtherTurn(callTurnKey, sessionTurnKey string) bool {
+	return callTurnKey != "" && sessionTurnKey != "" && callTurnKey != sessionTurnKey
+}
+
+func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {
+	if callTurnKey != "" {
+		// Keyed (Codex) calls only accept intent ingested in the exact same turn.
+		if sessionTurnKey != callTurnKey {
+			return ""
+		}
+		return sessionPrompt
+	}
 	if callTurnID == 0 || sessionTurnID == 0 || callTurnID == sessionTurnID {
 		return sessionPrompt
 	}
