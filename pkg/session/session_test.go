@@ -1,9 +1,12 @@
 package session
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -331,5 +334,144 @@ func TestSession_TempFileCleanup(t *testing.T) {
 	entries, _ := os.ReadDir(sessionsDir)
 	if len(entries) != 0 {
 		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
+	}
+}
+
+func TestSaveSession_OverwriteAndNoTempLeft(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	for i, prompt := range []string{"first", "second"} {
+		if err := SaveSession(&SessionState{SessionID: "ow", TurnID: i, Prompt: prompt}); err != nil {
+			t.Fatalf("SaveSession failed: %v", err)
+		}
+	}
+	loaded, err := LoadSession("ow")
+	if err != nil || loaded == nil || loaded.Prompt != "second" {
+		t.Fatalf("unexpected load: %+v, %v", loaded, err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestSaveSession_RetriesThenCleansUp(t *testing.T) {
+	dir := setupTestJevguardDir(t)
+	oldRename, oldSleep, oldRetryable := renameFunc, retrySleep, retryable
+	defer func() { renameFunc, retrySleep, retryable = oldRename, oldSleep, oldRetryable }()
+	errTransient := errors.New("transient")
+	var sleeps []time.Duration
+	calls := 0
+	retrySleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	retryable = func(err error) bool { return errors.Is(err, errTransient) }
+	renameFunc = func(a, b string) error { calls++; return errTransient }
+	if err := SaveSession(&SessionState{SessionID: "fail", Prompt: "x"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != retryAttempts {
+		t.Fatalf("expected %d attempts, got %d", retryAttempts, calls)
+	}
+	ms := time.Millisecond
+	want := []time.Duration{5 * ms, 10 * ms, 20 * ms, 40 * ms, 50 * ms, 50 * ms, 50 * ms, 50 * ms, 50 * ms}
+	if fmt.Sprint(sleeps) != fmt.Sprint(want) {
+		t.Fatalf("backoff sequence = %v, want %v", sleeps, want)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	if len(entries) != 0 {
+		t.Fatalf("expected empty sessions dir, got %d entries", len(entries))
+	}
+}
+
+func TestSaveSession_PermanentRenameErrorNotRetried(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldRename, oldSleep, oldRetryable := renameFunc, retrySleep, retryable
+	defer func() { renameFunc, retrySleep, retryable = oldRename, oldSleep, oldRetryable }()
+	calls, sleeps := 0, 0
+	retrySleep = func(time.Duration) { sleeps++ }
+	retryable = func(error) bool { return false }
+	renameFunc = func(a, b string) error { calls++; return errors.New("permanent") }
+	if err := SaveSession(&SessionState{SessionID: "perm", Prompt: "x"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 || sleeps != 0 {
+		t.Fatalf("expected 1 attempt and no sleeps, got %d attempts, %d sleeps", calls, sleeps)
+	}
+}
+
+func TestLoadSession_PermanentReadErrorNotRetried(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldRead, oldSleep := readFileFunc, retrySleep
+	defer func() { readFileFunc, retrySleep = oldRead, oldSleep }()
+	calls, sleeps := 0, 0
+	retrySleep = func(time.Duration) { sleeps++ }
+	readFileFunc = func(string) ([]byte, error) { calls++; return nil, errors.New("permanent") }
+	if _, err := LoadSession("perm"); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 || sleeps != 0 {
+		t.Fatalf("expected 1 attempt and no sleeps, got %d attempts, %d sleeps", calls, sleeps)
+	}
+}
+
+func TestLoadSession_TransientReadErrorRetried(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "tr", Prompt: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	oldRead, oldSleep, oldRetryable := readFileFunc, retrySleep, retryable
+	defer func() { readFileFunc, retrySleep, retryable = oldRead, oldSleep, oldRetryable }()
+	errTransient := errors.New("transient")
+	calls := 0
+	retrySleep = func(time.Duration) {}
+	retryable = func(err error) bool { return errors.Is(err, errTransient) }
+	readFileFunc = func(p string) ([]byte, error) {
+		calls++
+		if calls < 3 {
+			return nil, errTransient
+		}
+		return os.ReadFile(p)
+	}
+	s, err := LoadSession("tr")
+	if err != nil || s == nil || s.Prompt != "hello" {
+		t.Fatalf("unexpected load: %+v, %v", s, err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 read attempts, got %d", calls)
+	}
+}
+
+// TestSaveSession_ConcurrentSaveLoadNeverMissing only reproduces the original
+// bug on Windows: on POSIX, rename(2) replaces the target atomically, so the
+// old remove-then-rename fallback was never reached. CI runs windows-latest.
+func TestSaveSession_ConcurrentSaveLoadNeverMissing(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "cc", Prompt: "init"}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan string, 200)
+	for g := 0; g < 20; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				if g%2 == 0 {
+					if err := SaveSession(&SessionState{SessionID: "cc", TurnID: i, Prompt: "p"}); err != nil {
+						errs <- "save: " + err.Error()
+					}
+				} else {
+					s, err := LoadSession("cc")
+					if err != nil || s == nil {
+						errs <- fmt.Sprintf("load: %v %v", s, err)
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }
