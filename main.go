@@ -49,27 +49,9 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if cfg.IsContextAwarenessEnabled() {
-		session.SetSessionTTL(cfg.IntentTTL())
-		sessionID := call.SessionID
-		if sessionID == "" {
-			sessionID = "default"
-		}
-		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
-			if sessState.Aborted && !abortFromOtherTurn(call.TurnKey, sessState.TurnKey) {
-				result := &harness.EvaluationResult{
-					Decision:   harness.DecisionForceAsk,
-					Reason:     "Action held: an active abort/stop signal was recorded for this session",
-					Source:     "session_aborted",
-					Confidence: 1.0,
-				}
-				_ = cfg.LogAudit(call, result)
-				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
-			}
-			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
-				call.UserIntent = intent
-			}
-		}
+	if result := applySessionContext(call, cfg); result != nil {
+		_ = cfg.LogAudit(call, result)
+		return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 	}
 
 	result := executeGateEvaluation(call, cfg)
@@ -172,10 +154,36 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	return outputHarnessVerdict(call, res)
 }
 
-// abortFromOtherTurn reports whether an abort flag was recorded for a different
-// turn than the current call. Only provable (both keys present, different) mismatches count.
-func abortFromOtherTurn(callTurnKey, sessionTurnKey string) bool {
-	return callTurnKey != "" && sessionTurnKey != "" && callTurnKey != sessionTurnKey
+// applySessionContext loads the session state for the call. If the session holds an
+// abort/stop signal, it returns a FORCE_ASK result. The hold applies regardless of turn
+// (fail closed): a successful ingest of a new prompt already clears it, so a turn mismatch
+// only happens when that ingest failed (empty prompt, untrusted hook, timeout).
+// Otherwise it attaches the turn-matched user intent to call and returns nil.
+func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
+	if !cfg.IsContextAwarenessEnabled() {
+		return nil
+	}
+	session.SetSessionTTL(cfg.IntentTTL())
+	sessionID := call.SessionID
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	sessState, sessErr := session.LoadSession(sessionID)
+	if sessErr != nil || sessState == nil {
+		return nil
+	}
+	if sessState.Aborted {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionForceAsk,
+			Reason:     "Action held: an active abort/stop signal was recorded for this session",
+			Source:     "session_aborted",
+			Confidence: 1.0,
+		}
+	}
+	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
+		call.UserIntent = intent
+	}
+	return nil
 }
 
 func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {

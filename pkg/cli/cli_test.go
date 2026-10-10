@@ -456,6 +456,9 @@ func TestIngestCodexStringTurnID(t *testing.T) {
 	if state.TurnKey != "turn-abc" || state.TurnID != 0 || state.Prompt != "Delete the build folder" {
 		t.Fatalf("unexpected state: %+v", state)
 	}
+	if !strings.Contains(stderr.String(), "(turn: turn-abc)") {
+		t.Fatalf("expected stderr to contain turn key, got %q", stderr.String())
+	}
 }
 
 func TestIngestTurnKeyFlag(t *testing.T) {

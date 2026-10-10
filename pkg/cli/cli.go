@@ -349,7 +349,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	if session.IsNegativeIntent(prompt) {
 		fmt.Fprintf(r.Stderr, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
 	} else {
-		fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		if turnKey != "" {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %s)\n", sessionID, turnKey)
+		} else {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		}
 	}
 
 	return ActionHandled, 0

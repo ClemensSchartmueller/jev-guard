@@ -91,7 +91,7 @@ func (r *Runner) handleInit(args []string) (Action, int) {
 	}
 	fmt.Fprintln(r.Stdout, "Run `jev-guard config show` to check policy and API key status.")
 	if agent == "codex" || agent == "all" || containsAgent(selected, "codex") {
-		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hooks with `/hooks` before they can run. New or changed hooks (including UserPromptSubmit and Stop) must be re-trusted.")
+		fmt.Fprintln(r.Stdout, "Codex: review and trust the Codex hooks with `/hooks` before they can run. New or changed hooks (including UserPromptSubmit and Stop) must be re-trusted.")
 	}
 	return ActionHandled, 0
 }
