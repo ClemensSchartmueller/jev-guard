@@ -374,6 +374,8 @@ When context awareness is enabled and intent is ingested, TypeSafe AI classifies
 | **Workspace Boundary Escape** (`../../` traversal) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) |
 | **Anti-Tampering** (`~/.jevguard/` cache access) | **DENY** (Strict invariant) | **DENY** (Strict invariant) | **DENY** (Strict invariant) |
 
+For file-path tools (`Edit`/`Write`/`Read`), a deterministic local boundary proof that the target is inside the workspace is authoritative over the model's containment probability, so a low `IsWorkspaceContained` score alone no longer triggers a Workspace Boundary Escape prompt; shell commands are unaffected.
+
 > [!IMPORTANT]
 > **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto. This catastrophic invariant takes precedence over all violation categories (including credential access).
 >
