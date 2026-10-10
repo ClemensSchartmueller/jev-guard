@@ -57,12 +57,7 @@ func runGate() int {
 		}
 		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
 			if sessState.Aborted {
-				result := &harness.EvaluationResult{
-					Decision:   harness.DecisionForceAsk,
-					Reason:     "Action held: an active abort/stop signal was recorded for this session",
-					Source:     "session_aborted",
-					Confidence: 1.0,
-				}
+				result := abortedSessionResult()
 				_ = cfg.LogAudit(call, result)
 				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 			}
@@ -79,6 +74,16 @@ func runGate() int {
 	}
 
 	return outputHarnessVerdict(call, *result)
+}
+
+// abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.
+func abortedSessionResult() *harness.EvaluationResult {
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionForceAsk,
+		Reason:     "Action held: an active abort/stop signal was recorded for this session",
+		Source:     "session_aborted",
+		Confidence: 1.0,
+	}
 }
 
 func readStandardInput() ([]byte, error) {

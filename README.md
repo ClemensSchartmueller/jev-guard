@@ -142,6 +142,7 @@ jev-guard eval --cmd "git diff .env"
 jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
 jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
 jev-guard eval --cmd "cat .env" --json
+jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
 ```
 
 > [!NOTE]
@@ -151,6 +152,7 @@ jev-guard eval --cmd "cat .env" --json
 
 - `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
 - `--cwd DIR` sets the working directory (default: current directory).
+- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written.
 - `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
 - `--explain` prints the config and mode, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
