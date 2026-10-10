@@ -169,6 +169,17 @@ func extractCwd(args map[string]interface{}) string {
 	return ""
 }
 
+// PathArgKeys lists tool argument keys treated as filesystem/URL targets, in
+// priority order. extractCommandAndTarget picks the first non-empty one.
+var PathArgKeys = []string{
+	"TargetFile", "AbsolutePath", "file_path", "filePath", "notebook_path",
+	"SearchPath", "search_path", "SearchDirectory",
+	"DirectoryPath", "dir_path", "directory",
+	"path", "target_path", "targetPath", "target",
+	"file", "filename", "Uri", "uri", "Url", "url",
+	"dest", "destination", "source", "src",
+}
+
 func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	if args == nil {
 		return "", ""
@@ -186,15 +197,7 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	}
 
 	var target string
-	pathKeys := []string{
-		"TargetFile", "AbsolutePath", "file_path", "filePath",
-		"SearchPath", "search_path", "SearchDirectory",
-		"DirectoryPath", "dir_path", "directory",
-		"path", "target_path", "targetPath", "target",
-		"file", "filename", "Uri", "uri", "Url", "url",
-		"dest", "destination", "source", "src",
-	}
-	for _, key := range pathKeys {
+	for _, key := range PathArgKeys {
 		if val, exists := args[key]; exists {
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
 				target = strings.TrimSpace(strVal)

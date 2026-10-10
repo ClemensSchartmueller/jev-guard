@@ -521,6 +521,35 @@ func TestParsePayload_AntigravityReadResource(t *testing.T) {
 	}
 }
 
+func TestParsePayload_ClaudeNotebookEdit(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "NotebookEdit",
+		"tool_input": {
+			"notebook_path": "/repo/nb.ipynb",
+			"new_source": "x"
+		},
+		"cwd": "/repo"
+	}`)
+
+	call, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.TargetPath != "/repo/nb.ipynb" {
+		t.Errorf("expected target path '/repo/nb.ipynb', got '%s'", call.TargetPath)
+	}
+}
+
+func TestExtractCommandAndTarget_NotebookPath(t *testing.T) {
+	cmd, target := extractCommandAndTarget(map[string]interface{}{"notebook_path": "/repo/nb.ipynb"})
+	if cmd != "" {
+		t.Errorf("expected empty command, got '%s'", cmd)
+	}
+	if target != "/repo/nb.ipynb" {
+		t.Errorf("expected target '/repo/nb.ipynb', got '%s'", target)
+	}
+}
+
 func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	raw := []byte(`{
 		"tool_name": "apply_patch",
@@ -539,5 +568,3 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 		t.Errorf("expected target path '/repo/main.go', got '%s'", call.TargetPath)
 	}
 }
-
-
