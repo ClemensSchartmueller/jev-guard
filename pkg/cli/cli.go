@@ -136,6 +136,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])
 	fmt.Fprintf(r.Stdout, "  Context awareness:    %t (%s)\n", cfg.IsContextAwarenessEnabled(), cfg.Sources["context_awareness_enabled"])
 	fmt.Fprintf(r.Stdout, "  Intent TTL:           %d minutes (%s)\n", int(cfg.IntentTTL()/time.Minute), cfg.Sources["intent_ttl_minutes"])
+	fmt.Fprintf(r.Stdout, "  Antigravity transcript intent: %t (%s)\n", cfg.IsAntigravityTranscriptIntentEnabled(), cfg.Sources["antigravity_transcript_intent"])
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {

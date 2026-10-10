@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
 	"jev-guard/pkg/session"
+	"jev-guard/pkg/transcript"
 )
 
 func main() {
@@ -57,18 +59,14 @@ func runGate() int {
 		}
 		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
 			if sessState.Aborted {
-				result := &harness.EvaluationResult{
-					Decision:   harness.DecisionForceAsk,
-					Reason:     "Action held: an active abort/stop signal was recorded for this session",
-					Source:     "session_aborted",
-					Confidence: 1.0,
-				}
-				_ = cfg.LogAudit(call, result)
-				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+				return holdAborted(call, cfg, "Action held: an active abort/stop signal was recorded for this session")
 			}
 			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
 				call.UserIntent = intent
 			}
+		}
+		if home, homeErr := os.UserHomeDir(); homeErr == nil && applyTranscriptIntent(call, cfg, home) {
+			return holdAborted(call, cfg, "Action held: the latest user request in the Antigravity transcript is an abort/stop command")
 		}
 	}
 
@@ -79,6 +77,40 @@ func runGate() int {
 	}
 
 	return outputHarnessVerdict(call, *result)
+}
+
+// holdAborted logs and returns a force_ask verdict for an aborted session or stop request.
+func holdAborted(call *harness.NormalizedToolCall, cfg *config.Config, reason string) int {
+	result := &harness.EvaluationResult{
+		Decision:   harness.DecisionForceAsk,
+		Reason:     reason,
+		Source:     "session_aborted",
+		Confidence: 1.0,
+	}
+	_ = cfg.LogAudit(call, result)
+	return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+}
+
+// applyTranscriptIntent reads the latest user request from the Antigravity transcript when
+// the harness and the antigravity_transcript_intent setting allow it.
+// It sets call.UserIntent and returns false normally, or returns true when that request
+// is a stop/abort command. Any error leaves the call without intent (stateless gating).
+func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config, home string) bool {
+	if call.Harness != harness.HarnessAntigravity || !cfg.IsAntigravityTranscriptIntentEnabled() {
+		return false
+	}
+	text, err := transcript.LatestUserInput(call.TranscriptPath, call.SessionID, home)
+	if err != nil {
+		if !errors.Is(err, transcript.ErrNoUserInput) {
+			fmt.Fprintf(os.Stderr, "jev-guard: antigravity transcript intent unavailable: %v\n", err)
+		}
+		return false
+	}
+	if session.IsNegativeIntent(text) {
+		return true
+	}
+	call.UserIntent = text
+	return false
 }
 
 func readStandardInput() ([]byte, error) {
