@@ -102,7 +102,39 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 		return "Access to jev-guard configuration or session state via command is prohibited"
 	}
 
+	if isAntigravitySystemPath(call.TargetPath) {
+		return "Direct access to Antigravity conversation transcript/system state is prohibited"
+	}
+
+	// Commands are matched more broadly on purpose: shell globs and variables
+	// (e.g. ~/.gemini/antigravity/brain/*/.sys*/logs/t*) cannot be parsed reliably.
+	c := strings.ReplaceAll(strings.ToLower(call.Command), `\`, "/")
+	if strings.Contains(c, "antigravity/brain") || strings.Contains(c, ".system_generated") || strings.Contains(c, "transcript.jsonl") {
+		return "Access to Antigravity conversation transcript/system state via command is prohibited"
+	}
+
 	return ""
+}
+
+// isAntigravitySystemPath reports whether p points into the ".system_generated"
+// subtree of an Antigravity conversation (~/.gemini/antigravity/brain/<id>/.system_generated/...).
+// Other artifacts under brain/<id>/ (e.g. task.md) are not matched.
+func isAntigravitySystemPath(p string) bool {
+	if isFileURI(p) {
+		p = extractFilePathFromURI(p)
+	}
+	segs := strings.Split(strings.ToLower(normalizePathSeparators(p)), "/")
+	for i := 0; i+2 < len(segs); i++ {
+		if segs[i] != ".gemini" || segs[i+1] != "antigravity" || segs[i+2] != "brain" {
+			continue
+		}
+		for j := i + 3; j < len(segs); j++ {
+			if segs[j] == ".system_generated" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {

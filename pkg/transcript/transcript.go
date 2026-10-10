@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"unicode/utf8"
 )
 
 const (
@@ -26,6 +25,9 @@ const (
 
 // ErrNoUserInput means no explicit user message was found in the scanned window.
 var ErrNoUserInput = errors.New("no user input found in transcript")
+
+// ErrUnusableUserInput means the latest explicit user message exists but carries no usable text (empty, non-text, missing, malformed, truncated, or over the size cap).
+var ErrUnusableUserInput = errors.New("latest user input in transcript has no usable text")
 
 var conversationIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
@@ -38,7 +40,9 @@ type record struct {
 
 // LatestUserInput returns the content of the last USER_INPUT/USER_EXPLICIT record
 // in the transcript at path. The path must be the canonical transcript location of
-// conversationID under home, otherwise an error is returned.
+// conversationID under home, otherwise an error is returned. If the latest explicit
+// user record has no usable text, ErrUnusableUserInput (possibly wrapped) is returned
+// and older messages are never used.
 func LatestUserInput(path, conversationID, home string) (string, error) {
 	resolved, err := validatePath(path, conversationID, home)
 	if err != nil {
@@ -139,6 +143,9 @@ func scanBackwards(r io.ReaderAt, size int64) (string, error) {
 	return "", ErrNoUserInput
 }
 
+// inspectLine reports whether line is the latest explicit user record. found is
+// true for the first such record; it is returned with either text or an error,
+// so an unusable latest record stops the backward scan instead of falling back.
 func inspectLine(line []byte) (string, bool, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
@@ -146,28 +153,24 @@ func inspectLine(line []byte) (string, bool, error) {
 	}
 	var rec record
 	if err := json.Unmarshal(line, &rec); err != nil {
+		// Fail closed if a malformed line may be an explicit user record.
+		if bytes.Contains(line, []byte(`"USER_INPUT"`)) {
+			return "", true, ErrUnusableUserInput
+		}
 		return "", false, nil
 	}
 	if rec.Type != "USER_INPUT" || rec.Source != "USER_EXPLICIT" {
 		return "", false, nil
 	}
 	if bytes.Contains(bytes.ToLower(rec.TruncatedFields), []byte("content")) {
-		return "", false, errors.New("latest user input is truncated in transcript")
+		return "", true, fmt.Errorf("latest user input is truncated in transcript: %w", ErrUnusableUserInput)
 	}
 	var content string
-	if err := json.Unmarshal(rec.Content, &content); err != nil || strings.TrimSpace(content) == "" {
-		return "", false, nil
+	if len(rec.Content) == 0 || json.Unmarshal(rec.Content, &content) != nil || strings.TrimSpace(content) == "" {
+		return "", true, ErrUnusableUserInput
 	}
-	return capText(content), true, nil
-}
-
-func capText(s string) string {
-	if len(s) <= maxTextBytes {
-		return s
+	if len(content) > maxTextBytes {
+		return "", true, fmt.Errorf("latest user input exceeds %d bytes: %w", maxTextBytes, ErrUnusableUserInput)
 	}
-	s = s[:maxTextBytes]
-	for !utf8.ValidString(s) && len(s) > 0 {
-		s = s[:len(s)-1]
-	}
-	return s
+	return content, true, nil
 }

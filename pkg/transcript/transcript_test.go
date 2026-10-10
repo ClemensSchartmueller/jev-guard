@@ -76,8 +76,9 @@ func TestLatestUserInput_TraversalID(t *testing.T) {
 func TestLatestUserInput_TruncatedContent(t *testing.T) {
 	rec := `{"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","content":"half","truncated_fields":["content"]}` + "\n"
 	p, h := setup(t, user("older")+rec)
-	if _, err := LatestUserInput(p, convID, h); err == nil || errors.Is(err, ErrNoUserInput) {
-		t.Fatalf("expected truncation error, got %v", err)
+	got, err := LatestUserInput(p, convID, h)
+	if err == nil || errors.Is(err, ErrNoUserInput) || !errors.Is(err, ErrUnusableUserInput) {
+		t.Fatalf("expected truncation error wrapping ErrUnusableUserInput, got %q, %v", got, err)
 	}
 }
 
@@ -100,19 +101,58 @@ func TestLatestUserInput_BoundedScan(t *testing.T) {
 	}
 }
 
-func TestLatestUserInput_TrailingPartialLine(t *testing.T) {
+func TestLatestUserInput_TrailingPartialUserLineFailsClosed(t *testing.T) {
 	p, h := setup(t, user("hello")+model+`{"type":"USER_INPUT","source":"USER_EXP`)
+	got, err := LatestUserInput(p, convID, h)
+	if !errors.Is(err, ErrUnusableUserInput) || got != "" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestLatestUserInput_TrailingPartialModelLine(t *testing.T) {
+	p, h := setup(t, user("hello")+model+`{"type":"PLANNER_RESPONSE","source":"MOD`)
 	got, err := LatestUserInput(p, convID, h)
 	if err != nil || got != "hello" {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
 
-func TestLatestUserInput_LargeInputCapped(t *testing.T) {
+func TestLatestUserInput_OverCapRejected(t *testing.T) {
 	p, h := setup(t, user(strings.Repeat("a", 20000)))
 	got, err := LatestUserInput(p, convID, h)
-	if err != nil || len(got) != 8<<10 {
+	if !errors.Is(err, ErrUnusableUserInput) || got != "" {
+		t.Fatalf("got len=%d err=%v", len(got), err)
+	}
+}
+
+func TestLatestUserInput_ExactCapAccepted(t *testing.T) {
+	text := strings.Repeat("a", 8<<10)
+	p, h := setup(t, user(text))
+	got, err := LatestUserInput(p, convID, h)
+	if err != nil || got != text {
 		t.Fatalf("len=%d err=%v", len(got), err)
+	}
+}
+
+func TestLatestUserInput_UnusableLatestDoesNotFallBack(t *testing.T) {
+	cases := map[string]string{
+		"empty content":      `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":""}` + "\n",
+		"whitespace content": `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"   "}` + "\n",
+		"non-text content":   `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":[{"image":"x"}]}` + "\n",
+		"null content":       `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":null}` + "\n",
+		"missing content":    `{"type":"USER_INPUT","source":"USER_EXPLICIT"}` + "\n",
+		"malformed json":     `{"type":"USER_INPUT","source":"USER_EXPLICIT","content":"x"` + "\n",
+	}
+	for name, x := range cases {
+		t.Run(name, func(t *testing.T) {
+			for _, body := range []string{user("delete the build directory") + model + x, user("delete the build directory") + x + model} {
+				p, h := setup(t, body)
+				got, err := LatestUserInput(p, convID, h)
+				if got != "" || !errors.Is(err, ErrUnusableUserInput) {
+					t.Fatalf("got %q, %v", got, err)
+				}
+			}
+		})
 	}
 }
 

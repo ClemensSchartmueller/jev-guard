@@ -344,6 +344,61 @@ func TestFastPath_AntiTampering(t *testing.T) {
 	}
 }
 
+func TestFastPath_AntiTampering_AntigravityTranscript(t *testing.T) {
+	filter := NewDefaultFilter()
+
+	denyTargets := []string{
+		`/home/bob/.gemini/antigravity/brain/abc-123/.system_generated/logs/transcript.jsonl`,
+		`~/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl`,
+		`C:\Users\Bob\.gemini\antigravity\brain\abc\.system_generated\logs\transcript.jsonl`,
+		`C:\Users\Bob\.Gemini\Antigravity\Brain\abc\.SYSTEM_GENERATED\logs\transcript.jsonl`,
+		`file:///C:/Users/Bob/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl`,
+		`../../.gemini/antigravity/brain/abc/.system_generated/x`,
+	}
+	for _, target := range denyTargets {
+		t.Run("deny_target/"+target, func(t *testing.T) {
+			call := &harness.NormalizedToolCall{
+				ToolName:   "view_file",
+				TargetPath: target,
+			}
+			res := filter.Evaluate(call)
+			if res == nil || res.Decision != harness.DecisionDeny {
+				t.Fatalf("expected DENY for target %q, got %+v", target, res)
+			}
+		})
+	}
+
+	denyCommands := []string{
+		`echo '{"type":"USER_INPUT"}' >> ~/.gemini/antigravity/brain/abc/.system_generated/logs/transcript.jsonl`,
+		`type C:\Users\Bob\.gemini\antigravity\brain\abc\.system_generated\logs\transcript.jsonl`,
+		`cat ~/.gemini/antigravity/brain/*/.sys*/logs/t*`,
+		`Add-Content -Path $env:USERPROFILE\.gemini\Antigravity\Brain\x\y.jsonl -Value z`,
+	}
+	for _, cmd := range denyCommands {
+		t.Run("deny_command/"+cmd, func(t *testing.T) {
+			call := &harness.NormalizedToolCall{
+				ToolName: "run_command",
+				Command:  cmd,
+			}
+			res := filter.Evaluate(call)
+			if res == nil || res.Decision != harness.DecisionDeny {
+				t.Fatalf("expected DENY for command %q, got %+v", cmd, res)
+			}
+		})
+	}
+
+	notMatched := []*harness.NormalizedToolCall{
+		{ToolName: "write_to_file", TargetPath: `/home/bob/.gemini/antigravity/brain/abc/task.md`},
+		{ToolName: "write_to_file", TargetPath: `/home/bob/project/src/brain/system_generated.go`},
+		{ToolName: "run_command", Command: `go test ./...`},
+	}
+	for _, call := range notMatched {
+		if reason := filter.checkAntiTampering(call); reason != "" {
+			t.Errorf("expected no anti-tampering denial for target %q / command %q, got %q", call.TargetPath, call.Command, reason)
+		}
+	}
+}
+
 func TestFastPath_SensitiveFiles_WithIntentDefers(t *testing.T) {
 	filter := NewDefaultFilter()
 
