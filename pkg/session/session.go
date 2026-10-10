@@ -15,7 +15,24 @@ import (
 )
 
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
-const DefaultSessionTTL = 60 * time.Minute
+// It is the fallback used when no TTL has been configured via SetSessionTTL.
+const DefaultSessionTTL = 30 * time.Minute
+
+var sessionTTL = DefaultSessionTTL
+
+// SetSessionTTL overrides the intent TTL used by LoadSession and ListSessions.
+// Non-positive values restore DefaultSessionTTL.
+func SetSessionTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	sessionTTL = ttl
+}
+
+// SessionTTL returns the intent TTL currently in effect.
+func SessionTTL() time.Duration {
+	return sessionTTL
+}
 
 var (
 	abortPattern       = regexp.MustCompile(`(?i)^\s*(?:(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))|(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute)\b)`)
@@ -156,7 +173,7 @@ func LoadSession(sessionID string) (*SessionState, error) {
 	}
 
 	// Verify TTL
-	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > DefaultSessionTTL {
+	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 		_ = os.Remove(targetPath)
 		return nil, nil
 	}
@@ -232,7 +249,7 @@ func ListSessions() ([]*SessionState, error) {
 			continue
 		}
 
-		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > DefaultSessionTTL {
+		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 			_ = os.Remove(fullPath)
 			continue
 		}

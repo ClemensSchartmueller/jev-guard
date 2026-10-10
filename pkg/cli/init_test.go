@@ -272,3 +272,62 @@ func TestQuoteHookExecutableForOS(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallClaudeHooksAddsStopHookOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	original := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-stop"}]}],"SubagentStop":[{"hooks":[{"type":"command","command":"user-sub"}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := installAgentHooks(path, "claude", "/bin/jev-guard"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	hooks := root["hooks"].(map[string]interface{})
+	if got := strings.Count(string(data), "/bin/jev-guard end-turn"); got != 1 {
+		t.Fatalf("expected one end-turn hook, got %d: %s", got, data)
+	}
+	if !strings.Contains(string(data), "user-stop") || !strings.Contains(string(data), "user-sub") {
+		t.Fatal("user hooks lost")
+	}
+	if len(hooks["SubagentStop"].([]interface{})) != 1 {
+		t.Fatal("SubagentStop must be untouched")
+	}
+
+	// A fresh install must not create SubagentStop at all.
+	fresh := filepath.Join(t.TempDir(), "settings.json")
+	if _, err := installAgentHooks(fresh, "claude", "/bin/jev-guard"); err != nil {
+		t.Fatal(err)
+	}
+	freshData, _ := os.ReadFile(fresh)
+	if strings.Contains(string(freshData), "SubagentStop") {
+		t.Fatal("unexpected SubagentStop hook")
+	}
+	if strings.Contains(string(freshData), `"matcher": ""`) {
+		t.Fatal("Stop hook must not carry an empty matcher")
+	}
+}
+
+func TestInstallClaudeHooksUpgradesStopHookPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	old := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"jev-guard end-turn"}]}]}}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installAgentHooks(path, "claude", "/abs/jev-guard"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Count(string(data), "end-turn") != 1 || !strings.Contains(string(data), "/abs/jev-guard end-turn") {
+		t.Fatalf("expected in-place upgrade, got %s", data)
+	}
+}

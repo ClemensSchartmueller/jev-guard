@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -535,5 +536,46 @@ func TestConfig_LogAudit_NilSafety(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Errorf("expected non-empty audit log")
+	}
+}
+
+func TestConfig_IntentTTL(t *testing.T) {
+	if got := DefaultConfig().IntentTTL(); got != 30*time.Minute {
+		t.Fatalf("expected 30m default, got %v", got)
+	}
+	cases := []struct {
+		name     string
+		json     string
+		want     time.Duration
+		wantDiag bool
+	}{
+		{"override", `{"intent_ttl_minutes": 5}`, 5 * time.Minute, false},
+		{"max", `{"intent_ttl_minutes": 1440}`, 1440 * time.Minute, false},
+		{"zero", `{"intent_ttl_minutes": 0}`, 30 * time.Minute, true},
+		{"negative", `{"intent_ttl_minutes": -3}`, 30 * time.Minute, true},
+		{"too large", `{"intent_ttl_minutes": 1441}`, 30 * time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			dir := t.TempDir()
+			userPath := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(userPath, []byte(tc.json), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := LoadConfigWithPaths(nil, userPath, filepath.Join(dir, "trusted-project-configs.json"))
+			if got := cfg.IntentTTL(); got != tc.want {
+				t.Errorf("IntentTTL = %v, want %v", got, tc.want)
+			}
+			hasDiag := false
+			for _, d := range cfg.Diagnostics {
+				if strings.Contains(d, "intent_ttl_minutes") {
+					hasDiag = true
+				}
+			}
+			if hasDiag != tc.wantDiag {
+				t.Errorf("diagnostic present = %v, want %v (%v)", hasDiag, tc.wantDiag, cfg.Diagnostics)
+			}
+		})
 	}
 }
