@@ -7,6 +7,14 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { assetName, expectedDigest, install } = require('../bin/jev-guard');
+const packageJson = require('../package.json');
+
+test('publishes the scoped public package with the jev-guard command', () => {
+  assert.equal(packageJson.name, '@clemensschartmueller/jev-guard');
+  assert.equal(packageJson.bin['jev-guard'], 'bin/jev-guard.js');
+  assert.equal(packageJson.publishConfig.access, 'public');
+  assert.equal(packageJson.publishConfig.registry, 'https://registry.npmjs.org/');
+});
 
 test('maps supported release assets and rejects unsupported platforms', () => {
   assert.equal(assetName('linux', 'x64'), 'jev-guard-linux-amd64');

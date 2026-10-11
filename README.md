@@ -65,14 +65,14 @@ The user config shares the directory for the binary, trust registry, and session
 From the project you want to protect, run:
 
 ```bash
-npx --yes jev-guard@latest
+npx --yes @clemensschartmueller/jev-guard@latest
 ```
 
 The npm launcher downloads the matching `jev-guard` release for your operating system and architecture, checks its SHA256 digest against the release checksums, installs it under `~/.jevguard/bin`, and runs `jev-guard init`. Setup adds hooks for detected agents in the current project; when none are detected, it sets up all supported agents. Existing hook configuration is preserved, and running setup again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they do not depend on a new terminal picking up a changed `PATH`.
 
 To choose an agent explicitly, pass `--agent claude`, `--agent codex`, `--agent antigravity`, or `--agent all` after the package name. The default scope is the current project; `--scope user` configures supported user-level hooks. You can also run `jev-guard init` after installing a binary by another method.
 
-The release tag and npm package version must match (for example, package `0.2.0` downloads release `v0.2.0`). The npm command becomes available after the first package is published. Node.js and npm are only needed for this setup route; the installed hooks run the native binary.
+The release tag and npm package version must match (for example, package `0.2.0` downloads release `v0.2.0`). The npm command becomes available after `@clemensschartmueller/jev-guard` is first published. Node.js and npm are only needed for this setup route; the installed hooks run the native binary.
 
 Set a TypeSafe AI API key before using semantic evaluation:
 

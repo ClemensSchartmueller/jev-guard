@@ -1,5 +1,5 @@
 {
-  "name": "jev-guard",
+  "name": "@clemensschartmueller/jev-guard",
   "version": "0.2.0",
   "description": "Install and initialize jev-guard for your coding agents",
   "bin": {
@@ -18,6 +18,10 @@
     "type": "git",
     "url": "git+https://github.com/ClemensSchartmueller/jev-guard.git",
     "directory": "npm/jev-guard"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "license": "MIT",
   "scripts": {
