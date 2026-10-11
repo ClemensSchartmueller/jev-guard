@@ -39,6 +39,8 @@ type Runner struct {
 	IsTerminal func() bool
 	// Eval implements the eval subcommand; it lives in package main because it reuses the gate pipeline.
 	Eval func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
+	// Explain implements the explain subcommand (shorthand for eval --explain).
+	Explain func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	// HTTPClient is used by doctor's network check; nil uses a default client.
 	HTTPClient *http.Client
 }
@@ -106,6 +108,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleInit(args[1:])
 	case "eval":
 		return r.handleEval(args[1:])
+	case "explain":
+		return r.handleExplain(args[1:])
 	case "doctor":
 		return r.handleDoctor(args[1:])
 	default:
@@ -532,6 +536,7 @@ Commands:
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
+  explain         Shorthand for 'eval --explain': show every pipeline stage for a simulated call
   status          Display active sessions and jev-guard environment status
   doctor          Diagnose environment, network, and hook setup (--offline skips network)
   config show     Show effective policy and its source without printing secrets
@@ -553,10 +558,13 @@ Eval Flags:
   --target <path>      Target path for --tool
   --payload <file>     Raw hook JSON payload (any harness; '-' for stdin)
   --cwd <dir>          Working directory (defaults to current directory)
+  --intent <text>      Simulate the user's prompt (a stop/cancel prompt simulates an abort)
   --offline            Skip the TypeSafe network call
   --explain            Show every pipeline stage
   --json               Machine-readable output
-  Exit code is 0 whenever evaluation succeeded (any decision), non-zero on usage errors.
+  Values may be given as --flag value or --flag=value; use --cmd=VALUE for values starting with --.
+  Boolean flags accept =true/=false. Each flag may be given once.
+  Exit code is 0 whenever evaluation succeeded (any decision), 2 on usage errors.
 
 Clear-Intent Flags:
   -s, --session <id>   Session ID to clear (or pipe a hook payload via stdin)
@@ -602,12 +610,21 @@ func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
 
 // handleEval delegates to the injected eval implementation.
 func (r *Runner) handleEval(args []string) (Action, int) {
-	if r.Eval == nil {
-		return r.handleUnknown("eval")
+	return r.delegate("eval", r.Eval, args)
+}
+
+// handleExplain delegates to the injected explain implementation.
+func (r *Runner) handleExplain(args []string) (Action, int) {
+	return r.delegate("explain", r.Explain, args)
+}
+
+func (r *Runner) delegate(name string, impl func([]string, io.Reader, io.Writer, io.Writer) int, args []string) (Action, int) {
+	if impl == nil {
+		return r.handleUnknown(name)
 	}
 	stdin := r.Stdin
 	if stdin == nil {
 		stdin = os.Stdin
 	}
-	return ActionHandled, r.Eval(args, stdin, r.Stdout, r.Stderr)
+	return ActionHandled, impl(args, stdin, r.Stdout, r.Stderr)
 }

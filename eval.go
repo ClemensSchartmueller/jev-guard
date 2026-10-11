@@ -44,6 +44,7 @@ type evalReport struct {
 	TargetPath            string   `json:"target_path,omitempty"`
 	Cwd                   string   `json:"cwd,omitempty"`
 	WorkspaceRoots        []string `json:"workspace_roots,omitempty"`
+	BoundaryStatus        string   `json:"boundary_status"`
 	Contained             *bool    `json:"boundary_contained"`
 	FastpathRan           bool     `json:"fastpath_ran"`
 	FastpathDecision      string   `json:"fastpath_decision,omitempty"`
@@ -64,11 +65,37 @@ var evalLoadConfig = config.LoadConfigForCall
 
 var errEvalUsage = errors.New("usage error")
 
+// Boundary stage outcomes reported as boundary_status in --json and in --explain.
+const (
+	boundaryStatusSkipped   = "skipped"   // the stage did not run (aborted session)
+	boundaryStatusNoTarget  = "no_target" // nothing to resolve; treated as contained
+	boundaryStatusContained = "contained" // target resolved inside the workspace
+	boundaryStatusEscaped   = "escaped"   // target outside the workspace or unresolvable
+)
+
+func boundaryStatus(call *harness.NormalizedToolCall, t *gateTrace) string {
+	switch {
+	case !t.BoundaryRan:
+		return boundaryStatusSkipped
+	case strings.TrimSpace(call.TargetPath) == "":
+		return boundaryStatusNoTarget
+	case t.Contained:
+		return boundaryStatusContained
+	default:
+		return boundaryStatusEscaped
+	}
+}
+
 func parseEvalArgs(args []string) (*evalOptions, error) {
 	o := &evalOptions{}
+	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		name, val, hasVal := strings.Cut(a, "=")
+		if strings.HasPrefix(name, "--") && seen[name] {
+			return nil, fmt.Errorf("%w: flag %s given more than once", errEvalUsage, name)
+		}
+		seen[name] = true
 		str := func() (string, error) {
 			if hasVal {
 				if strings.TrimSpace(val) == "" {
@@ -144,10 +171,14 @@ func synthesizePayload(o *evalOptions, cwd string) ([]byte, error) {
 		payload["tool_name"] = "Bash"
 		payload["tool_input"] = map[string]interface{}{"command": o.cmd}
 	} else {
-		key := "file_path"
-		switch strings.ToLower(o.tool) {
-		case "glob", "grep", "ls":
-			key = "path"
+		// Use the tool's canonical path argument so path verification matches a real hook payload.
+		key, known := singleTargetFileTools[o.tool]
+		if !known {
+			key = "file_path"
+			switch strings.ToLower(o.tool) {
+			case "glob", "grep", "ls":
+				key = "path"
+			}
 		}
 		payload["tool_name"] = o.tool
 		payload["tool_input"] = map[string]interface{}{key: o.target}
@@ -164,6 +195,28 @@ func runEval(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Usage: jev-guard eval (--cmd CMD | --tool NAME --target PATH | --payload FILE) [--cwd DIR] [--intent TEXT] [--offline] [--explain] [--json]")
 		return 2
 	}
+	return evaluate(o, stdin, stdout, stderr)
+}
+
+// runExplain implements `jev-guard explain`, shorthand for `jev-guard eval --explain`.
+func runExplain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	o, err := parseEvalArgs(args)
+	for _, a := range args {
+		if name, _, _ := strings.Cut(a, "="); err == nil && (name == "--json" || name == "--explain") {
+			err = fmt.Errorf("%w: explain always prints the stage breakdown and does not accept %s; use eval --json for machine-readable output", errEvalUsage, name)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "jev-guard explain: %v\n", err)
+		fmt.Fprintln(stderr, "Usage: jev-guard explain (--cmd CMD | --tool NAME --target PATH | --payload FILE) [--cwd DIR] [--intent TEXT] [--offline]")
+		return 2
+	}
+	o.explain = true
+	return evaluate(o, stdin, stdout, stderr)
+}
+
+func evaluate(o *evalOptions, stdin io.Reader, stdout, stderr io.Writer) int {
+	var err error
 
 	var raw []byte
 	if o.payloadFile != "" {
@@ -263,6 +316,7 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 		FastpathRan:           t.FastpathRan,
 		TypeSafeRan:           t.SemanticRan,
 		WouldSendToJudge:      t.WouldSendToJudge,
+		BoundaryStatus:        boundaryStatus(call, t),
 	}
 	if t.BoundaryRan {
 		rep.Contained = &t.Contained
@@ -337,12 +391,12 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 		fmt.Fprintf(w, "    %q %s\n", rep.Intent, in.Note)
 	}
 	hdr("Boundary")
-	switch {
-	case in.Aborted:
+	switch rep.BoundaryStatus {
+	case boundaryStatusSkipped:
 		fmt.Fprintln(w, "    skipped (session aborted)")
-	case strings.TrimSpace(call.TargetPath) == "":
+	case boundaryStatusNoTarget:
 		fmt.Fprintln(w, "    no target path: treated as contained")
-	case t.Contained:
+	case boundaryStatusContained:
 		fmt.Fprintln(w, "    target is inside the workspace")
 	default:
 		fmt.Fprintln(w, "    target is OUTSIDE the workspace (or could not be resolved)")

@@ -24,6 +24,7 @@ func main() {
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	runner.Eval = runEval
+	runner.Explain = runExplain
 	action, exitCode := runner.EvaluateArgs(os.Args[1:])
 	if action == cli.ActionHandled {
 		os.Exit(exitCode)
