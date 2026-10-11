@@ -110,6 +110,10 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+	if reason := f.checkResolvedXDGConfig(call); reason != "" {
+		return reason
+	}
+
 	targetRaw := call.TargetPath
 	if isFileURI(targetRaw) {
 		targetRaw = extractFilePathFromURI(targetRaw)
@@ -165,6 +169,83 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 	return ""
 }
 
+// sensitiveCommandArguments keeps quoted path spans together for local sensitive-file
+// checks. It is deliberately not a shell evaluator: substitutions and chained
+// commands still require semantic evaluation.
+func sensitiveCommandArguments(command string) []string {
+	var args []string
+	var arg strings.Builder
+	var quote rune
+	started := false
+	for _, ch := range command {
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else {
+				arg.WriteRune(ch)
+			}
+			started = true
+		case ch == '\'' || ch == '"':
+			quote = ch
+			started = true
+		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+			if started {
+				args = append(args, arg.String())
+				arg.Reset()
+				started = false
+			}
+		default:
+			arg.WriteRune(ch)
+			started = true
+		}
+	}
+	if started {
+		args = append(args, arg.String())
+	}
+	return args
+}
+
+// checkResolvedXDGConfig resolves equivalent and cwd-relative spellings before
+// trusted reads can allow access to the environment-derived Git config files.
+func (f *Filter) checkResolvedXDGConfig(call *harness.NormalizedToolCall) string {
+	candidates := []string{call.TargetPath}
+	for i, arg := range sensitiveCommandArguments(call.Command) {
+		if i == 0 {
+			continue
+		}
+		candidates = append(candidates, arg)
+		if idx := strings.Index(arg, "="); idx >= 0 {
+			candidates = append(candidates, arg[idx+1:])
+		}
+	}
+	for _, pattern := range f.sensitiveFiles {
+		normalized := strings.ToLower(normalizePathSeparators(pattern))
+		if !isAbsoluteConfigDir(normalized) {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate == "" || isURL(candidate) {
+				continue
+			}
+			if isFileURI(candidate) {
+				candidate = extractFilePathFromURI(candidate)
+			}
+			candidate = strings.ToLower(normalizePathSeparators(candidate))
+			if !isAbsoluteConfigDir(candidate) {
+				if call.Cwd == "" {
+					continue
+				}
+				candidate = path.Join(strings.ToLower(normalizePathSeparators(call.Cwd)), candidate)
+			}
+			if path.Clean(candidate) == path.Clean(normalized) {
+				return "Access to sensitive file or credential pattern: " + pattern
+			}
+		}
+	}
+	return ""
+}
+
 // xdgGitFiles are the Git files that Git reads from $XDG_CONFIG_HOME/git/.
 var xdgGitFiles = []string{"git/config", "git/credentials"}
 
@@ -194,7 +275,7 @@ func xdgGitSensitivePatterns(xdgConfigHome string) []string {
 			patterns = append(patterns, prefix+"/"+file)
 		}
 	}
-	dir := normalizePathSeparators(strings.TrimSpace(xdgConfigHome))
+	dir := normalizePathSeparators(xdgConfigHome)
 	if !isAbsoluteConfigDir(dir) {
 		return patterns
 	}

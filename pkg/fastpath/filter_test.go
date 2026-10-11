@@ -724,3 +724,28 @@ func TestFastPath_ClaudeToolCoverage(t *testing.T) {
 		t.Errorf("WebFetch must defer to semantic evaluation, got %+v", res)
 	}
 }
+
+func TestFastPath_CustomXDGResolvedAccess(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/srv/xdg")
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	for _, call := range []harness.NormalizedToolCall{
+		{ToolName: "Read", TargetPath: "git/config", Cwd: "/srv/xdg"},
+		{ToolName: "Read", TargetPath: "config", Cwd: "/srv/xdg/git"},
+		{ToolName: "Read", TargetPath: "/srv/xdg/git/../git/credentials"},
+		{ToolName: "Bash", Command: "ls git/config", Cwd: "/srv/xdg"},
+		{ToolName: "Bash", Command: "cat config", Cwd: "/srv/xdg/git"},
+		{ToolName: "Bash", Command: `ls "git/../git/config"`, Cwd: "/srv/xdg"},
+		{ToolName: "Read", TargetPath: "file:///srv/xdg/git/../git/config"},
+	} {
+		assertSensitiveAsk(t, filter, fmt.Sprintf("%+v", call), &call)
+	}
+	assertTrustedAllow(t, filter, "different cwd is not the XDG directory", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "git/config", Cwd: "/repo"})
+	assertDeferred(t, filter, "resolved sensitive file with intent", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/srv/xdg/git", UserIntent: "Read the Git config"})
+}
+
+func TestFastPath_CustomXDGWhitespaceDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/srv/xdg ")
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	assertSensitiveAsk(t, filter, "trailing space is part of directory", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/srv/xdg /git/config"})
+	assertSensitiveAsk(t, filter, "quoted relative whitespace directory", &harness.NormalizedToolCall{ToolName: "Bash", Command: `ls "xdg /git/config"`, Cwd: "/srv"})
+}
