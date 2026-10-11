@@ -277,23 +277,50 @@ func ClearAllSessions() error {
 	return nil
 }
 
-// ListSessions returns all active, non-expired sessions.
+// UnreadableSession describes a session file that exists but could not be
+// read or decoded. The gate fails closed for such sessions, so callers that
+// list sessions should report them rather than skip them.
+type UnreadableSession struct {
+	// FileName is the session file's base name (a sanitized or hashed session ID plus ".json").
+	FileName string
+	Err      error
+}
+
+// SessionScan is the result of ScanSessions.
+type SessionScan struct {
+	Active     []*SessionState
+	Unreadable []UnreadableSession
+}
+
+// ListSessions returns all active, non-expired sessions. Unreadable session
+// files are omitted; use ScanSessions to see them.
 func ListSessions() ([]*SessionState, error) {
+	scan, err := ScanSessions()
+	if err != nil {
+		return nil, err
+	}
+	return scan.Active, nil
+}
+
+// ScanSessions reads every session file. Valid, non-expired sessions are
+// returned in Active; expired sessions and stale temp files are removed; files
+// that cannot be read or decoded are returned in Unreadable and left in place.
+func ScanSessions() (*SessionScan, error) {
+	scan := &SessionScan{}
 	sessionsDir := GetSessionsDir()
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return scan, nil
 		}
 		return nil, fmt.Errorf("failed to read sessions directory: %w", err)
 	}
 
-	var sessions []*SessionState
 	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
 		if strings.Contains(entry.Name(), ".tmp.") {
+			if entry.IsDir() {
+				continue
+			}
 			if info, err := entry.Info(); err == nil {
 				if time.Since(info.ModTime()) > 5*time.Minute {
 					_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
@@ -306,13 +333,18 @@ func ListSessions() ([]*SessionState, error) {
 		}
 
 		fullPath := filepath.Join(sessionsDir, entry.Name())
-		data, err := os.ReadFile(fullPath)
+		data, err := readFileWithRetry(fullPath)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to read session file: %w", err)})
 			continue
 		}
 
 		var state SessionState
 		if err := json.Unmarshal(data, &state); err != nil {
+			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to parse session file: %w", err)})
 			continue
 		}
 
@@ -321,10 +353,10 @@ func ListSessions() ([]*SessionState, error) {
 			continue
 		}
 
-		sessions = append(sessions, &state)
+		scan.Active = append(scan.Active, &state)
 	}
 
-	return sessions, nil
+	return scan, nil
 }
 
 // IsJevguardPath checks if a given file path is located inside ~/.jevguard or targets the security cache.

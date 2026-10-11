@@ -41,7 +41,7 @@ func (r *Runner) handleDoctor(args []string) (Action, int) {
 		fmt.Fprintf(r.Stderr, "Error: find current directory: %v\n", err)
 		return ActionHandled, 1
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := userHomeDir()
 	return ActionHandled, r.runDoctor(loadConfig(cwd), cwd, home, offline)
 }
 

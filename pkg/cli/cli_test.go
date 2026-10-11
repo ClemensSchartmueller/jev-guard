@@ -341,6 +341,77 @@ func TestEvaluateArgs_Status(t *testing.T) {
 	}
 }
 
+func TestEvaluateArgs_StatusReportsUnreadableSessions(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SaveSession(&session.SessionState{SessionID: "ok", Prompt: "Working", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	badPath := session.SessionFilePath("bad")
+	if err := os.WriteFile(badPath, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	action, code := runner.EvaluateArgs([]string{"status"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d (stderr %q)", action, code, stderr.String())
+	}
+
+	lines := strings.Split(stdout.String(), "\n")
+	hasLine := func(want string) bool {
+		for _, line := range lines {
+			if line == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasLine("  Active Sessions:    1") {
+		t.Errorf("expected exact line %q, got %q", "  Active Sessions:    1", stdout.String())
+	}
+	if !hasLine("  Unreadable Sessions: 1 (tool calls in these sessions are held)") {
+		t.Errorf("expected unreadable count line, got %q", stdout.String())
+	}
+	foundBad := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  - [bad.json] Status: Unreadable, Error: ") {
+			foundBad = true
+		}
+	}
+	if !foundBad {
+		t.Errorf("expected a per-file unreadable line for bad.json, got %q", stdout.String())
+	}
+	if _, err := os.Stat(badPath); err != nil {
+		t.Fatalf("status must not remove unreadable session file: %v", err)
+	}
+}
+
+func TestHandleDoctorUsesHomeSeam(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	fakeHome := t.TempDir()
+	called := false
+	originalHome := userHomeDir
+	userHomeDir = func() (string, error) {
+		called = true
+		return fakeHome, nil
+	}
+	t.Cleanup(func() { userHomeDir = originalHome })
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	action, _ := runner.EvaluateArgs([]string{"doctor", "--offline"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v (stderr %q)", action, stderr.String())
+	}
+	if !called {
+		t.Fatal("doctor did not use the userHomeDir seam")
+	}
+}
+
 func newStdinRunner(stdin string) (*Runner, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })

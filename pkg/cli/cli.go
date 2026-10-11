@@ -43,9 +43,19 @@ type Runner struct {
 	HTTPClient *http.Client
 }
 
-// loadConfig resolves the effective config for a working directory. It is a
-// variable so tests can load from temp paths instead of the real user profile.
-var loadConfig = config.LoadConfig
+// Profile seams. Production code resolves these from the operating system
+// user profile; tests replace them so they never touch the real ~/.jevguard
+// or home directory.
+var (
+	// loadConfig resolves the effective config for a working directory.
+	loadConfig = config.LoadConfig
+	// trustRegistryPath is the user-owned project trust registry path.
+	trustRegistryPath = config.TrustRegistryPath
+	// inspectProjectConfig hashes a project config and checks it against the trust registry.
+	inspectProjectConfig = config.InspectProjectConfig
+	// userHomeDir locates agent hook settings for init and doctor.
+	userHomeDir = os.UserHomeDir
+)
 
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
 func NewRunner(stdout, stderr io.Writer, isTerminal func() bool) *Runner {
@@ -140,7 +150,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	cfg := loadConfig(cwd)
 	fmt.Fprintln(r.Stdout, "jev-guard effective configuration:")
 	fmt.Fprintf(r.Stdout, "  User config:          %s\n", cfg.UserConfigPath)
-	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", config.TrustRegistryPath())
+	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", trustRegistryPath())
 	fmt.Fprintf(r.Stdout, "  Mode:                 %s (%s)\n", cfg.Mode, cfg.Sources["mode"])
 	fmt.Fprintf(r.Stdout, "  Base URL:             %s (%s)\n", effectiveBaseURL(cfg.BaseURL), cfg.Sources["base_url"])
 	fmt.Fprintf(r.Stdout, "  API key:              %s (%s)\n", configuredValue(cfg.APIKey), cfg.Sources["api_key"])
@@ -152,7 +162,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
-		if info, err := config.InspectProjectConfig(file); err == nil {
+		if info, err := inspectProjectConfig(file); err == nil {
 			trustState := "not trusted"
 			if info.Trusted {
 				trustState = "trusted for this exact SHA-256"
@@ -194,7 +204,7 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	} else {
 		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
 	}
-	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", config.TrustRegistryPath())
+	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", trustRegistryPath())
 	fmt.Fprintln(r.Stdout, "This command does not edit user-owned files; edit the registry manually to revoke trust.")
 	return ActionHandled, 0
 }
@@ -209,7 +219,7 @@ func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("no project config found; pass a config file or directory path")
 	}
-	return config.InspectProjectConfig(path)
+	return inspectProjectConfig(path)
 }
 
 func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
@@ -223,7 +233,7 @@ func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
 	if len(info.IgnoredKeys) > 0 {
 		fmt.Fprintf(out, "Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
 	}
-	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", config.TrustRegistryPath(), entry)
+	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", trustRegistryPath(), entry)
 	fmt.Fprintln(out, "The registry is user-owned. Review the file and add this record manually; this command does not grant trust.")
 }
 
@@ -499,7 +509,7 @@ func (r *Runner) handleStatus() (Action, int) {
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
 
-	list, err := session.ListSessions()
+	scan, err := session.ScanSessions()
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "Error reading sessions: %v\n", err)
 		return ActionHandled, 1
@@ -508,9 +518,12 @@ func (r *Runner) handleStatus() (Action, int) {
 	fmt.Fprintln(r.Stdout, "jev-guard status:")
 	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
 	fmt.Fprintf(r.Stdout, "  Sessions Directory: %s\n", sessionsDir)
-	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(list))
+	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(scan.Active))
+	if len(scan.Unreadable) > 0 {
+		fmt.Fprintf(r.Stdout, "  Unreadable Sessions: %d (tool calls in these sessions are held)\n", len(scan.Unreadable))
+	}
 
-	for _, s := range list {
+	for _, s := range scan.Active {
 		status := "Active"
 		if s.Aborted {
 			status = "Aborted"
@@ -524,6 +537,9 @@ func (r *Runner) handleStatus() (Action, int) {
 		if promptPreview != "" {
 			fmt.Fprintf(r.Stdout, "    Prompt: %q\n", promptPreview)
 		}
+	}
+	for _, u := range scan.Unreadable {
+		fmt.Fprintf(r.Stdout, "  - [%s] Status: Unreadable, Error: %v\n", u.FileName, u.Err)
 	}
 
 	return ActionHandled, 0

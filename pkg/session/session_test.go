@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -604,5 +605,59 @@ func TestSession_ConfiguredTTL(t *testing.T) {
 	}
 	if loaded, _ := LoadSession("ttl"); loaded != nil {
 		t.Fatal("session older than configured TTL should be expired")
+	}
+}
+
+func TestScanSessions_ReportsUnreadable(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSession(&SessionState{SessionID: "good", Prompt: "Working", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	corruptPath := SessionFilePath("corrupt")
+	if err := os.WriteFile(corruptPath, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dirPath := SessionFilePath("dir")
+	if err := os.Mkdir(dirPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, err := ScanSessions()
+	if err != nil {
+		t.Fatalf("ScanSessions: %v", err)
+	}
+	if len(scan.Active) != 1 || scan.Active[0].SessionID != "good" {
+		t.Fatalf("expected exactly one active session 'good', got %+v", scan.Active)
+	}
+
+	if len(scan.Unreadable) != 2 {
+		t.Fatalf("expected 2 unreadable sessions, got %+v", scan.Unreadable)
+	}
+	names := []string{scan.Unreadable[0].FileName, scan.Unreadable[1].FileName}
+	sort.Strings(names)
+	if names[0] != "corrupt.json" || names[1] != "dir.json" {
+		t.Fatalf("unexpected unreadable file names %v", names)
+	}
+	for _, u := range scan.Unreadable {
+		if u.Err == nil {
+			t.Errorf("unreadable %s has nil Err", u.FileName)
+		}
+	}
+
+	for _, path := range []string{corruptPath, dirPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("unreadable session path must remain: %v", err)
+		}
+	}
+
+	listed, err := ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionID != "good" {
+		t.Fatalf("expected ListSessions to return only 'good', got %+v", listed)
 	}
 }

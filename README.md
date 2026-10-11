@@ -138,7 +138,7 @@ jev-guard clear-intent --session="my-session"
 jev-guard clear-intent --all
 jev-guard cache clear
 
-# Display status of active sessions and cache directory
+# Display status of active sessions and cache directory (unreadable session files are listed with their error)
 jev-guard status
 jev-guard cache status
 jev-guard cache
