@@ -2,14 +2,32 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"jev-guard/pkg/session"
 )
+
+func TestDefaultVersionMatchesNPMPackage(t *testing.T) {
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "npm", "jev-guard", "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(manifest, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	if Version != pkg.Version {
+		t.Fatalf("CLI default version %q differs from npm package version %q", Version, pkg.Version)
+	}
+}
 
 func TestEvaluateArgs_Version(t *testing.T) {
 	tests := []struct {

@@ -1,6 +1,6 @@
 {
   "name": "@clemensschartmueller/jev-guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Install and initialize jev-guard for your coding agents",
   "bin": {
     "jev-guard": "bin/jev-guard.js"
