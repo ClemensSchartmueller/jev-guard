@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ type Runner struct {
 	Stderr     io.Writer
 	Stdin      io.Reader
 	IsTerminal func() bool
+	// HTTPClient is used by doctor's network check; nil uses a default client.
+	HTTPClient *http.Client
 }
 
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
@@ -99,6 +102,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleConfig(args[1:])
 	case "init":
 		return r.handleInit(args[1:])
+	case "doctor":
+		return r.handleDoctor(args[1:])
 	default:
 		return r.handleUnknown(args[0])
 	}
@@ -523,6 +528,7 @@ Commands:
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   status          Display active sessions and jev-guard environment status
+  doctor          Diagnose environment, network, and hook setup (--offline skips network)
   config show     Show effective policy and its source without printing secrets
   config trust    Print a digest-bound registry record for manual user approval
   config untrust  Show which user registry entry to remove to revoke trust
