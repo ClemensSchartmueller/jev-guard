@@ -272,3 +272,34 @@ func TestQuoteHookExecutableForOS(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallAgentHooksUpgradesOldClaudeMatcher(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	command := `"/new path/jev-guard"`
+	original := `{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob","hooks":[{"type":"command","command":"\"/new path/jev-guard\""}]}]}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := installAgentHooks(path, "claude", command)
+	if err != nil || !changed {
+		t.Fatalf("install: changed=%v err=%v", changed, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	entries := root["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("got %d PreToolUse entries, want one", len(entries))
+	}
+	matcher, _ := entries[0].(map[string]interface{})["matcher"].(string)
+	for _, tool := range []string{"Read", "PowerShell", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"} {
+		if !strings.Contains("|"+matcher+"|", "|"+tool+"|") {
+			t.Errorf("matcher %q missing %s", matcher, tool)
+		}
+	}
+}
