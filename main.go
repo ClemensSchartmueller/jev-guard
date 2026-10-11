@@ -51,22 +51,11 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if cfg.IsContextAwarenessEnabled() {
-		session.SetSessionTTL(cfg.IntentTTL())
-		sessionID := call.SessionID
-		if sessionID == "" {
-			sessionID = "default"
+	if hold := applySessionContext(call, cfg, os.Stderr); hold != nil {
+		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 		}
-		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
-			if sessState.Aborted {
-				result := abortedSessionResult()
-				_ = cfg.LogAudit(call, result)
-				return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
-			}
-			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
-				call.UserIntent = intent
-			}
-		}
+		return outputHarnessVerdict(call, *applyAuditMode(hold, cfg.Mode))
 	}
 
 	result := executeGateEvaluation(call, cfg)
@@ -78,12 +67,56 @@ func runGate() int {
 	return outputHarnessVerdict(call, *result)
 }
 
+// Session hold sources reported when context awareness stops a tool call
+// before evaluation.
+const (
+	sourceSessionAborted   = "session_aborted"
+	sourceSessionReadError = "session_read_error"
+)
+
+// applySessionContext loads the session state when context awareness is
+// enabled. It returns a force_ask hold when the session recorded an abort or
+// when its state cannot be read or decoded (an unreadable session might be
+// an aborted one, so it fails closed). Otherwise it copies the active prompt
+// into call.UserIntent and returns nil. An absent or expired session is not
+// an error. The hold is returned before audit-mode rewriting.
+func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
+	if !cfg.IsContextAwarenessEnabled() {
+		return nil
+	}
+	session.SetSessionTTL(cfg.IntentTTL())
+	sessionID := call.SessionID
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	sessState, err := session.LoadSession(sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "jev-guard: cannot read session state for '%s' (%s): %v\n", sessionID, session.SessionFilePath(sessionID), err)
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionForceAsk,
+			Reason:     fmt.Sprintf("Action held: session state could not be read, so a recorded abort/stop signal cannot be ruled out: %v", err),
+			Source:     sourceSessionReadError,
+			Confidence: 1.0,
+		}
+	}
+	if sessState == nil {
+		return nil
+	}
+	if sessState.Aborted {
+		return abortedSessionResult()
+	}
+	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
+		call.UserIntent = intent
+	}
+	return nil
+}
+
 // abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.
 func abortedSessionResult() *harness.EvaluationResult {
 	return &harness.EvaluationResult{
 		Decision:   harness.DecisionForceAsk,
 		Reason:     "Action held: an active abort/stop signal was recorded for this session",
-		Source:     "session_aborted",
+		Source:     sourceSessionAborted,
 		Confidence: 1.0,
 	}
 }

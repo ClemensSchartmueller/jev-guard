@@ -32,7 +32,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt. If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate fails closed with a `force_ask` hold (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out; `end-turn` likewise keeps the file. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -127,6 +127,7 @@ cat hook_payload.json | jev-guard ingest
 # End the current reply for the session named in a hook payload on stdin (Claude Code Stop hook).
 # Clears only that session's intent, prints nothing to stdout, and always exits 0.
 # A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it.
+# A session file that cannot be read is also kept, since its abort state is unknown.
 cat stop_payload.json | jev-guard end-turn
 jev-guard end-turn --session "my-session"
 
@@ -137,7 +138,7 @@ jev-guard clear-intent --session="my-session"
 jev-guard clear-intent --all
 jev-guard cache clear
 
-# Display status of active sessions and cache directory
+# Display status of active sessions and cache directory (unreadable session files are listed with their error)
 jev-guard status
 jev-guard cache status
 jev-guard cache

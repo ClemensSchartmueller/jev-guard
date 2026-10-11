@@ -47,7 +47,7 @@ func (r *Runner) handleInit(args []string) (Action, int) {
 		fmt.Fprintf(r.Stderr, "Error: find current directory: %v\n", err)
 		return ActionHandled, 1
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "Error: find home directory: %v\n", err)
 		return ActionHandled, 1

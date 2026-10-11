@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,35 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	if err := os.WriteFile(configPath, original, 0600); err != nil {
 		t.Fatal(err)
 	}
+	resolvedRoot, err := filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedConfigPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(original)
+	sha := hex.EncodeToString(digest[:])
+	wantInfo := &config.ProjectConfigInfo{
+		ProjectRoot:    resolvedRoot,
+		ConfigPath:     resolvedConfigPath,
+		SHA256:         sha,
+		SensitiveFiles: []string{".secret"},
+		IgnoredKeys:    []string{"base_url", "mode"},
+		TrustRecord: config.ProjectConfigTrust{
+			ProjectRoot: resolvedRoot,
+			ConfigPath:  resolvedConfigPath,
+			SHA256:      sha,
+		},
+	}
+	var stubbedPath string
+	originalInspect := inspectProjectConfig
+	inspectProjectConfig = func(path string) (*config.ProjectConfigInfo, error) {
+		stubbedPath = path
+		return wantInfo, nil
+	}
+	t.Cleanup(func() { inspectProjectConfig = originalInspect })
 
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })
@@ -24,12 +55,11 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	if action != ActionHandled || code != 0 {
 		t.Fatalf("expected config trust command to succeed, got action=%v code=%d stderr=%q", action, code, stderr.String())
 	}
-	info, err := config.InspectProjectConfig(configPath)
-	if err != nil {
-		t.Fatalf("inspect project config: %v", err)
+	if stubbedPath != configPath {
+		t.Fatalf("inspectProjectConfig received %q, want %q", stubbedPath, configPath)
 	}
 	output := stdout.String()
-	for _, want := range []string{info.SHA256, info.ProjectRoot, "Trust record to add", "does not grant trust", "mode", "base_url"} {
+	for _, want := range []string{sha, resolvedRoot, "Trust record to add to " + trustRegistryPath(), "does not grant trust", "mode", "base_url"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected trust proposal to contain %q, got %q", want, output)
 		}
@@ -55,6 +85,9 @@ func TestConfigShowNeverPrintsAPIKey(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "API key:              configured") {
 		t.Errorf("expected redacted configured-key status, got %q", stdout.String())
+	}
+	if want := "  Trust registry:       " + trustRegistryPath() + "\n"; !strings.Contains(stdout.String(), want) {
+		t.Errorf("expected trust registry line %q, got %q", want, stdout.String())
 	}
 	if strings.Contains(stdout.String(), secret) {
 		t.Fatal("config show exposed the API key")
