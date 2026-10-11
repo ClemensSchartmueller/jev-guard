@@ -45,8 +45,8 @@ test('installs a verified binary from the package version and reuses it', async 
   assert.equal(target, path.join(home, '.jevguard', 'bin', 'jev-guard'));
   assert.deepEqual(await fs.readFile(target), binary);
   assert.deepEqual(urls.map((url) => new URL(url).pathname), [
-    '/ClemensSchartmueller/jev-guard/releases/download/v0.2.0/checksums.txt',
-    '/ClemensSchartmueller/jev-guard/releases/download/v0.2.0/jev-guard-linux-amd64',
+    `/ClemensSchartmueller/jev-guard/releases/download/v${packageJson.version}/checksums.txt`,
+    `/ClemensSchartmueller/jev-guard/releases/download/v${packageJson.version}/jev-guard-linux-amd64`,
   ]);
   await install({ platform: 'linux', arch: 'x64', home, fetchImpl });
   assert.equal(urls.length, 3);
