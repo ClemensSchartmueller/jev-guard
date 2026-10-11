@@ -116,6 +116,8 @@ func DefaultSensitiveFiles() []string {
 		".pypirc",
 		".git-credentials",
 		".gitconfig",
+		".config/git/config",
+		".config/git/credentials",
 		"credentials.json",
 		".pem",
 		".key",

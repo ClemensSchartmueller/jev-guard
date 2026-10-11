@@ -25,6 +25,8 @@ func TestConfig_Defaults(t *testing.T) {
 		".yarnrc",
 		".pypirc",
 		".git-credentials",
+		".config/git/config",
+		".config/git/credentials",
 		"id_ecdsa",
 		"id_dsa",
 		"kubeconfig",
