@@ -98,6 +98,31 @@ type gateTrace struct {
 	Final            *harness.EvaluationResult
 }
 
+type boundaryResult struct {
+	contained bool
+	err       error
+}
+
+// cachedBoundaryChecker shares path resolution between the trace and fastpath
+// for one evaluation. Distinct targets (including URI forms) stay independent.
+type cachedBoundaryChecker struct {
+	checker fastpath.BoundaryChecker
+	results map[[2]string]boundaryResult
+}
+
+func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error) {
+	key := [2]string{target, cwd}
+	if result, ok := c.results[key]; ok {
+		return result.contained, result.err
+	}
+	contained, err := c.checker.IsPathContained(target, cwd)
+	if c.results == nil {
+		c.results = make(map[[2]string]boundaryResult)
+	}
+	c.results[key] = boundaryResult{contained: contained, err: err}
+	return contained, err
+}
+
 func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
 	return traceGateEvaluation(call, cfg, false).Final
 }
@@ -109,9 +134,9 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
-		checker = resolver
+		checker = &cachedBoundaryChecker{checker: resolver}
 	}
-	trace.Contained = checkWorkspaceBoundary(call, resolver)
+	trace.Contained = checkWorkspaceBoundary(call, checker)
 
 	if cfg.IsFastpathEnabled() {
 		trace.FastpathRan = true
@@ -137,14 +162,14 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	return trace
 }
 
-func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
+func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
 	if strings.TrimSpace(call.TargetPath) == "" {
 		return true
 	}
-	if resolver == nil {
+	if checker == nil {
 		return false
 	}
-	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
+	contained, err := checker.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {
 		return false
 	}

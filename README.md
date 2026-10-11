@@ -152,8 +152,9 @@ jev-guard eval --cmd "cat .env" --json
 - `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
 - `--cwd DIR` sets the working directory (default: current directory).
 - `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
-- `--explain` prints the config and mode, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
+- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
+- Boolean flags accept explicit values such as `--offline=false` and `--json=true`. String flags require a non-empty value; use `--cmd=VALUE` for a command beginning with `--`.
 - `eval` never writes session state, ingests intents, or writes audit-log entries.
 - Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); non-zero (`2`) on usage errors or unreadable payloads.
 

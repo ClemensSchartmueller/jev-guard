@@ -1,10 +1,58 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
+	"jev-guard/pkg/config"
+	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
 )
+
+type countingBoundaryChecker struct {
+	calls     int
+	contained bool
+	err       error
+}
+
+func (c *countingBoundaryChecker) IsPathContained(target, cwd string) (bool, error) {
+	c.calls++
+	return c.contained, c.err
+}
+
+func TestTraceAndFastpathShareBoundaryResolution(t *testing.T) {
+	for _, contained := range []bool{true, false} {
+		underlying := &countingBoundaryChecker{contained: contained}
+		checker := &cachedBoundaryChecker{checker: underlying}
+		call := &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "README.md", Cwd: t.TempDir()}
+		if got := checkWorkspaceBoundary(call, checker); got != contained {
+			t.Fatalf("contained = %t, want %t", got, contained)
+		}
+		result := fastpath.NewFilter(checker, config.DefaultConfig()).Evaluate(call)
+		want := harness.DecisionAllow
+		if !contained {
+			want = harness.DecisionAsk
+		}
+		if result == nil || result.Decision != want || underlying.calls != 1 {
+			t.Fatalf("result=%v boundary checks=%d; want %s and one check", result, underlying.calls, want)
+		}
+	}
+}
+
+func TestCachedBoundaryCheckerPreservesErrorsAndDistinctPaths(t *testing.T) {
+	wantErr := errors.New("resolution failed")
+	underlying := &countingBoundaryChecker{err: wantErr}
+	checker := &cachedBoundaryChecker{checker: underlying}
+	for _, query := range [][2]string{{"file:///tmp/x", "/tmp"}, {"file:///tmp/x", "/tmp"}, {"/tmp/x", "/tmp"}, {"/tmp/x", "/other"}} {
+		contained, err := checker.IsPathContained(query[0], query[1])
+		if contained || err != wantErr {
+			t.Fatalf("resolution changed: contained=%t err=%v", contained, err)
+		}
+	}
+	if underlying.calls != 3 {
+		t.Fatalf("distinct paths/cwd should remain independent: checks=%d", underlying.calls)
+	}
+}
 
 func TestResolveUserIntent(t *testing.T) {
 	tests := []struct {

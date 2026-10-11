@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"jev-guard/pkg/config"
@@ -19,29 +20,37 @@ type evalOptions struct {
 
 // evalReport is the machine-readable result of `jev-guard eval --json`.
 type evalReport struct {
-	Decision         string   `json:"decision,omitempty"`
-	Reason           string   `json:"reason,omitempty"`
-	Source           string   `json:"source,omitempty"`
-	Confidence       float64  `json:"confidence,omitempty"`
-	WouldSendToJudge bool     `json:"would_send_to_typesafe"`
-	Offline          bool     `json:"offline"`
-	Mode             string   `json:"mode"`
-	Diagnostics      []string `json:"config_diagnostics,omitempty"`
-	Harness          string   `json:"harness"`
-	ToolName         string   `json:"tool_name"`
-	Command          string   `json:"command,omitempty"`
-	TargetPath       string   `json:"target_path,omitempty"`
-	Cwd              string   `json:"cwd,omitempty"`
-	WorkspaceRoots   []string `json:"workspace_roots,omitempty"`
-	Contained        bool     `json:"boundary_contained"`
-	FastpathRan      bool     `json:"fastpath_ran"`
-	FastpathDecision string   `json:"fastpath_decision,omitempty"`
-	FastpathReason   string   `json:"fastpath_reason,omitempty"`
-	TypeSafeRan      bool     `json:"typesafe_ran"`
-	Judgments        any      `json:"typesafe_judgments,omitempty"`
-	TypeSafeError    string   `json:"typesafe_error,omitempty"`
-	HarnessOutput    string   `json:"harness_output,omitempty"`
-	HookExitCode     *int     `json:"hook_exit_code,omitempty"`
+	Decision              string   `json:"decision,omitempty"`
+	Reason                string   `json:"reason,omitempty"`
+	Source                string   `json:"source,omitempty"`
+	Confidence            float64  `json:"confidence,omitempty"`
+	WouldSendToJudge      bool     `json:"would_send_to_typesafe"`
+	Offline               bool     `json:"offline"`
+	Mode                  string   `json:"mode"`
+	UserConfigPath        string   `json:"user_config_path"`
+	ProjectConfigPath     string   `json:"project_config_path,omitempty"`
+	ProjectConfigTrusted  bool     `json:"project_config_trusted"`
+	ModeSource            string   `json:"mode_source"`
+	SensitiveFilesSource  string   `json:"sensitive_files_source"`
+	TrustedCommandsSource string   `json:"trusted_commands_source"`
+	SensitiveFilesCount   int      `json:"sensitive_files_count"`
+	TrustedCommandsCount  int      `json:"trusted_commands_count"`
+	Diagnostics           []string `json:"config_diagnostics,omitempty"`
+	Harness               string   `json:"harness"`
+	ToolName              string   `json:"tool_name"`
+	Command               string   `json:"command,omitempty"`
+	TargetPath            string   `json:"target_path,omitempty"`
+	Cwd                   string   `json:"cwd,omitempty"`
+	WorkspaceRoots        []string `json:"workspace_roots,omitempty"`
+	Contained             bool     `json:"boundary_contained"`
+	FastpathRan           bool     `json:"fastpath_ran"`
+	FastpathDecision      string   `json:"fastpath_decision,omitempty"`
+	FastpathReason        string   `json:"fastpath_reason,omitempty"`
+	TypeSafeRan           bool     `json:"typesafe_ran"`
+	Judgments             any      `json:"typesafe_judgments,omitempty"`
+	TypeSafeError         string   `json:"typesafe_error,omitempty"`
+	HarnessOutput         string   `json:"harness_output,omitempty"`
+	HookExitCode          *int     `json:"hook_exit_code,omitempty"`
 }
 
 var errEvalUsage = errors.New("usage error")
@@ -53,13 +62,26 @@ func parseEvalArgs(args []string) (*evalOptions, error) {
 		name, val, hasVal := strings.Cut(a, "=")
 		str := func() (string, error) {
 			if hasVal {
+				if strings.TrimSpace(val) == "" {
+					return "", fmt.Errorf("%w: flag %s requires a non-empty value", errEvalUsage, name)
+				}
 				return val, nil
 			}
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") || strings.TrimSpace(args[i+1]) == "" {
 				return "", fmt.Errorf("%w: flag %s requires a value", errEvalUsage, name)
 			}
 			i++
 			return args[i], nil
+		}
+		boolean := func() (bool, error) {
+			if !hasVal {
+				return true, nil
+			}
+			value, err := strconv.ParseBool(val)
+			if err != nil {
+				return false, fmt.Errorf("%w: flag %s requires a boolean value", errEvalUsage, name)
+			}
+			return value, nil
 		}
 		var err error
 		switch name {
@@ -74,11 +96,11 @@ func parseEvalArgs(args []string) (*evalOptions, error) {
 		case "--cwd":
 			o.cwd, err = str()
 		case "--offline":
-			o.offline = true
+			o.offline, err = boolean()
 		case "--explain":
-			o.explain = true
+			o.explain, err = boolean()
 		case "--json":
-			o.asJSON = true
+			o.asJSON, err = boolean()
 		default:
 			return nil, fmt.Errorf("%w: unrecognized argument %s", errEvalUsage, a)
 		}
@@ -182,19 +204,29 @@ func runEval(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *gateTrace, offline bool) *evalReport {
 	rep := &evalReport{
-		Offline:          offline,
-		Mode:             cfg.Mode,
-		Diagnostics:      cfg.Diagnostics,
-		Harness:          string(call.Harness),
-		ToolName:         call.ToolName,
-		Command:          call.Command,
-		TargetPath:       call.TargetPath,
-		Cwd:              call.Cwd,
-		WorkspaceRoots:   call.WorkspaceRoots,
-		Contained:        t.Contained,
-		FastpathRan:      t.FastpathRan,
-		TypeSafeRan:      t.SemanticRan,
-		WouldSendToJudge: t.WouldSendToJudge,
+		Offline:               offline,
+		Mode:                  cfg.Mode,
+		UserConfigPath:        cfg.UserConfigPath,
+		ModeSource:            cfg.Sources["mode"],
+		SensitiveFilesSource:  cfg.Sources["sensitive_files"],
+		TrustedCommandsSource: cfg.Sources["trusted_commands"],
+		SensitiveFilesCount:   len(cfg.SensitiveFiles),
+		TrustedCommandsCount:  len(cfg.TrustedCommands),
+		Diagnostics:           cfg.Diagnostics,
+		Harness:               string(call.Harness),
+		ToolName:              call.ToolName,
+		Command:               call.Command,
+		TargetPath:            call.TargetPath,
+		Cwd:                   call.Cwd,
+		WorkspaceRoots:        call.WorkspaceRoots,
+		Contained:             t.Contained,
+		FastpathRan:           t.FastpathRan,
+		TypeSafeRan:           t.SemanticRan,
+		WouldSendToJudge:      t.WouldSendToJudge,
+	}
+	if cfg.ProjectConfig != nil {
+		rep.ProjectConfigPath = cfg.ProjectConfig.ConfigPath
+		rep.ProjectConfigTrusted = cfg.ProjectConfig.Trusted
 	}
 	if t.Judgments != nil {
 		rep.Judgments = t.Judgments
@@ -229,8 +261,15 @@ func summaryLine(rep *evalReport) string {
 func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Config, t *gateTrace, rep *evalReport) {
 	fmt.Fprintln(w, "[1] Config")
 	fmt.Fprintf(w, "    user config: %s\n", cfg.UserConfigPath)
+	if rep.ProjectConfigPath != "" {
+		fmt.Fprintf(w, "    project config: %s (trusted: %t, applied)\n", rep.ProjectConfigPath, rep.ProjectConfigTrusted)
+	} else {
+		fmt.Fprintln(w, "    project config: none applied")
+	}
 	fmt.Fprintf(w, "    mode:        %s (%s)\n", cfg.Mode, cfg.Sources["mode"])
 	fmt.Fprintf(w, "    fastpath:    %t\n", cfg.IsFastpathEnabled())
+	fmt.Fprintf(w, "    sensitive files: %d patterns (%s)\n", rep.SensitiveFilesCount, rep.SensitiveFilesSource)
+	fmt.Fprintf(w, "    trusted commands: %d prefixes (%s)\n", rep.TrustedCommandsCount, rep.TrustedCommandsSource)
 	for _, d := range cfg.Diagnostics {
 		fmt.Fprintf(w, "    note:        %s\n", d)
 	}
