@@ -207,6 +207,27 @@ jev-guard config untrust .jevguard.json
 
 The digest is checked on every invocation. Editing or replacing the config requires a new reviewed record. `config untrust` identifies the user-owned registry entry to remove. The CLI does not write trust approvals because a confirmation typed into an agent-controlled shell would not prove that the user reviewed them. This design assumes the agent process cannot write the selected user config or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as the user, manual approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
 
+### Repository Git config (`.git/config`)
+
+The built-in `.git/config` sensitive-file pattern asks for confirmation (`ASK`, source `fastpath_sensitive`) whenever a tool call accesses a repository's Git config file directly:
+
+- File tools that read, write, or edit the file (`Read`, `Write`, `Edit`, `view_file`, `write_to_file`, `file://` URIs, and so on).
+- Shell commands that name the file, such as `cat .git/config`, `type .git\config`, `Get-Content C:\repo\.git\config`, `git config --file .git/config ...`, or `git log -- .git/config`. A trusted command prefix does not override the prompt.
+
+Matching ignores case and treats `/` and `\` as equivalent. It is a substring match, so bare-repository configs (`repo.git/config`) and siblings such as `.git/config.lock` also prompt. Paths that only look similar, such as `.github/config.yml` or `internal/git/config.go`, are not affected.
+
+The prompt does not depend on what the file contains. A file with a credential-free `[core]` section prompts the same way as one with `url = https://user:token@host/repo.git`. When the session has an active user intent, the fast path does not prompt. It defers to TypeSafe AI semantic evaluation, as it does for every sensitive file.
+
+Git CLI commands that do not name the file are outside this rule. Examples are `git config --get remote.origin.url`, `git config --local --list`, `git remote -v`, and `git remote set-url`. They are not trusted commands, so the fast path never auto-allows them. Instead, TypeSafe AI evaluates them semantically.
+
+**Why this policy.** We considered three alternatives:
+
+- *Ask only when the content has credentials, such as a URL with userinfo.* A pre-tool hook runs before a read, so it cannot see what the read will return. Reads are the main exposure path, so a content check would leave them unprotected. For writes, the credential is not the only risk. Keys such as `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, and `alias.*` make later `git` invocations run arbitrary commands, so even a credential-free write needs a confirmation.
+- *Ask on reads but allow writes or `git config` usage.* This has the same code-execution problem for writes. Matching on `git config` subcommands would also mean parsing every Git flag form and config scope locally, which belongs in semantic evaluation.
+- *Never ask, rely on semantic evaluation.* Without a user intent, a read tool is auto-allowed by the fast path. Embedded tokens would then reach the agent with no confirmation.
+
+**Trade-off.** Agents seldom open `.git/config` directly. They use the Git CLI, which this rule does not affect. The extra prompts are therefore limited to deliberate direct access, including harmless reads of credential-free config. This rule does not yet cover submodule configs (`.git/modules/<name>/config`), worktree configs (`config.worktree`), or relative paths like `config` when the working directory is already `.git`.
+
 ### Operating Modes
 
 `jev-guard` supports two operational modes configured via `"mode"` in the user-owned config:

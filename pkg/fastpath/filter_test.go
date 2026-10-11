@@ -575,3 +575,100 @@ func TestFastPath_ClaudeToolCoverage(t *testing.T) {
 		t.Errorf("WebFetch must defer to semantic evaluation, got %+v", res)
 	}
 }
+
+// Repository-local .git/config policy (#30): any direct access to the file, by a file
+// tool or by a command that names it, asks for confirmation regardless of content.
+// Pre-tool hooks cannot see what a read will return, and writes can set
+// command-executing keys, so credential-free configuration is not exempt.
+func TestFastPath_RepoGitConfig_DirectAccessAsks(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	const wantReason = "Access to sensitive file or credential pattern: .git/config"
+
+	cases := []struct {
+		name string
+		call harness.NormalizedToolCall
+	}{
+		{"read posix absolute", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/config"}},
+		{"read relative", harness.NormalizedToolCall{ToolName: "view_file", TargetPath: ".git/config"}},
+		{"read windows separators", harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `C:\Users\u\repo\.git\config`}},
+		{"read windows mixed case", harness.NormalizedToolCall{ToolName: "read_file", TargetPath: `C:\Users\u\Repo\.GIT\Config`}},
+		{"read file uri", harness.NormalizedToolCall{ToolName: "read_resource", TargetPath: "file:///home/u/repo/.git/config"}},
+		{"read bare repository config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/srv/git/repo.git/config"}},
+		{"write credential-bearing remote", harness.NormalizedToolCall{
+			ToolName:   "Write",
+			TargetPath: "/home/u/repo/.git/config",
+			RawArgs:    map[string]interface{}{"content": "[remote \"origin\"]\n\turl = https://user:ghp_token@github.com/o/r.git\n"},
+		}},
+		{"write ordinary config", harness.NormalizedToolCall{
+			ToolName:   "Write",
+			TargetPath: "/home/u/repo/.git/config",
+			RawArgs:    map[string]interface{}{"content": "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"},
+		}},
+		{"edit windows separators", harness.NormalizedToolCall{ToolName: "Edit", TargetPath: `D:\work\repo\.git\config`}},
+		{"cat posix", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .git/config"}},
+		{"type windows", harness.NormalizedToolCall{ToolName: "run_command", Command: `type .git\config`}},
+		{"powershell windows absolute", harness.NormalizedToolCall{ToolName: "PowerShell", Command: `Get-Content C:\Users\u\repo\.git\config`}},
+		{"git config with explicit file", harness.NormalizedToolCall{ToolName: "Bash", Command: "git config --file .git/config --list"}},
+		{"trusted prefix naming the file", harness.NormalizedToolCall{ToolName: "Bash", Command: "git log -- .git/config"}},
+		{"sed writing credential url", harness.NormalizedToolCall{ToolName: "Bash", Command: `sed -i "s#url = .*#url = https://user:token@example.com/r.git#" .git/config`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res == nil {
+				t.Fatalf("expected fastpath_sensitive ASK, got nil")
+			}
+			if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" || res.Reason != wantReason {
+				t.Errorf("got decision=%q source=%q reason=%q; want %q %q %q",
+					res.Decision, res.Source, res.Reason, harness.DecisionAsk, "fastpath_sensitive", wantReason)
+			}
+		})
+	}
+}
+
+// Git CLI usage that does not name the file is outside the sensitive-file rule.
+// It is not a trusted command, so it defers to semantic evaluation (nil) rather than
+// being auto-allowed or prompted by the fast path.
+func TestFastPath_RepoGitConfig_CLIWithoutPathDefers(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, cmd := range []string{
+		"git config --get remote.origin.url",
+		"git config --local --list",
+		"git remote -v",
+		"git remote set-url origin https://github.com/o/r.git",
+	} {
+		if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Bash", Command: cmd}); res != nil {
+			t.Errorf("%q: expected nil (semantic evaluation), got %+v", cmd, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_LookalikePathsNotSensitive(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, target := range []string{
+		"/home/u/repo/.github/config.yml",
+		"/home/u/repo/internal/git/config.go",
+		`C:\Users\u\repo\config\git.yaml`,
+	} {
+		res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Read", TargetPath: target})
+		if res == nil || res.Decision != harness.DecisionAllow || res.Source != "fastpath_trusted" {
+			t.Errorf("%s: expected fastpath_trusted ALLOW, got %+v", target, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_UserIntentDefersToSemantic(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	res := filter.Evaluate(&harness.NormalizedToolCall{
+		ToolName:   "Read",
+		TargetPath: "/home/u/repo/.git/config",
+		UserIntent: "show me which remote this repository pushes to",
+	})
+	if res != nil {
+		t.Errorf("expected nil (semantic intent verification), got %+v", res)
+	}
+}

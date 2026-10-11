@@ -40,6 +40,15 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestDefaultSensitiveFiles_IncludesRepoGitConfig(t *testing.T) {
+	for _, s := range DefaultSensitiveFiles() {
+		if s == ".git/config" {
+			return
+		}
+	}
+	t.Errorf("expected default sensitive files to contain %q", ".git/config")
+}
+
 func TestUserConfigPath(t *testing.T) {
 	clearConfigEnvironment(t)
 	for _, tc := range []struct {
