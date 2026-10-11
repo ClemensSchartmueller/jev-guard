@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
 	"jev-guard/pkg/session"
+	"jev-guard/pkg/transcript"
 )
 
 func main() {
@@ -49,9 +51,15 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if result := applySessionContext(call, cfg); result != nil {
-		_ = cfg.LogAudit(call, result)
-		return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
+	contextResult := applySessionContext(call, cfg)
+	if contextResult == nil && cfg.IsContextAwarenessEnabled() {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil && applyTranscriptIntent(call, cfg, home) {
+			contextResult = abortedSessionResult()
+		}
+	}
+	if contextResult != nil {
+		_ = cfg.LogAudit(call, contextResult)
+		return outputHarnessVerdict(call, *applyAuditMode(contextResult, cfg.Mode))
 	}
 
 	result := executeGateEvaluation(call, cfg)
@@ -61,6 +69,45 @@ func runGate() int {
 	}
 
 	return outputHarnessVerdict(call, *result)
+}
+
+// abortedSessionResult is the verdict for an aborted session or transcript stop request.
+func abortedSessionResult() *harness.EvaluationResult {
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionForceAsk,
+		Reason:     "Action held: an active abort/stop signal was recorded for this session",
+		Source:     "session_aborted",
+		Confidence: 1.0,
+	}
+}
+
+// applyTranscriptIntent reads the latest user request from the Antigravity transcript when
+// the harness and the antigravity_transcript_intent setting allow it.
+// It sets call.UserIntent and returns false normally, or returns true when that request
+// is a stop/abort command. An unusable latest user message clears any session-cache intent
+// already on the call, because the newest user message is authoritative and older intent
+// must never be used as a fallback. Other errors (e.g. transcript unavailable) leave the
+// call unchanged.
+func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config, home string) bool {
+	if call.Harness != harness.HarnessAntigravity || !cfg.IsAntigravityTranscriptIntentEnabled() {
+		return false
+	}
+	text, err := transcript.LatestUserInput(call.TranscriptPath, call.SessionID, home)
+	if err != nil {
+		if errors.Is(err, transcript.ErrUnusableUserInput) {
+			// The newest user message is authoritative; never fall back to older intent.
+			call.UserIntent = ""
+		}
+		if !errors.Is(err, transcript.ErrNoUserInput) {
+			fmt.Fprintf(os.Stderr, "jev-guard: antigravity transcript intent unavailable: %v\n", err)
+		}
+		return false
+	}
+	if session.IsNegativeIntent(text) {
+		return true
+	}
+	call.UserIntent = text
+	return false
 }
 
 func readStandardInput() ([]byte, error) {
@@ -240,12 +287,7 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config) *
 		return nil
 	}
 	if sessState.Aborted {
-		return &harness.EvaluationResult{
-			Decision:   harness.DecisionForceAsk,
-			Reason:     "Action held: an active abort/stop signal was recorded for this session",
-			Source:     "session_aborted",
-			Confidence: 1.0,
-		}
+		return abortedSessionResult()
 	}
 	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
 		call.UserIntent = intent

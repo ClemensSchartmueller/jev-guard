@@ -34,8 +34,10 @@ type NormalizedToolCall struct {
 	SessionID      string
 	TurnID         int
 	// TurnKey is an opaque string turn identifier (Codex turn_id). Empty for Claude/Antigravity.
-	TurnKey    string
-	UserIntent string
+	TurnKey        string
+	UserIntent     string
+	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
+	ModelName      string // Antigravity only
 }
 
 // ClaudePayload represents the payload sent by Claude Code and Codex hooks.
@@ -55,6 +57,8 @@ type AntigravityPayload struct {
 	StepIdx        int                 `json:"stepIdx,omitempty"`
 	InvocationNum  int                 `json:"invocationNum,omitempty"`
 	Cwd            string              `json:"cwd"`
+	TranscriptPath string              `json:"transcriptPath,omitempty"`
+	ModelName      string              `json:"modelName,omitempty"`
 }
 
 // IngestPayload represents prompt-bearing hook payloads or explicit ingest JSON.
