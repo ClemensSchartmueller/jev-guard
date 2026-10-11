@@ -173,11 +173,11 @@ func checkRepoGitConfig(target, command, cwd string) string {
 	if isRepoGitConfigCandidate(target, cwd) {
 		return repoGitConfigReason
 	}
-	tokens := strings.Fields(command)
+	tokens := sensitiveCommandArguments(command)
 	for i, token := range tokens {
 		// Skip the program name and Git subcommands ("git config") so that running
 		// git from inside a .git directory is not mistaken for naming the file.
-		if i == 0 || strings.EqualFold(strings.Trim(tokens[i-1], `"'`), "git") {
+		if i == 0 || (i == 1 && strings.EqualFold(tokens[0], "git")) {
 			continue
 		}
 		arg := strings.Trim(token, `"'`)
@@ -189,6 +189,43 @@ func checkRepoGitConfig(target, command, cwd string) string {
 		}
 	}
 	return ""
+}
+
+// sensitiveCommandArguments keeps quoted path spans together for local sensitive-file
+// checks. It is deliberately not a shell evaluator: substitutions and chained
+// commands still require semantic evaluation.
+func sensitiveCommandArguments(command string) []string {
+	var args []string
+	var arg strings.Builder
+	var quote rune
+	started := false
+	for _, ch := range command {
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else {
+				arg.WriteRune(ch)
+			}
+			started = true
+		case ch == '\'' || ch == '"':
+			quote = ch
+			started = true
+		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+			if started {
+				args = append(args, arg.String())
+				arg.Reset()
+				started = false
+			}
+		default:
+			arg.WriteRune(ch)
+			started = true
+		}
+	}
+	if started {
+		args = append(args, arg.String())
+	}
+	return args
 }
 
 func isRepoGitConfigCandidate(p, cwd string) bool {

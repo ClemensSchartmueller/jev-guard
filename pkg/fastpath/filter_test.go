@@ -805,3 +805,28 @@ func TestFastPath_RepoGitConfig_StructuralLookalikesNotSensitive(t *testing.T) {
 		})
 	}
 }
+
+func TestFastPath_RepoGitConfig_QuotedCommands(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	for _, command := range []string{
+		`ls ".git/modules/my module/config"`,
+		`cat '.git/worktrees/my branch/config.worktree'`,
+		`git config --file=".git/modules/my module/config" --list`,
+		`type "C:\my repo\.git\modules\my module\config"`,
+	} {
+		call := &harness.NormalizedToolCall{ToolName: "Bash", Command: command}
+		res := filter.Evaluate(call)
+		if res == nil || res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+			t.Errorf("%q: expected sensitive ASK, got %+v", command, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_GitNamedArgument(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls git config", Cwd: "/repo/.git"}
+	res := filter.Evaluate(call)
+	if res == nil || res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+		t.Fatalf("expected sensitive ASK for config argument after git filename, got %+v", res)
+	}
+}
