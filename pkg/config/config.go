@@ -149,13 +149,19 @@ func DefaultTrustedCommands() []string {
 
 // LoadConfigForCall collects candidate directories from a normalized tool call and loads configuration.
 func LoadConfigForCall(call *harness.NormalizedToolCall) *Config {
+	return loadConfigForCallWithPaths(call, UserConfigPath(), TrustRegistryPath())
+}
+
+// loadConfigForCallWithPaths is the path-injectable form of LoadConfigForCall. Tests use it to
+// exercise call-based discovery without reading the operating system user's configuration.
+func loadConfigForCallWithPaths(call *harness.NormalizedToolCall, userConfigPath, trustRegistryPath string) *Config {
 	candidates, workspaceRoots := collectCandidates(call)
 	if len(candidates) == 0 {
 		if cwd, err := os.Getwd(); err == nil && cwd != "" {
 			candidates = append(candidates, cwd)
 		}
 	}
-	return LoadConfigWithPathsAndRoots(candidates, workspaceRoots, UserConfigPath(), TrustRegistryPath())
+	return LoadConfigWithPathsAndRoots(candidates, workspaceRoots, userConfigPath, trustRegistryPath)
 }
 
 func collectCandidates(call *harness.NormalizedToolCall) (candidates, workspaceRoots []string) {
@@ -350,6 +356,12 @@ type projectTrustRegistry struct {
 // InspectProjectConfig resolves a project config path (or directory), hashes its exact bytes, and
 // reports whether the system user has approved that digest. It never changes the trust registry.
 func InspectProjectConfig(path string) (*ProjectConfigInfo, error) {
+	return inspectProjectConfigWithRegistry(path, TrustRegistryPath())
+}
+
+// inspectProjectConfigWithRegistry is the registry-injectable form of InspectProjectConfig.
+// Tests use it so trust lookups never read the operating system user's registry.
+func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectConfigInfo, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("project config path is required")
 	}
@@ -361,7 +373,7 @@ func InspectProjectConfig(path string) (*ProjectConfigInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	info.Trusted, err = trustRecordExists(TrustRegistryPath(), info.TrustRecord)
+	info.Trusted, err = trustRecordExists(trustRegistryPath, info.TrustRecord)
 	if err != nil {
 		info.TrustIssue = describeTrustRegistryError(err)
 	}

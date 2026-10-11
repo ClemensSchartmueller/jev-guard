@@ -522,3 +522,36 @@ func TestClearIntent_NoFlagsDoesNotClearAll(t *testing.T) {
 		t.Fatal("--all should clear everything")
 	}
 }
+
+func TestEvaluateArgs_EvalAndExplainDelegate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	var calls []string
+	runner.Eval = func(args []string, _ io.Reader, _, _ io.Writer) int {
+		calls = append(calls, "eval "+strings.Join(args, " "))
+		return 3
+	}
+	runner.Explain = func(args []string, _ io.Reader, _, _ io.Writer) int {
+		calls = append(calls, "explain "+strings.Join(args, " "))
+		return 4
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"eval", "--cmd", "ls"}, 3},
+		{[]string{"explain", "--cmd", "ls"}, 4},
+	} {
+		if action, code := runner.EvaluateArgs(tc.args); action != ActionHandled || code != tc.code {
+			t.Fatalf("%v: action=%v code=%d", tc.args, action, code)
+		}
+	}
+	if got := strings.Join(calls, "|"); got != "eval --cmd ls|explain --cmd ls" {
+		t.Fatalf("calls = %q", got)
+	}
+
+	runner.Explain = nil
+	if action, code := runner.EvaluateArgs([]string{"explain"}); action != ActionHandled || code != 1 {
+		t.Fatalf("explain without implementation: action=%v code=%d", action, code)
+	}
+}

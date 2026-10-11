@@ -154,6 +154,8 @@ jev-guard eval --cmd "git diff .env"
 jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
 jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
 jev-guard eval --cmd "cat .env" --json
+jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
+jev-guard explain --cmd "git diff .env"            # shorthand for eval --explain
 ```
 
 > [!NOTE]
@@ -161,14 +163,27 @@ jev-guard eval --cmd "cat .env" --json
 
 `jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fastpath, TypeSafe, policy, harness formatting):
 
-- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
+- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool in a Claude Code-shaped payload, passing the target under the tool's canonical path argument (`TargetFile` for `write_to_file`/`replace_file_content`, `AbsolutePath` for `view_file`, `notebook_path` for `NotebookEdit`, `path` for Glob/Grep/LS, otherwise `file_path`); `--payload FILE` uses a raw hook JSON payload of any harness, which is the way to reproduce an exact Antigravity or Codex call.
 - `--cwd DIR` sets the working directory (default: current directory).
+- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
 - `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
 - `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
-- Boolean flags accept explicit values such as `--offline=false` and `--json=true`. String flags require a non-empty value; use `--cmd=VALUE` for a command beginning with `--`.
+- `jev-guard explain ...` is shorthand for `jev-guard eval --explain ...`; it rejects `--json` and `--explain`.
+- Flags take values as `--flag value` or `--flag=value`. Boolean flags accept explicit values such as `--offline=false` and `--json=true` (`false`/`0` disables). A string flag never consumes a following `--option` as its value: `--cmd --offline` is a usage error. To pass a literal value beginning with `--`, use the `=` form, e.g. `--cmd=--version`. Each flag may be given only once.
 - `eval` never writes session state, ingests intents, or writes audit-log entries.
-- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); non-zero (`2`) on usage errors or unreadable payloads.
+- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); `2` on usage errors or unreadable payloads, with a `jev-guard eval: usage error: ...` diagnostic on stderr and nothing on stdout.
+
+Boundary fields in `--json` output:
+
+| `boundary_status` | Meaning | `boundary_contained` |
+| :--- | :--- | :--- |
+| `contained` | The target resolved inside the workspace. | `true` |
+| `escaped` | The target is outside the workspace or could not be resolved. | `false` |
+| `no_target` | The call has no target path (e.g. a shell command); treated as contained, as in the hook. | `true` |
+| `skipped` | The boundary stage did not run because a stop/cancel `--intent` held the call as an aborted session. | `null` |
+
+Use `boundary_status` to tell a skipped check from an uncontained target; `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
 
 ---
 
