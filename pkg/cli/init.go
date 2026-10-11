@@ -90,8 +90,8 @@ func (r *Runner) handleInit(args []string) (Action, int) {
 		return ActionHandled, 1
 	}
 	fmt.Fprintln(r.Stdout, "Run `jev-guard config show` to check policy and API key status.")
-	if scope == "project" && (agent == "codex" || agent == "all" || containsAgent(selected, "codex")) {
-		fmt.Fprintln(r.Stdout, "Codex: review and trust the project hook with `/hooks` before it can run.")
+	if agent == "codex" || agent == "all" || containsAgent(selected, "codex") {
+		fmt.Fprintln(r.Stdout, "Codex: review and trust the Codex hooks with `/hooks` before they can run. New or changed hooks (including UserPromptSubmit and Stop) must be re-trusted.")
 	}
 	return ActionHandled, 0
 }
@@ -231,7 +231,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 			}
 		}
 	}
-	if agent == "claude" {
+	if agent == "claude" || agent == "codex" {
 		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false)
 		if err != nil {
 			return false, err
@@ -253,7 +253,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		changed = changed || c
 	}
 	matcher := map[string]string{
-		"claude":      "Bash|Edit|Write|View|ReadLocalFile|LS|Grep|Glob",
+		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
 		"codex":       "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
 		"antigravity": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
 	}[agent]
@@ -428,6 +428,8 @@ func managedHookCommand(existing, desired string) bool {
 		return true
 	}
 	subcommand := ""
+	// Both commands must end in the same managed subcommand (or neither does);
+	// remember desired's suffix so it can be stripped before comparing binaries.
 	for _, suffix := range []string{" ingest", " end-turn"} {
 		if strings.HasSuffix(desired, suffix) {
 			subcommand = suffix

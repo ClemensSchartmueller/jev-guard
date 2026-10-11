@@ -273,11 +273,16 @@ func (r *Runner) handleUnknown(arg string) (Action, int) {
 func (r *Runner) handleIngest(args []string) (Action, int) {
 	var sessionID string
 	var turnID int
+	var turnKey string
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
 		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
 			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "--turn-key", "--turn_key"); ok {
+			turnKey = val
 			continue
 		}
 		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
@@ -310,6 +315,9 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 				if turnID == 0 {
 					turnID = parsedState.TurnID
 				}
+				if turnKey == "" {
+					turnKey = parsedState.TurnKey
+				}
 				if prompt == "" {
 					prompt = parsedState.Prompt
 				}
@@ -329,6 +337,7 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	state := &session.SessionState{
 		SessionID: sessionID,
 		TurnID:    turnID,
+		TurnKey:   turnKey,
 		Prompt:    prompt,
 	}
 
@@ -341,7 +350,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	if session.IsNegativeIntent(prompt) {
 		fmt.Fprintf(r.Stderr, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
 	} else {
-		fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		if turnKey != "" {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %s)\n", sessionID, turnKey)
+		} else {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		}
 	}
 
 	return ActionHandled, 0
@@ -389,10 +402,33 @@ func (r *Runner) handleClearIntent(args []string) (Action, int) {
 	return ActionHandled, 0
 }
 
+// stdinReadTimeout bounds how long hook-payload reads wait, so a never-closed
+// inherited stdin cannot hang end-turn or clear-intent. Tests may override it.
+var stdinReadTimeout = 3 * time.Second
+
+// readAllWithTimeout reads rd to EOF, giving up after timeout.
+func readAllWithTimeout(rd io.Reader, timeout time.Duration) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(rd)
+		ch <- result{data, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.data, res.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timed out after %s waiting for stdin", timeout)
+	}
+}
+
 // sessionFromStdin reads a hook payload from stdin and returns its session ID.
 // It returns "" for empty, unreadable, or invalid payloads.
 func (r *Runner) sessionFromStdin() string {
-	stdinBytes, err := io.ReadAll(r.Stdin)
+	stdinBytes, err := readAllWithTimeout(r.Stdin, stdinReadTimeout)
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "Error reading stdin: %v\n", err)
 		return ""
@@ -411,9 +447,11 @@ func (r *Runner) sessionFromStdin() string {
 	return parsed.SessionID
 }
 
-// handleEndTurn clears the intent and abort flag of exactly one session. It is
-// meant for Claude Code's Stop hook: stdout stays empty, diagnostics go to
-// stderr, and it always exits 0 so it can never keep the agent from stopping.
+// handleEndTurn clears the stored prompt intent of exactly one session but
+// leaves an aborted session (abort flag) in place so background work stays
+// held. It is meant for Claude Code's Stop hook: stdout stays empty,
+// diagnostics go to stderr, and it always exits 0 so it can never keep the
+// agent from stopping.
 func (r *Runner) handleEndTurn(args []string) (Action, int) {
 	var sessionID string
 	for i := 0; i < len(args); i++ {
@@ -426,6 +464,17 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 		sessionID = r.sessionFromStdin()
 	}
 	if sessionID == "" {
+		return ActionHandled, 0
+	}
+
+	// Apply the configured TTL so LoadSession does not expire a session early.
+	if cwd, err := os.Getwd(); err == nil {
+		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+	}
+	// A recorded "stop" must keep holding background work after the reply ends;
+	// it expires via the TTL or is replaced by the next ingested prompt.
+	if state, err := session.LoadSession(sessionID); err == nil && state != nil && state.Aborted {
+		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept abort flag for session '%s'\n", sessionID)
 		return ActionHandled, 0
 	}
 
@@ -484,7 +533,7 @@ Usage:
 Commands:
   init            Configure agent hooks in the current project
   ingest          Ingest active user prompt/intent into session cache
-  end-turn        Clear the session intent when a reply ends (Claude Code Stop hook)
+  end-turn        Clear the session intent when a reply ends (Claude Code / Codex Stop hook)
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   status          Display active sessions and jev-guard environment status
@@ -499,6 +548,7 @@ Flags:
 Ingest Flags:
   -s, --session <id>   Session / Conversation ID (defaults to "default")
   -t, --turn <num>     Turn / Invocation sequence number
+      --turn-key <id>  Opaque string turn ID (Codex turn_id) for exact turn scoping
   -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
 
 Clear-Intent Flags:

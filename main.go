@@ -51,23 +51,15 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if cfg.IsContextAwarenessEnabled() {
-		session.SetSessionTTL(cfg.IntentTTL())
-		sessionID := call.SessionID
-		if sessionID == "" {
-			sessionID = "default"
-		}
-		if sessState, sessErr := session.LoadSession(sessionID); sessErr == nil && sessState != nil {
-			if sessState.Aborted {
-				return holdAborted(call, cfg, "Action held: an active abort/stop signal was recorded for this session")
-			}
-			if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
-				call.UserIntent = intent
-			}
-		}
+	contextResult := applySessionContext(call, cfg)
+	if contextResult == nil && cfg.IsContextAwarenessEnabled() {
 		if home, homeErr := os.UserHomeDir(); homeErr == nil && applyTranscriptIntent(call, cfg, home) {
-			return holdAborted(call, cfg, "Action held: the latest user request in the Antigravity transcript is an abort/stop command")
+			contextResult = abortedSessionResult()
 		}
+	}
+	if contextResult != nil {
+		_ = cfg.LogAudit(call, contextResult)
+		return outputHarnessVerdict(call, *applyAuditMode(contextResult, cfg.Mode))
 	}
 
 	result := executeGateEvaluation(call, cfg)
@@ -79,16 +71,14 @@ func runGate() int {
 	return outputHarnessVerdict(call, *result)
 }
 
-// holdAborted logs and returns a force_ask verdict for an aborted session or stop request.
-func holdAborted(call *harness.NormalizedToolCall, cfg *config.Config, reason string) int {
-	result := &harness.EvaluationResult{
+// abortedSessionResult is the verdict for an aborted session or transcript stop request.
+func abortedSessionResult() *harness.EvaluationResult {
+	return &harness.EvaluationResult{
 		Decision:   harness.DecisionForceAsk,
-		Reason:     reason,
+		Reason:     "Action held: an active abort/stop signal was recorded for this session",
 		Source:     "session_aborted",
 		Confidence: 1.0,
 	}
-	_ = cfg.LogAudit(call, result)
-	return outputHarnessVerdict(call, *applyAuditMode(result, cfg.Mode))
 }
 
 // applyTranscriptIntent reads the latest user request from the Antigravity transcript when
@@ -139,10 +129,11 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 	}
 
 	contained := checkWorkspaceBoundary(call, resolver)
+	pathVerified := isLocalPathVerified(call, contained)
 	judgments, evalErr := performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
-	resolved := pol.Resolve(judgments, contained, evalErr)
+	resolved := pol.ResolveWithEvidence(judgments, policy.BoundaryEvidence{Contained: contained, PathVerified: pathVerified}, evalErr)
 
 	return applyAuditMode(resolved, cfg.Mode)
 }
@@ -159,6 +150,72 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary
 		return false
 	}
 	return contained
+}
+
+// singleTargetFileTools maps each allowlisted file tool to its canonical path
+// argument. A call is only verified when TargetPath came from that argument
+// and no other path-like argument is present, so a payload cannot smuggle a
+// higher-priority in-workspace key past the resolver while the tool acts on
+// its real (out-of-workspace) argument.
+var singleTargetFileTools = map[string]string{
+	"Read": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path",
+	"NotebookEdit":  "notebook_path",
+	"write_to_file": "TargetFile", "replace_file_content": "TargetFile", "view_file": "AbsolutePath",
+}
+
+// executionSensitiveDirs are in-workspace directories whose contents execute
+// code or configure agents/hooks; writes there are never locally verified.
+var executionSensitiveDirs = map[string]bool{
+	".git": true, ".github": true, ".husky": true, ".devcontainer": true,
+	".claude": true, ".codex": true, ".cursor": true, ".gemini": true, ".agent": true,
+	".agents": true, ".windsurf": true, ".vscode": true, ".idea": true, ".jevguard": true,
+}
+
+// executionSensitiveFiles are basenames of agent instruction/config files.
+var executionSensitiveFiles = map[string]bool{
+	"claude.md": true, "agents.md": true, "gemini.md": true, ".mcp.json": true, ".envrc": true,
+}
+
+// isExecutionSensitivePath reports whether target lies in a directory or file
+// that runs code or configures the agent. Matching is case-insensitive and
+// accepts both slash styles.
+func isExecutionSensitivePath(target string) bool {
+	segments := strings.Split(strings.ReplaceAll(target, "\\", "/"), "/")
+	for i, seg := range segments {
+		seg = strings.ToLower(strings.TrimSpace(seg))
+		if executionSensitiveDirs[seg] {
+			return true
+		}
+		if i == len(segments)-1 && executionSensitiveFiles[seg] {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalPathVerified reports whether the local resolver positively proved a
+// filesystem target is inside the workspace. Shell commands, empty targets
+// (where checkWorkspaceBoundary is vacuously true), URLs, mixed path
+// arguments and execution-sensitive paths never qualify.
+func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool {
+	key, ok := singleTargetFileTools[call.ToolName]
+	target := strings.TrimSpace(call.TargetPath)
+	if !contained || !ok || target == "" || strings.TrimSpace(call.Command) != "" || strings.Contains(target, "://") {
+		return false
+	}
+	raw, isString := call.RawArgs[key].(string)
+	if !isString || strings.TrimSpace(raw) != target {
+		return false
+	}
+	for _, k := range harness.PathArgKeys {
+		if k == key {
+			continue
+		}
+		if _, present := call.RawArgs[k]; present {
+			return false
+		}
+	}
+	return !isExecutionSensitivePath(target)
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {
@@ -211,7 +268,41 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	return outputHarnessVerdict(call, res)
 }
 
-func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) string {
+// applySessionContext loads the session state for the call. If the session holds an
+// abort/stop signal, it returns a FORCE_ASK result. The hold applies regardless of turn
+// (fail closed): a successful ingest of a new prompt already clears it, so a turn mismatch
+// only happens when that ingest failed (empty prompt, untrusted hook, timeout).
+// Otherwise it attaches the turn-matched user intent to call and returns nil.
+func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
+	if !cfg.IsContextAwarenessEnabled() {
+		return nil
+	}
+	session.SetSessionTTL(cfg.IntentTTL())
+	sessionID := call.SessionID
+	if sessionID == "" {
+		sessionID = "default"
+	}
+	sessState, sessErr := session.LoadSession(sessionID)
+	if sessErr != nil || sessState == nil {
+		return nil
+	}
+	if sessState.Aborted {
+		return abortedSessionResult()
+	}
+	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
+		call.UserIntent = intent
+	}
+	return nil
+}
+
+func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {
+	if callTurnKey != "" {
+		// Keyed (Codex) calls only accept intent ingested in the exact same turn.
+		if sessionTurnKey != callTurnKey {
+			return ""
+		}
+		return sessionPrompt
+	}
 	if callTurnID == 0 || sessionTurnID == 0 || callTurnID == sessionTurnID {
 		return sessionPrompt
 	}

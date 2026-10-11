@@ -115,12 +115,12 @@ func TestPolicy_Resolve_ExplicitIntent_CatastrophicCappedAtForceAsk(t *testing.T
 func TestPolicy_Resolve_ExplicitIntent_CredentialAccess(t *testing.T) {
 	policy := NewDefaultPolicy()
 	j := &evaluator.JevJudgments{
-		IsWorkspaceContained:  0.98,
-		DestructivePotential:  0.8,
-		ViolationCategory:     "credential_leak",
-		ViolationConfidence:   0.9,
-		IntentAlignment:       "explicitly_requested",
-		IntentConfidence:      0.95,
+		IsWorkspaceContained: 0.98,
+		DestructivePotential: 0.8,
+		ViolationCategory:    "credential_leak",
+		ViolationConfidence:  0.9,
+		IntentAlignment:      "explicitly_requested",
+		IntentConfidence:     0.95,
 	}
 
 	res := policy.Resolve(j, true, nil)
@@ -132,12 +132,12 @@ func TestPolicy_Resolve_ExplicitIntent_CredentialAccess(t *testing.T) {
 func TestPolicy_Resolve_Unprompted_CredentialAccessRequiresConfirmation(t *testing.T) {
 	policy := NewDefaultPolicy()
 	j := &evaluator.JevJudgments{
-		IsWorkspaceContained:  0.98,
-		DestructivePotential:  0.8,
-		ViolationCategory:     "credential_leak",
-		ViolationConfidence:   0.9,
-		IntentAlignment:       "unprompted_or_contrary",
-		IntentConfidence:      0.95,
+		IsWorkspaceContained: 0.98,
+		DestructivePotential: 0.8,
+		ViolationCategory:    "credential_leak",
+		ViolationConfidence:  0.9,
+		IntentAlignment:      "unprompted_or_contrary",
+		IntentConfidence:     0.95,
 	}
 
 	res := policy.Resolve(j, true, nil)
@@ -180,5 +180,49 @@ func TestPolicy_Resolve_ExplicitIntent_LowConfidenceRequiresConfirmation(t *test
 	// Low confidence must not auto-allow; it must fall back to asking confirmation
 	if res.Decision != harness.DecisionAsk {
 		t.Fatalf("expected ASK for low confidence explicit intent, got %v", res.Decision)
+	}
+}
+
+func TestPolicy_PathVerified(t *testing.T) {
+	policy := NewDefaultPolicy()
+	mk := func(contained, destructive float64, cat string) *evaluator.JevJudgments {
+		return &evaluator.JevJudgments{
+			IsWorkspaceContained:  contained,
+			DestructivePotential:  destructive,
+			ViolationCategory:     cat,
+			DestructiveConfidence: 0.9,
+			ViolationConfidence:   0.9,
+		}
+	}
+	verified := BoundaryEvidence{Contained: true, PathVerified: true}
+	unverified := BoundaryEvidence{Contained: true}
+
+	tests := []struct {
+		name string
+		ev   BoundaryEvidence
+		j    *evaluator.JevJudgments
+		want harness.Decision
+	}{
+		{"verified low containment allows", verified, mk(0.43, 0.3, "none"), harness.DecisionAllow},
+		{"unverified low containment asks", unverified, mk(0.43, 0.3, "none"), harness.DecisionAsk},
+		{"verified catastrophic denies", verified, mk(0.43, 2.8, "none"), harness.DecisionDeny},
+		{"verified moderate still asks", verified, mk(0.43, 1.9, "none"), harness.DecisionAsk},
+		{"verified workspace_escape category asks", verified, mk(0.98, 0.3, "workspace_escape"), harness.DecisionAsk},
+		{"verified credential_leak asks", verified, mk(0.43, 0.3, "credential_leak"), harness.DecisionAsk},
+		{"verified catastrophic_deletion denies", verified, mk(0.43, 0.3, "catastrophic_deletion"), harness.DecisionDeny},
+		{"not contained asks even if verified flag set", BoundaryEvidence{Contained: false, PathVerified: true}, mk(0.99, 0.1, "none"), harness.DecisionAsk},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := policy.ResolveWithEvidence(tt.j, tt.ev, nil)
+			if res.Decision != tt.want {
+				t.Errorf("expected %v, got %v (%s)", tt.want, res.Decision, res.Reason)
+			}
+		})
+	}
+
+	res := policy.ResolveWithEvidence(nil, verified, errors.New("boom"))
+	if res.Decision != harness.DecisionAsk {
+		t.Errorf("eval error must still fail safe, got %v", res.Decision)
 	}
 }

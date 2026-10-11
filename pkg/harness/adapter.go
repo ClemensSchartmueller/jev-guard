@@ -93,8 +93,16 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		}
 	}
 
+	// Codex sends turn_id as a string on turn-scoped events; Claude Code does not send it.
+	harnessType := HarnessClaudeCode
+	if payload.TurnID.Key != "" {
+		harnessType = HarnessCodex
+	}
+
 	return &NormalizedToolCall{
-		Harness:        HarnessClaudeCode,
+		Harness:        harnessType,
+		TurnID:         payload.TurnID.Num,
+		TurnKey:        payload.TurnID.Key,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
@@ -125,7 +133,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 		sid = "default"
 	}
 
-	turn := payload.TurnID
+	turn := payload.TurnID.Num
 	if turn == 0 {
 		turn = payload.InvocationNum
 	}
@@ -144,6 +152,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	return &session.SessionState{
 		SessionID: sid,
 		TurnID:    turn,
+		TurnKey:   payload.TurnID.Key,
 		Prompt:    prompt,
 	}, nil
 }
@@ -171,6 +180,17 @@ func extractCwd(args map[string]interface{}) string {
 	return ""
 }
 
+// PathArgKeys lists tool argument keys treated as filesystem/URL targets, in
+// priority order. extractCommandAndTarget picks the first non-empty one.
+var PathArgKeys = []string{
+	"TargetFile", "AbsolutePath", "file_path", "filePath", "notebook_path",
+	"SearchPath", "search_path", "SearchDirectory",
+	"DirectoryPath", "dir_path", "directory",
+	"path", "target_path", "targetPath", "target",
+	"file", "filename", "Uri", "uri", "Url", "url",
+	"dest", "destination", "source", "src",
+}
+
 func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	if args == nil {
 		return "", ""
@@ -188,15 +208,7 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	}
 
 	var target string
-	pathKeys := []string{
-		"TargetFile", "AbsolutePath", "file_path", "filePath",
-		"SearchPath", "search_path", "SearchDirectory",
-		"DirectoryPath", "dir_path", "directory",
-		"path", "target_path", "targetPath", "target",
-		"file", "filename", "Uri", "uri", "Url", "url",
-		"dest", "destination", "source", "src",
-	}
-	for _, key := range pathKeys {
+	for _, key := range PathArgKeys {
 		if val, exists := args[key]; exists {
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
 				target = strings.TrimSpace(strVal)
