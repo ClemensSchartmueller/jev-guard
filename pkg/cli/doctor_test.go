@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -238,5 +240,91 @@ func TestHookExecutable(t *testing.T) {
 		if got := hookExecutable(c.in); got != c.want {
 			t.Errorf("hookExecutable(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestDoctorRejectsNonExecutableAbsoluteHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not use Unix execute permissions")
+	}
+	exe := fakeGuardExe(t)
+	if err := os.Chmod(exe, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	writeClaudeSettings(t, cwd, `"`+exe+`"`)
+	out, code := doctorRun(t, &Runner{}, doctorConfig(t), cwd, t.TempDir(), true)
+	if code != 1 || !strings.Contains(out, "[FAIL] Hooks (claude)") || !strings.Contains(out, "not executable") {
+		t.Fatalf("non-executable hook should fail, exit %d:\n%s", code, out)
+	}
+}
+
+func TestDoctorAntigravityEnabledState(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			cwd := t.TempDir()
+			path := filepath.Join(cwd, ".agents", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			exe, _ := json.Marshal(fakeGuardExe(t))
+			data := `{"jev-guard":{"enabled":` + strconv.FormatBool(enabled) + `,"PreToolUse":[{"hooks":[{"type":"command","command":` + string(exe) + `}]}]}}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, code := doctorRun(t, &Runner{}, doctorConfig(t), cwd, t.TempDir(), true)
+			if enabled {
+				if code != 0 || !strings.Contains(out, "[OK]   Hooks (antigravity)") {
+					t.Fatalf("enabled integration should pass, exit %d:\n%s", code, out)
+				}
+			} else if code != 1 || !strings.Contains(out, "[FAIL] Hooks (antigravity)") || !strings.Contains(out, "integration disabled") {
+				t.Fatalf("disabled integration should fail, exit %d:\n%s", code, out)
+			}
+		})
+	}
+}
+
+func TestDoctorAuditTargetDirectoryFails(t *testing.T) {
+	cfg := doctorConfig(t)
+	cfg.AuditLogPath = t.TempDir()
+	out, code := doctorRun(t, &Runner{}, cfg, t.TempDir(), t.TempDir(), true)
+	if code != 1 || !strings.Contains(out, "[FAIL] Audit log:") {
+		t.Fatalf("directory audit target should fail, exit %d:\n%s", code, out)
+	}
+}
+
+func TestDoctorAuditTargetReadOnlyFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte("existing audit data\n"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err == nil {
+		f.Close()
+		t.Skip("current user can write read-only files")
+	}
+	cfg := doctorConfig(t)
+	cfg.AuditLogPath = path
+	out, code := doctorRun(t, &Runner{}, cfg, t.TempDir(), t.TempDir(), true)
+	if code != 1 || !strings.Contains(out, "[FAIL] Audit log:") {
+		t.Fatalf("read-only audit target should fail, exit %d:\n%s", code, out)
+	}
+}
+
+func TestDoctorAuditTargetPreservesContents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	want := "existing audit data\n"
+	if err := os.WriteFile(path, []byte(want), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := doctorConfig(t)
+	cfg.AuditLogPath = path
+	out, code := doctorRun(t, &Runner{}, cfg, t.TempDir(), t.TempDir(), true)
+	if code != 0 || !strings.Contains(out, "[OK]   Audit log:") {
+		t.Fatalf("writable audit target should pass, exit %d:\n%s", code, out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != want {
+		t.Fatalf("audit contents changed: %q, %v", got, err)
 	}
 }

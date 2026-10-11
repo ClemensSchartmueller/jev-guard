@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -128,9 +129,11 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		report(doctorWarn, "Workspace: cwd %s, no git root found", cwd)
 	}
 
-	// 6. Audit log directory.
+	// 6. Audit log target and directory.
 	if cfg.AuditLogPath == "" {
 		report(doctorOK, "Audit log: not configured")
+	} else if err := checkAuditTargetWritable(cfg.AuditLogPath); err != nil {
+		report(doctorFail, "Audit log: %s not writable: %v", cfg.AuditLogPath, err)
 	} else {
 		dir := filepath.Dir(cfg.AuditLogPath)
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -166,13 +169,16 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 			case "invalid":
 				found = true
 				report(doctorFail, "Hooks (%s): %s scope settings %s is not valid JSON", agent, s.name, s.path)
+			case "disabled":
+				found = true
+				report(doctorFail, "Hooks (%s): %s scope integration disabled in %s; run `jev-guard init --agent %s --scope %s`", agent, s.name, s.path, agent, s.name)
 			case "found":
 				found = true
 				exe := hookExecutable(command)
 				if resolved, ok := resolveExecutable(exe); ok {
 					report(doctorOK, "Hooks (%s): PreToolUse registered in %s scope (%s); command %s", agent, s.name, s.path, resolved)
 				} else {
-					report(doctorFail, "Hooks (%s): PreToolUse registered in %s scope (%s) but command %q not found", agent, s.name, s.path, exe)
+					report(doctorFail, "Hooks (%s): PreToolUse registered in %s scope (%s) but command %q not found or not executable", agent, s.name, s.path, exe)
 				}
 			}
 		}
@@ -218,6 +224,25 @@ func checkDirWritable(dir string) error {
 	return os.Remove(name)
 }
 
+// Check existing targets without creating the log or writing audit data.
+func checkAuditTargetWritable(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("target is not a regular file")
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 // nearestExistingDir returns dir or its closest ancestor that exists.
 func nearestExistingDir(dir string) string {
 	curr := filepath.Clean(dir)
@@ -234,7 +259,7 @@ func nearestExistingDir(dir string) string {
 }
 
 // findPreToolUseCommand returns the jev-guard PreToolUse command and a status of
-// "found", "missing" (no file), "invalid" (bad JSON) or "none" (no jev-guard entry).
+// "found", "missing" (no file), "invalid" (bad JSON), "disabled" or "none" (no jev-guard entry).
 func findPreToolUseCommand(path, agent string) (string, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -249,6 +274,9 @@ func findPreToolUseCommand(path, agent string) (string, string) {
 		key = "jev-guard"
 	}
 	section, _ := root[key].(map[string]interface{})
+	if agent == "antigravity" && section["enabled"] == false {
+		return "", "disabled"
+	}
 	entries, _ := section["PreToolUse"].([]interface{})
 	for _, entry := range entries {
 		item, ok := entry.(map[string]interface{})
@@ -301,10 +329,13 @@ func resolveExecutable(exe string) (string, bool) {
 		return "", false
 	}
 	if filepath.IsAbs(exe) {
-		if info, err := os.Stat(exe); err == nil && !info.IsDir() {
+		if info, err := os.Stat(exe); err != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		// Windows does not use Unix execute bits; preserve exact absolute paths.
+		if runtime.GOOS == "windows" {
 			return exe, true
 		}
-		return "", false
 	}
 	p, err := exec.LookPath(exe)
 	return p, err == nil
