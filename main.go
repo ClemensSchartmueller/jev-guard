@@ -24,6 +24,7 @@ func main() {
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	runner.Eval = runEval
+	runner.Explain = runExplain
 	action, exitCode := runner.EvaluateArgs(os.Args[1:])
 	if action == cli.ActionHandled {
 		os.Exit(exitCode)
@@ -102,17 +103,22 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 		return nil
 	}
 	if sessState.Aborted {
-		return &harness.EvaluationResult{
-			Decision:   harness.DecisionForceAsk,
-			Reason:     "Action held: an active abort/stop signal was recorded for this session",
-			Source:     sourceSessionAborted,
-			Confidence: 1.0,
-		}
+		return abortedSessionResult()
 	}
 	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
 		call.UserIntent = intent
 	}
 	return nil
+}
+
+// abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.
+func abortedSessionResult() *harness.EvaluationResult {
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionForceAsk,
+		Reason:     "Action held: an active abort/stop signal was recorded for this session",
+		Source:     sourceSessionAborted,
+		Confidence: 1.0,
+	}
 }
 
 func readStandardInput() ([]byte, error) {
@@ -124,6 +130,7 @@ func readStandardInput() ([]byte, error) {
 type gateTrace struct {
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
+	BoundaryRan      bool
 	Contained        bool
 	SemanticRan      bool
 	Judgments        *evaluator.JevJudgments
@@ -170,6 +177,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	if resolver != nil {
 		checker = &cachedBoundaryChecker{checker: resolver}
 	}
+	trace.BoundaryRan = true
 	trace.Contained = checkWorkspaceBoundary(call, checker)
 
 	if cfg.IsFastpathEnabled() {
