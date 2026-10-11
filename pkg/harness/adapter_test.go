@@ -521,6 +521,35 @@ func TestParsePayload_AntigravityReadResource(t *testing.T) {
 	}
 }
 
+func TestParsePayload_ClaudeNotebookEdit(t *testing.T) {
+	raw := []byte(`{
+		"tool_name": "NotebookEdit",
+		"tool_input": {
+			"notebook_path": "/repo/nb.ipynb",
+			"new_source": "x"
+		},
+		"cwd": "/repo"
+	}`)
+
+	call, err := ParsePayload(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if call.TargetPath != "/repo/nb.ipynb" {
+		t.Errorf("expected target path '/repo/nb.ipynb', got '%s'", call.TargetPath)
+	}
+}
+
+func TestExtractCommandAndTarget_NotebookPath(t *testing.T) {
+	cmd, target := extractCommandAndTarget(map[string]interface{}{"notebook_path": "/repo/nb.ipynb"})
+	if cmd != "" {
+		t.Errorf("expected empty command, got '%s'", cmd)
+	}
+	if target != "/repo/nb.ipynb" {
+		t.Errorf("expected target '/repo/nb.ipynb', got '%s'", target)
+	}
+}
+
 func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	raw := []byte(`{
 		"tool_name": "apply_patch",
@@ -540,4 +569,21 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 	}
 }
 
-
+func TestParsePayload_ClaudeNewTools(t *testing.T) {
+	cases := []struct{ name, payload, cmd, target string }{
+		{"Read", `{"tool_name":"Read","tool_input":{"file_path":"/w/.env"}}`, "", "/w/.env"},
+		{"PowerShell", `{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem"}}`, "Get-ChildItem", ""},
+		{"MultiEdit", `{"tool_name":"MultiEdit","tool_input":{"file_path":"/w/a.go","edits":[]}}`, "", "/w/a.go"},
+		{"NotebookEdit", `{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/w/n.ipynb"}}`, "", "/w/n.ipynb"},
+		{"WebFetch", `{"tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"x"}}`, "", "https://example.com"},
+	}
+	for _, tc := range cases {
+		call, err := ParsePayload([]byte(tc.payload))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if call.ToolName != tc.name || call.Command != tc.cmd || call.TargetPath != tc.target {
+			t.Errorf("%s: got tool=%q cmd=%q target=%q", tc.name, call.ToolName, call.Command, call.TargetPath)
+		}
+	}
+}
