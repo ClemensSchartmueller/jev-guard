@@ -114,6 +114,9 @@ func DefaultSensitiveFiles() []string {
 		".npmrc",
 		".yarnrc",
 		".pypirc",
+		// Repository-local Git config: remote URLs may embed credentials, and writes can set
+		// command-executing keys (core.hooksPath, core.fsmonitor, core.sshCommand). See README.
+		".git/config",
 		".git-credentials",
 		".gitconfig",
 		".config/git/config",
