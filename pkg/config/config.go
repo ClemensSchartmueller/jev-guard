@@ -88,9 +88,13 @@ func SupportedProviders() []string {
 // Unknown names are returned as-is so evaluation fails safe instead of
 // silently sending the tool call and credentials to a different vendor.
 func (c *Config) EffectiveProvider() string {
+	if c.Provider == "" {
+		return ProviderTypeSafe
+	}
 	provider := strings.ToLower(strings.TrimSpace(c.Provider))
 	if provider == "" {
-		return ProviderTypeSafe
+		// A supplied whitespace-only name is invalid, not a legacy default.
+		return c.Provider
 	}
 	return provider
 }
@@ -681,15 +685,8 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			invalid = true
 		}
 	}
-	if fileCfg.APIKey != "" {
-		cfg.APIKey = fileCfg.APIKey
-		cfg.Sources["api_key"] = "user config"
-	} else if fileCfg.TypesafeAPIKey != "" {
-		cfg.APIKey = fileCfg.TypesafeAPIKey
-		cfg.Sources["api_key"] = "user config"
-	}
 	if fileCfg.Provider != "" {
-		cfg.Provider = strings.ToLower(strings.TrimSpace(fileCfg.Provider))
+		cfg.Provider = fileCfg.EffectiveProvider()
 		cfg.Sources["provider"] = "user config"
 		if !isSupportedProvider(cfg.Provider) {
 			// Keep the unknown value: evaluation then fails safe instead of falling back
@@ -697,6 +694,13 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config provider %q is not supported (expected one of %s); semantic evaluation will fail safe", fileCfg.Provider, strings.Join(SupportedProviders(), ", ")))
 			invalid = true
 		}
+	}
+	if fileCfg.APIKey != "" {
+		cfg.APIKey = fileCfg.APIKey
+		cfg.Sources["api_key"] = "user config"
+	} else if fileCfg.TypesafeAPIKey != "" && cfg.EffectiveProvider() == ProviderTypeSafe {
+		cfg.APIKey = fileCfg.TypesafeAPIKey
+		cfg.Sources["api_key"] = "user config"
 	}
 	if fileCfg.APIKeyEnv != "" {
 		if name := strings.TrimSpace(fileCfg.APIKeyEnv); validEnvName(name) {

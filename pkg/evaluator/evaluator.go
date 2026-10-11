@@ -75,8 +75,11 @@ func NewFromConfig(cfg *config.Config) (Evaluator, error) {
 // New builds the evaluator for opts.Provider. An empty provider selects TypeSafe.
 func New(opts Options) (Evaluator, error) {
 	provider := strings.ToLower(strings.TrimSpace(opts.Provider))
+	if opts.Provider == "" {
+		provider = config.ProviderTypeSafe
+	}
 	switch provider {
-	case "", config.ProviderTypeSafe:
+	case config.ProviderTypeSafe:
 		return NewClient(opts.APIKey, opts.BaseURL, opts.Model, opts.Timeout), nil
 	case config.ProviderOpenAI:
 		if opts.Model == "" {

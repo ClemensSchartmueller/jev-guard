@@ -94,8 +94,10 @@ func TestNew_SelectsProvider(t *testing.T) {
 }
 
 func TestNew_RejectsUnknownProviderAndMissingModel(t *testing.T) {
-	if _, err := New(Options{Provider: "gemini", Model: "m"}); !errors.Is(err, ErrUnsupportedProvider) {
-		t.Errorf("unknown provider error = %v, want ErrUnsupportedProvider", err)
+	for _, provider := range []string{"gemini", "   ", "\t\n"} {
+		if _, err := New(Options{Provider: provider, Model: "m"}); !errors.Is(err, ErrUnsupportedProvider) {
+			t.Errorf("provider %q error = %v, want ErrUnsupportedProvider", provider, err)
+		}
 	}
 	for _, provider := range []string{"openai", "anthropic"} {
 		if _, err := New(Options{Provider: provider}); !errors.Is(err, ErrMissingModel) {

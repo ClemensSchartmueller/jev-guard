@@ -55,8 +55,9 @@ func TestTraceGateEvaluationProviderErrorsFailSafe(t *testing.T) {
 
 	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "make deploy", Cwd: t.TempDir()}
 	for name, mutate := range map[string]func(*config.Config){
-		"unknown provider": func(c *config.Config) { c.Provider, c.Model = "gemini", "m" },
-		"missing model":    func(c *config.Config) { c.Provider = "anthropic" },
+		"unknown provider":    func(c *config.Config) { c.Provider, c.Model = "gemini", "m" },
+		"whitespace provider": func(c *config.Config) { c.Provider = "   " },
+		"missing model":       func(c *config.Config) { c.Provider = "anthropic" },
 		"missing key": func(c *config.Config) {
 			c.Provider, c.APIKey, c.BaseURL, c.Model = "anthropic", "", "https://anthropic.invalid/v1", "m"
 		},

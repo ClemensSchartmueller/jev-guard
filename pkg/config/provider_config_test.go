@@ -171,3 +171,42 @@ func TestIsLoopbackBaseURL(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderConfig_LegacyFileKeyRestrictedToTypeSafe(t *testing.T) {
+	clearConfigEnvironment(t)
+	for _, provider := range []string{"typesafe", "openai", "anthropic", "unknown"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := loadUserConfig(t, `{"provider":"`+provider+`","typesafe_api_key":"legacy-ts-key","model":"m"}`)
+			want := ""
+			if provider == ProviderTypeSafe {
+				want = "legacy-ts-key"
+			}
+			if cfg.APIKey != want {
+				t.Errorf("APIKey = %q, want %q", cfg.APIKey, want)
+			}
+			explicit := loadUserConfig(t, `{"provider":"`+provider+`","typesafe_api_key":"legacy-ts-key","api_key":"explicit-key","model":"m"}`)
+			if explicit.APIKey != "explicit-key" {
+				t.Errorf("explicit APIKey = %q", explicit.APIKey)
+			}
+		})
+	}
+	legacy := loadUserConfig(t, `{"typesafe_api_key":"legacy-ts-key"}`)
+	if legacy.APIKey != "legacy-ts-key" {
+		t.Errorf("default provider lost legacy key: %q", legacy.APIKey)
+	}
+}
+
+func TestProviderConfig_WhitespaceProviderDoesNotResolveTypeSafe(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("TYPESAFE_API_KEY", "ts-key")
+	cfg := loadUserConfig(t, `{"provider":"   ","mode":"audit"}`)
+	if cfg.EffectiveProvider() == ProviderTypeSafe || cfg.EffectiveProvider() == "" {
+		t.Errorf("invalid provider resolved to %q", cfg.EffectiveProvider())
+	}
+	if cfg.APIKey != "" || cfg.EffectiveBaseURL() != "" || cfg.EffectiveAPIKeyEnv() != "" {
+		t.Errorf("invalid provider resolved credentials or endpoint: key=%q endpoint=%q env=%q", cfg.APIKey, cfg.EffectiveBaseURL(), cfg.EffectiveAPIKeyEnv())
+	}
+	if cfg.Mode != "enforcing" || len(cfg.Diagnostics) != 1 {
+		t.Errorf("mode=%q diagnostics=%v", cfg.Mode, cfg.Diagnostics)
+	}
+}
