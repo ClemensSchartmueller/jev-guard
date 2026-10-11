@@ -26,7 +26,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **`enforcing`** (default): Actively enforces policy verdicts—blocking catastrophic commands (`DENY`), prompting confirmation for sensitive or moderate operations (`force_ask` in Antigravity, exit code 2 in Claude/Codex), and approving verified actions (`ALLOW`).
   - **`audit`**: Passive monitoring dry-run. Logs every tool call and evaluation result to `.jevguard.log`, but rewrites blocking decisions to `ALLOW` (`[AUDIT-MODE: <decision>]`) so agent workflows are never interrupted.
 - **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
-  - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
+  - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`) by default, or by an OpenAI-compatible or Anthropic model you configure (see [Decision Model Providers](#decision-model-providers)).
   - Evaluates 3 primitives:
     1. `is_workspace_contained` (`Noul`): Probability the operation stays strictly inside workspace roots.
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
@@ -176,9 +176,9 @@ jev-guard eval --cmd "cat .env" --json
 
 ### User-owned security settings
 
-Security settings are read only from `~/.jevguard/.jevguard.json` (on Windows, `%USERPROFILE%\.jevguard\.jevguard.json`). The executable creates this file with enforcing defaults when it is missing and does not overwrite an existing file. If creation fails, it reports the error and exits without evaluating the tool call. This file owns the enforcement mode, API endpoint, model, timeout, API key, audit log path, fastpath, context awareness, sensitive-file patterns, and trusted commands. Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
+Security settings are read only from `~/.jevguard/.jevguard.json` (on Windows, `%USERPROFILE%\.jevguard\.jevguard.json`). The executable creates this file with enforcing defaults when it is missing and does not overwrite an existing file. If creation fails, it reports the error and exits without evaluating the tool call. This file owns the enforcement mode, decision model provider, API endpoint, model, timeout, API key and its environment variable name, audit log path, fastpath, context awareness, sensitive-file patterns, and trusted commands. Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
 
-Repository files named `.jevguard.json` or `jevguard.json` are ignored until their exact contents are explicitly trusted. Even after trust, only additive `sensitive_files` entries are applied. Project values for `mode`, `base_url`, API keys, `fastpath_enabled`, `context_awareness_enabled`, and `trusted_commands` are ignored. Discovery checks the tool call's working directory and walks up to the nearest declared workspace root, inclusive. It also checks declared workspace roots directly. If no workspace root contains the working directory, discovery is bounded by the nearest `.git` directory or file; without one, it checks only the candidate directory. When a hook payload has neither a working directory nor workspace roots, the process working directory is the fallback and uses the same bounds. Target file directories are never used for config discovery.
+Repository files named `.jevguard.json` or `jevguard.json` are ignored until their exact contents are explicitly trusted. Even after trust, only additive `sensitive_files` entries are applied. Project values for `mode`, `provider`, `base_url`, `model`, `response_format`, API keys, `api_key_env`, `fastpath_enabled`, `context_awareness_enabled`, and `trusted_commands` are ignored. Discovery checks the tool call's working directory and walks up to the nearest declared workspace root, inclusive. It also checks declared workspace roots directly. If no workspace root contains the working directory, discovery is bounded by the nearest `.git` directory or file; without one, it checks only the candidate directory. When a hook payload has neither a working directory nor workspace roots, the process working directory is the fallback and uses the same bounds. Target file directories are never used for config discovery.
 
 Relative `audit_log_path` values are anchored to `~/.jevguard`, the directory containing the user config.
 
@@ -253,7 +253,57 @@ Example user config:
 }
 ```
 
-The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. API requests do not follow redirects. `TYPESAFE_API_KEY` supplies credentials; environment variables cannot change mode, endpoint, model, timeout, or other policy settings.
+The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. API requests do not follow redirects. `TYPESAFE_API_KEY` (or the variable named by `api_key_env`) supplies credentials; environment variables cannot change mode, provider, endpoint, model, timeout, or other policy settings.
+
+### Decision Model Providers
+
+TypeSafe System One is the default decision model. You can choose another provider with `provider` in the user config. Existing configs without `provider` keep using TypeSafe and `TYPESAFE_API_KEY` exactly as before.
+
+| `provider` | API | `base_url` meaning and default | Default key variable | `model` |
+| :--- | :--- | :--- | :--- | :--- |
+| `typesafe` (default) | TypeSafe System One | Full endpoint, default `https://api.typesafe.ai/v1/systemone` | `TYPESAFE_API_KEY` | Optional, default `jev-latest` |
+| `openai` | OpenAI-compatible Chat Completions (`POST {base_url}/chat/completions`) | API root, default `https://api.openai.com/v1` | `OPENAI_API_KEY` | Required |
+| `anthropic` | Anthropic Messages (`POST {base_url}/messages`) | API root, default `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` | Required |
+
+The `openai` provider also covers OpenAI-compatible servers. Set `base_url` to the server's API root, for example `https://openrouter.ai/api/v1` (OpenRouter), `http://localhost:11434/v1` (Ollama), `http://localhost:8000/v1` (vLLM), `http://localhost:1234/v1` (LM Studio), or `https://generativelanguage.googleapis.com/v1beta/openai` (Gemini). An API key is optional only when `base_url` is a loopback address. By default the request asks the server to enforce the judgment schema (`response_format` of type `json_schema`). If your server or model supports only JSON mode, set `"response_format": "json_object"`. jev-guard then asks for plain JSON and relies on its own validation. That validation is equally strict in both modes, so an answer that does not match the schema still fails safe to `ASK`. `response_format` applies only to the `openai` provider. Any value other than `json_schema` or `json_object` is ignored with a diagnostic and forces `mode` to `enforcing`.
+
+The `openai` and `anthropic` providers ask the model for the same judgments TypeSafe returns: containment probability, a 0-3 destructive level, a violation category, and intent alignment when a prompt intent is known. jev-guard then applies its normal policy to those judgments. The allow reason names the provider that judged the call, for example "Operation verified safe and contained by the openai decision model". TypeSafe keeps its existing wording. The answer is validated strictly. A missing field, an out-of-range number, an unknown category, a refusal, or truncated output fails safe exactly like an unreachable API: the call becomes an interactive approval (`ASK`, source `policy_failsafe`). An unknown `provider` value or a missing `model` fails safe the same way. jev-guard never falls back to TypeSafe in that case, so your key and tool calls are not sent to a provider you did not select. An unknown `provider` also forces `mode` to `enforcing`.
+
+`api_key_env` names the environment variable that holds the key, for example `OPENROUTER_API_KEY`. When it is unset, the provider's default variable from the table is used. Each provider has its own default, so a `TYPESAFE_API_KEY` is never sent to another vendor. If the variable is empty, `api_key` from the user config is used.
+
+General-purpose models are usually slower than System One. Raise `timeout_ms` (for example to `5000`) when you use a hosted LLM, because a timeout also fails safe to `ASK`.
+
+Example OpenRouter config:
+```json
+{
+  "provider": "openai",
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "model": "openai/gpt-5-mini",
+  "timeout_ms": 5000
+}
+```
+
+Example local Ollama config (no API key needed):
+```json
+{
+  "provider": "openai",
+  "base_url": "http://localhost:11434/v1",
+  "model": "qwen3:8b",
+  "timeout_ms": 10000
+}
+```
+
+Example Anthropic config:
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "timeout_ms": 5000
+}
+```
+
+`jev-guard config show` and `jev-guard doctor` print the effective provider, endpoint, model, and key variable.
 
 ### Recommended `.gitignore` Entries
 
@@ -270,9 +320,12 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 | Setting | Configuration Key | Environment Variable | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **Mode** | `mode` | — | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
-| **API Key** | `api_key` / `typesafe_api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
-| **Base URL** | `base_url` | — | TypeSafe API default | HTTPS endpoint, or loopback HTTP endpoint |
-| **Model** | `model` | — | `"jev-latest"` | System One evaluation model |
+| **Provider** | `provider` | — | `"typesafe"` | Decision model provider: `"typesafe"`, `"openai"` (OpenAI-compatible), or `"anthropic"` |
+| **API Key** | `api_key` / `typesafe_api_key` | `TYPESAFE_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` by provider | `""` | Decision model API key; the environment variable wins over the file |
+| **API Key Variable** | `api_key_env` | — | Provider default | Name of the environment variable that holds the API key |
+| **Response Format** | `response_format` | — | `"json_schema"` | `openai` provider only: `"json_schema"` (server-enforced schema) or `"json_object"` (JSON mode); output is validated locally either way |
+| **Base URL** | `base_url` | — | Provider default | HTTPS endpoint, or loopback HTTP endpoint (full endpoint for TypeSafe, API root otherwise) |
+| **Model** | `model` | — | `"jev-latest"` for TypeSafe | Evaluation model; required for `openai` and `anthropic` |
 | **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fastpath** | `fastpath_enabled` | — | `true` | Enable sub-1ms local fastpath filter |
 | **Context Awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching & intent-aware evaluation |
@@ -283,8 +336,8 @@ To protect your TypeSafe AI credentials and prevent committing local telemetry l
 
 ### Configuration Precedence
 
-1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
-2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
+1. **User config** (`~/.jevguard/.jevguard.json`) owns policy, provider, and endpoint settings.
+2. **Credential environment variable** (`api_key_env`, or the provider default such as `TYPESAFE_API_KEY`) supplies the API key and overrides `api_key`.
 3. **Trusted project config** can add `sensitive_files` only when the canonical path and exact SHA-256 digest match the user trust registry.
 4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, standard sensitive file patterns, and read commands.
 
