@@ -17,8 +17,31 @@ import (
 // DefaultSessionTTL defines how long an inactive session intent remains valid.
 const DefaultSessionTTL = 60 * time.Minute
 
+// Named sub-patterns for abort detection; combined into abortPattern.
+const (
+	// abortAffirmative matches imperatives such as "stop", "please cancel the build", "wait, abort!".
+	abortAffirmative = `(?i)^\s*(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))`
+
+	// abortLeadIn matches optional interjections before a negated imperative,
+	// e.g. "No, don't run this", "Wait, don't do that", "Stop, don't run this".
+	abortLeadIn = `(?:(?:no|wait|stop|hey)(?:[!,.]+\s*|\s+))*`
+
+	// abortNegatedLegacy matches "don't/do not" + proceed-like verbs; any trailing text is accepted
+	// (e.g. "don't proceed with the migration").
+	abortNegatedLegacy = `(?i)^\s*` + abortLeadIn + `(?:don['’]?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute|go\s+ahead)\b`
+
+	// abortNegatedImperative matches "don't/do not/never" + verb + optional vague object,
+	// e.g. "do not run this", "don't push anything", "never delete that".
+	// A specific object ("dont modify package.json") is a scoped instruction, not an abort.
+	// An optional lead-in ("no,", "wait,") and trailing adverb ("yet", "again") are accepted; apostrophes may be ' or ’ (U+2019) or omitted.
+	abortNegatedImperative = `(?i)^\s*` + abortLeadIn + `(?:(?:don['’]?t|do\s+not|never)\s+(?:run|execute|delete|remove|rm|drop|push|commit|deploy|overwrite|change|modify|touch|do|proceed|continue)(?:\s+(?:this|that|it|these|those|anything|everything)(?:\s+(?:command|task|build|process|operation|change|changes))?)?(?:\s+(?:yet|again|now|anymore|for\s+now))?\s*(?:[!.,]|$|\bplease\b))`
+
+	// abortNeverMind matches "never mind" / "nevermind", optionally followed by more text.
+	abortNeverMind = `(?i)^\s*never\s*mind\b`
+)
+
 var (
-	abortPattern       = regexp.MustCompile(`(?i)^\s*(?:(?:please\s+|wait[!,.]*\s*|hey[!,.]*\s*)?(?:stop|cancel|abort|halt|terminate|kill|quit)(?:!(?:\s+.*)?|(?:\s+(?:please|now|immediately|right\s+now|that|it|all|everything|running|execution|operation|(?:the|this)\s+(?:build|task|run|process|command|execution|operation)))?\s*(?:[!.]|$|\bplease\b))|(?:don'?t|do\s+not)\s+(?:do\s+that|run\s+that|proceed|continue|execute)\b)`)
+	abortPattern       = regexp.MustCompile(abortAffirmative + `|` + abortNegatedLegacy + `|` + abortNegatedImperative + `|` + abortNeverMind)
 	safeSessionIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 	reservedWindowsNames = map[string]bool{
