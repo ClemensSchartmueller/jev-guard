@@ -2,6 +2,7 @@ package fastpath
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -29,9 +30,12 @@ func NewFilter(checker BoundaryChecker, cfg *config.Config) *Filter {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
+	// Copy so environment-derived patterns never alias the caller's config slice.
+	sensitiveFiles := append([]string{}, cfg.SensitiveFiles...)
+	sensitiveFiles = append(sensitiveFiles, xdgGitSensitivePatterns(os.Getenv("XDG_CONFIG_HOME"))...)
 	return &Filter{
 		boundaryChecker: checker,
-		sensitiveFiles:  cfg.SensitiveFiles,
+		sensitiveFiles:  sensitiveFiles,
 		trustedCommands: cfg.TrustedCommands,
 	}
 }
@@ -106,6 +110,10 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+	if reason := f.checkResolvedXDGConfig(call); reason != "" {
+		return reason
+	}
+
 	targetRaw := call.TargetPath
 	if isFileURI(targetRaw) {
 		targetRaw = extractFilePathFromURI(targetRaw)
@@ -278,6 +286,95 @@ func isRepoGitConfigPath(p string) bool {
 		}
 	}
 	return false
+}
+
+// checkResolvedXDGConfig resolves equivalent and cwd-relative spellings before
+// trusted reads can allow access to the environment-derived Git config files.
+func (f *Filter) checkResolvedXDGConfig(call *harness.NormalizedToolCall) string {
+	candidates := []string{call.TargetPath}
+	for i, arg := range sensitiveCommandArguments(call.Command) {
+		if i == 0 {
+			continue
+		}
+		candidates = append(candidates, arg)
+		if idx := strings.Index(arg, "="); idx >= 0 {
+			candidates = append(candidates, arg[idx+1:])
+		}
+	}
+	for _, pattern := range f.sensitiveFiles {
+		normalized := strings.ToLower(normalizePathSeparators(pattern))
+		if !isAbsoluteConfigDir(normalized) {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate == "" || isURL(candidate) {
+				continue
+			}
+			if isFileURI(candidate) {
+				candidate = extractFilePathFromURI(candidate)
+			}
+			candidate = strings.ToLower(normalizePathSeparators(candidate))
+			if !isAbsoluteConfigDir(candidate) {
+				if call.Cwd == "" {
+					continue
+				}
+				candidate = path.Join(strings.ToLower(normalizePathSeparators(call.Cwd)), candidate)
+			}
+			if path.Clean(candidate) == path.Clean(normalized) {
+				return "Access to sensitive file or credential pattern: " + pattern
+			}
+		}
+	}
+	return ""
+}
+
+// xdgGitFiles are the Git files that Git reads from $XDG_CONFIG_HOME/git/.
+var xdgGitFiles = []string{"git/config", "git/credentials"}
+
+// xdgGitSensitivePatterns returns sensitive patterns for Git's XDG config files
+// that the static defaults cannot express. Git reads $XDG_CONFIG_HOME/git/config
+// and $XDG_CONFIG_HOME/git/credentials on every platform, including Git for
+// Windows, and falls back to ~/.config when the variable is unset (already
+// covered by the static ".config/git/..." defaults).
+//
+// The returned patterns cover:
+//   - the expanded location when xdgConfigHome is an absolute POSIX, Windows
+//     drive, or UNC path. Relative values are ignored, as the XDG Base
+//     Directory specification requires, so they cannot widen matching to
+//     arbitrary "git/config" fragments;
+//   - unexpanded references to the variable in shell commands, in POSIX
+//     ($VAR, ${VAR}), cmd.exe (%VAR%) and PowerShell ($env:VAR) forms. These
+//     are added regardless of the variable's value because the command is
+//     expanded by the shell, not by jev-guard.
+//
+// The patterns are derived at filter construction rather than added to
+// config.DefaultSensitiveFiles, because defaults are persisted to the user
+// config file and must not capture one process's environment.
+func xdgGitSensitivePatterns(xdgConfigHome string) []string {
+	var patterns []string
+	for _, prefix := range []string{"$xdg_config_home", "${xdg_config_home}", "%xdg_config_home%", "$env:xdg_config_home"} {
+		for _, file := range xdgGitFiles {
+			patterns = append(patterns, prefix+"/"+file)
+		}
+	}
+	dir := normalizePathSeparators(xdgConfigHome)
+	if !isAbsoluteConfigDir(dir) {
+		return patterns
+	}
+	dir = strings.TrimSuffix(path.Clean(dir), "/")
+	for _, file := range xdgGitFiles {
+		patterns = append(patterns, dir+"/"+file)
+	}
+	return patterns
+}
+
+// isAbsoluteConfigDir reports whether a separator-normalized directory is an
+// absolute POSIX path, UNC path, or Windows drive path, independent of the host OS.
+func isAbsoluteConfigDir(dir string) bool {
+	if strings.HasPrefix(dir, "/") {
+		return true
+	}
+	return len(dir) >= 3 && isDriveLetter(dir[0]) && dir[1] == ':' && dir[2] == '/'
 }
 
 func normalizePathSeparators(value string) string {

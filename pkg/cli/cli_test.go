@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +341,77 @@ func TestEvaluateArgs_Status(t *testing.T) {
 	}
 }
 
+func TestEvaluateArgs_StatusReportsUnreadableSessions(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SaveSession(&session.SessionState{SessionID: "ok", Prompt: "Working", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	badPath := session.SessionFilePath("bad")
+	if err := os.WriteFile(badPath, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	action, code := runner.EvaluateArgs([]string{"status"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("expected ActionHandled with code 0, got %v, %d (stderr %q)", action, code, stderr.String())
+	}
+
+	lines := strings.Split(stdout.String(), "\n")
+	hasLine := func(want string) bool {
+		for _, line := range lines {
+			if line == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasLine("  Active Sessions:    1") {
+		t.Errorf("expected exact line %q, got %q", "  Active Sessions:    1", stdout.String())
+	}
+	if !hasLine("  Unreadable Sessions: 1 (tool calls in these sessions are held)") {
+		t.Errorf("expected unreadable count line, got %q", stdout.String())
+	}
+	foundBad := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  - [bad.json] Status: Unreadable, Error: ") {
+			foundBad = true
+		}
+	}
+	if !foundBad {
+		t.Errorf("expected a per-file unreadable line for bad.json, got %q", stdout.String())
+	}
+	if _, err := os.Stat(badPath); err != nil {
+		t.Fatalf("status must not remove unreadable session file: %v", err)
+	}
+}
+
+func TestHandleDoctorUsesHomeSeam(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	fakeHome := t.TempDir()
+	called := false
+	originalHome := userHomeDir
+	userHomeDir = func() (string, error) {
+		called = true
+		return fakeHome, nil
+	}
+	t.Cleanup(func() { userHomeDir = originalHome })
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	action, _ := runner.EvaluateArgs([]string{"doctor", "--offline"})
+	if action != ActionHandled {
+		t.Fatalf("expected ActionHandled, got %v (stderr %q)", action, stderr.String())
+	}
+	if !called {
+		t.Fatal("doctor did not use the userHomeDir seam")
+	}
+}
+
 func newStdinRunner(stdin string) (*Runner, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })
@@ -520,5 +592,79 @@ func TestClearIntent_NoFlagsDoesNotClearAll(t *testing.T) {
 	}
 	if s, _ := session.LoadSession("s1"); s != nil {
 		t.Fatal("--all should clear everything")
+	}
+}
+
+func TestEndTurn_UnreadableSessionIsKept(t *testing.T) {
+	cases := map[string]func(t *testing.T, path string){
+		"corrupt json": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			const id = "u1"
+			path := session.SessionFilePath(id)
+			setup(t, path)
+
+			runner, stdout, stderr := newStdinRunner("")
+			action, code := runner.EvaluateArgs([]string{"end-turn", "--session", id})
+			if action != ActionHandled || code != 0 {
+				t.Fatalf("got %v, %d; want ActionHandled, 0", action, code)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout must be empty, got %q", stdout.String())
+			}
+			if stderr.Len() == 0 {
+				t.Fatal("expected stderr diagnostic")
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("session path should still exist: %v", err)
+			}
+		})
+	}
+}
+
+func TestEvaluateArgs_EvalAndExplainDelegate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	var calls []string
+	runner.Eval = func(args []string, _ io.Reader, _, _ io.Writer) int {
+		calls = append(calls, "eval "+strings.Join(args, " "))
+		return 3
+	}
+	runner.Explain = func(args []string, _ io.Reader, _, _ io.Writer) int {
+		calls = append(calls, "explain "+strings.Join(args, " "))
+		return 4
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"eval", "--cmd", "ls"}, 3},
+		{[]string{"explain", "--cmd", "ls"}, 4},
+	} {
+		if action, code := runner.EvaluateArgs(tc.args); action != ActionHandled || code != tc.code {
+			t.Fatalf("%v: action=%v code=%d", tc.args, action, code)
+		}
+	}
+	if got := strings.Join(calls, "|"); got != "eval --cmd ls|explain --cmd ls" {
+		t.Fatalf("calls = %q", got)
+	}
+
+	runner.Explain = nil
+	if action, code := runner.EvaluateArgs([]string{"explain"}); action != ActionHandled || code != 1 {
+		t.Fatalf("explain without implementation: action=%v code=%d", action, code)
 	}
 }

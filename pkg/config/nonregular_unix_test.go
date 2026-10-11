@@ -51,7 +51,7 @@ func TestInspectProjectConfigRejectsDeviceFiles(t *testing.T) {
 		t.Skipf("device file is unavailable: %v", err)
 	}
 
-	info, err := InspectProjectConfig(devicePath)
+	info, err := inspectProjectConfigIsolated(t, devicePath)
 	if err == nil {
 		t.Fatalf("expected a non-regular device file to be rejected, got %#v", info)
 	}

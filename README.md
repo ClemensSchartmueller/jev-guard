@@ -14,7 +14,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
   - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
   - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
 - **Sub-1ms Local Invariant & Latency Gate**:
-  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `.gitconfig`, `.docker/config.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
+  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `.gitconfig`, `.config/git/config`, `.config/git/credentials`, `.docker/config.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. When `XDG_CONFIG_HOME` is set to an absolute path (POSIX, Windows drive, or UNC; Git for Windows honors it too), `$XDG_CONFIG_HOME/git/config` and `$XDG_CONFIG_HOME/git/credentials` are also protected. Relative values are ignored, per the XDG Base Directory specification. Commands that reference the variable unexpanded (`$XDG_CONFIG_HOME`, `${XDG_CONFIG_HOME}`, `%XDG_CONFIG_HOME%`, `$env:XDG_CONFIG_HOME`) followed by `/git/config` or `/git/credentials` are flagged regardless of its value. These environment-derived patterns are resolved from the hook process environment when the filter is built. They are not written to `.jevguard.json`, so the sensitive-file count reported by `eval` and `doctor` does not include them. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
   - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
   - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
   - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`, `WebFetch`, `WebSearch`) are strictly routed to TypeSafe AI System One for semantic evaluation.
@@ -32,7 +32,7 @@ High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, a
     2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
     3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
 - **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt.
+  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt. If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate fails closed with a `force_ask` hold (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out; `end-turn` likewise keeps the file. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
   - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
   - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
   - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
@@ -127,6 +127,7 @@ cat hook_payload.json | jev-guard ingest
 # End the current reply for the session named in a hook payload on stdin (Claude Code Stop hook).
 # Clears only that session's intent, prints nothing to stdout, and always exits 0.
 # A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it.
+# A session file that cannot be read is also kept, since its abort state is unknown.
 cat stop_payload.json | jev-guard end-turn
 jev-guard end-turn --session "my-session"
 
@@ -137,7 +138,7 @@ jev-guard clear-intent --session="my-session"
 jev-guard clear-intent --all
 jev-guard cache clear
 
-# Display status of active sessions and cache directory
+# Display status of active sessions and cache directory (unreadable session files are listed with their error)
 jev-guard status
 jev-guard cache status
 jev-guard cache
@@ -154,6 +155,8 @@ jev-guard eval --cmd "git diff .env"
 jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
 jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
 jev-guard eval --cmd "cat .env" --json
+jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
+jev-guard explain --cmd "git diff .env"            # shorthand for eval --explain
 ```
 
 > [!NOTE]
@@ -161,14 +164,27 @@ jev-guard eval --cmd "cat .env" --json
 
 `jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fastpath, TypeSafe, policy, harness formatting):
 
-- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool (`file_path`, or `path` for Glob/Grep/LS); `--payload FILE` uses a raw hook JSON payload.
+- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool in a Claude Code-shaped payload, passing the target under the tool's canonical path argument (`TargetFile` for `write_to_file`/`replace_file_content`, `AbsolutePath` for `view_file`, `notebook_path` for `NotebookEdit`, `path` for Glob/Grep/LS, otherwise `file_path`); `--payload FILE` uses a raw hook JSON payload of any harness, which is the way to reproduce an exact Antigravity or Codex call.
 - `--cwd DIR` sets the working directory (default: current directory).
+- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
 - `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
 - `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
-- Boolean flags accept explicit values such as `--offline=false` and `--json=true`. String flags require a non-empty value; use `--cmd=VALUE` for a command beginning with `--`.
+- `jev-guard explain ...` is shorthand for `jev-guard eval --explain ...`; it rejects `--json` and `--explain`.
+- Flags take values as `--flag value` or `--flag=value`. Boolean flags accept explicit values such as `--offline=false` and `--json=true` (`false`/`0` disables). A string flag never consumes a following `--option` as its value: `--cmd --offline` is a usage error. To pass a literal value beginning with `--`, use the `=` form, e.g. `--cmd=--version`. Each flag may be given only once.
 - `eval` never writes session state, ingests intents, or writes audit-log entries.
-- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); non-zero (`2`) on usage errors or unreadable payloads.
+- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); `2` on usage errors or unreadable payloads, with a `jev-guard eval: usage error: ...` diagnostic on stderr and nothing on stdout.
+
+Boundary fields in `--json` output:
+
+| `boundary_status` | Meaning | `boundary_contained` |
+| :--- | :--- | :--- |
+| `contained` | The target resolved inside the workspace. | `true` |
+| `escaped` | The target is outside the workspace or could not be resolved. | `false` |
+| `no_target` | The call has no target path (e.g. a shell command); treated as contained, as in the hook. | `true` |
+| `skipped` | The boundary stage did not run because a stop/cancel `--intent` held the call as an aborted session. | `null` |
+
+Use `boundary_status` to tell a skipped check from an uncontained target; `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
 
 ---
 
