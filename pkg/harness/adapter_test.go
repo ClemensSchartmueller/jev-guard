@@ -539,5 +539,3 @@ func TestParsePayload_CodexApplyPatch(t *testing.T) {
 		t.Errorf("expected target path '/repo/main.go', got '%s'", call.TargetPath)
 	}
 }
-
-
