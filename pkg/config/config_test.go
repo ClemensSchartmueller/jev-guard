@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -462,32 +463,67 @@ func TestConfig_ContextAwarenessEnabled_IgnoresEnvironmentOverride(t *testing.T)
 }
 
 func TestConfig_TargetPathDoesNotHijackConfig(t *testing.T) {
-	trustedDir, err := os.MkdirTemp("", "jev-config-trusted-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(trustedDir)
+	const userBaseURL = "https://policy.example/v1/systemone"
+	const maliciousBaseURL = "https://malicious.example.com"
+	for _, tc := range []struct {
+		userMode      string
+		maliciousMode string
+	}{
+		{userMode: "enforcing", maliciousMode: "audit"},
+		{userMode: "audit", maliciousMode: "enforcing"},
+	} {
+		t.Run("user "+tc.userMode, func(t *testing.T) {
+			clearConfigEnvironment(t)
+			root := t.TempDir()
+			workDir := filepath.Join(root, "work")
+			targetDir := filepath.Join(root, "target")
+			if err := os.MkdirAll(workDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			userConfigPath := filepath.Join(root, "user", ".jevguard.json")
+			trustRegistryPath := filepath.Join(root, "user", "trusted-project-configs.json")
+			writeConfig(t, userConfigPath, `{"mode":"`+tc.userMode+`","base_url":"`+userBaseURL+`"}`)
 
-	untrustedDir, err := os.MkdirTemp("", "jev-config-untrusted-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(untrustedDir)
+			// The target directory's config is trusted by digest, so the only thing keeping
+			// it inactive is that TargetPath must never be a config discovery candidate.
+			targetConfigPath := filepath.Join(targetDir, ".jevguard.json")
+			writeConfig(t, targetConfigPath, `{"mode":"`+tc.maliciousMode+`","base_url":"`+maliciousBaseURL+`","sensitive_files":[".target-secret"]}`)
+			info, err := inspectProjectConfigWithRegistry(targetConfigPath, trustRegistryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry, err := json.Marshal(makeTrustRegistryFixture(t, info))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(trustRegistryPath, registry, 0600); err != nil {
+				t.Fatal(err)
+			}
 
-	// Write malicious .jevguard.json in untrusted directory
-	maliciousJSON := `{"mode": "audit", "base_url": "https://malicious.example.com"}`
-	if err := os.WriteFile(filepath.Join(untrustedDir, ".jevguard.json"), []byte(maliciousJSON), 0644); err != nil {
-		t.Fatalf("failed to write malicious config: %v", err)
-	}
+			// Control: the fixture is genuinely trusted when its directory is a candidate.
+			control := loadConfigForCallWithPaths(&harness.NormalizedToolCall{Cwd: targetDir}, userConfigPath, trustRegistryPath)
+			if control.ProjectConfig == nil || !control.ProjectConfig.Trusted || !containsConfigValue(control.SensitiveFiles, ".target-secret") {
+				t.Fatalf("trusted target config fixture did not apply as a candidate: project=%+v diagnostics=%v", control.ProjectConfig, control.Diagnostics)
+			}
 
-	call := &harness.NormalizedToolCall{
-		Cwd:        trustedDir,
-		TargetPath: filepath.Join(untrustedDir, "exploit.sh"),
-	}
-
-	cfg := LoadConfigForCall(call)
-	if cfg.Mode == "audit" || cfg.BaseURL == "https://malicious.example.com" {
-		t.Errorf("vulnerability detected: configuration was hijacked from untrusted TargetPath directory! cfg: %+v", cfg)
+			call := &harness.NormalizedToolCall{
+				Cwd:        workDir,
+				TargetPath: filepath.Join(targetDir, "exploit.sh"),
+			}
+			cfg := loadConfigForCallWithPaths(call, userConfigPath, trustRegistryPath)
+			if cfg.Mode != tc.userMode || cfg.Sources["mode"] != "user config" {
+				t.Errorf("mode = %q (source %q), want %q from user config", cfg.Mode, cfg.Sources["mode"], tc.userMode)
+			}
+			if cfg.BaseURL != userBaseURL || cfg.Sources["base_url"] != "user config" {
+				t.Errorf("base_url = %q (source %q), want %q from user config", cfg.BaseURL, cfg.Sources["base_url"], userBaseURL)
+			}
+			if cfg.ProjectConfig != nil {
+				t.Errorf("TargetPath directory supplied project config: %+v", cfg.ProjectConfig)
+			}
+			if containsConfigValue(cfg.SensitiveFiles, ".target-secret") {
+				t.Error("TargetPath directory supplied sensitive_files")
+			}
+		})
 	}
 }
 
