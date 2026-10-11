@@ -51,6 +51,7 @@ func runGate() int {
 	}
 
 	if cfg.IsContextAwarenessEnabled() {
+		session.SetSessionTTL(cfg.IntentTTL())
 		sessionID := call.SessionID
 		if sessionID == "" {
 			sessionID = "default"
@@ -95,12 +96,38 @@ func readStandardInput() ([]byte, error) {
 type gateTrace struct {
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
+	BoundaryRan      bool
 	Contained        bool
 	SemanticRan      bool
 	Judgments        *evaluator.JevJudgments
 	EvalErr          error
 	WouldSendToJudge bool
 	Final            *harness.EvaluationResult
+}
+
+type boundaryResult struct {
+	contained bool
+	err       error
+}
+
+// cachedBoundaryChecker shares path resolution between the trace and fastpath
+// for one evaluation. Distinct targets (including URI forms) stay independent.
+type cachedBoundaryChecker struct {
+	checker fastpath.BoundaryChecker
+	results map[[2]string]boundaryResult
+}
+
+func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error) {
+	key := [2]string{target, cwd}
+	if result, ok := c.results[key]; ok {
+		return result.contained, result.err
+	}
+	contained, err := c.checker.IsPathContained(target, cwd)
+	if c.results == nil {
+		c.results = make(map[[2]string]boundaryResult)
+	}
+	c.results[key] = boundaryResult{contained: contained, err: err}
+	return contained, err
 }
 
 func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
@@ -114,9 +141,10 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
-		checker = resolver
+		checker = &cachedBoundaryChecker{checker: resolver}
 	}
-	trace.Contained = checkWorkspaceBoundary(call, resolver)
+	trace.BoundaryRan = true
+	trace.Contained = checkWorkspaceBoundary(call, checker)
 
 	if cfg.IsFastpathEnabled() {
 		trace.FastpathRan = true
@@ -137,23 +165,92 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	trace.Judgments, trace.EvalErr = performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
-	resolved := pol.Resolve(trace.Judgments, trace.Contained, trace.EvalErr)
+	resolved := pol.ResolveWithEvidence(trace.Judgments, policy.BoundaryEvidence{
+		Contained:    trace.Contained,
+		PathVerified: isLocalPathVerified(call, trace.Contained),
+	}, trace.EvalErr)
 	trace.Final = applyAuditMode(resolved, cfg.Mode)
 	return trace
 }
 
-func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
+func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
 	if strings.TrimSpace(call.TargetPath) == "" {
 		return true
 	}
-	if resolver == nil {
+	if checker == nil {
 		return false
 	}
-	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
+	contained, err := checker.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {
 		return false
 	}
 	return contained
+}
+
+// singleTargetFileTools maps each allowlisted file tool to its canonical path
+// argument. A call is only verified when TargetPath came from that argument
+// and no other path-like argument is present, so a payload cannot smuggle a
+// higher-priority in-workspace key past the resolver while the tool acts on
+// its real (out-of-workspace) argument.
+var singleTargetFileTools = map[string]string{
+	"Read": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path",
+	"NotebookEdit":  "notebook_path",
+	"write_to_file": "TargetFile", "replace_file_content": "TargetFile", "view_file": "AbsolutePath",
+}
+
+// executionSensitiveDirs are in-workspace directories whose contents execute
+// code or configure agents/hooks; writes there are never locally verified.
+var executionSensitiveDirs = map[string]bool{
+	".git": true, ".github": true, ".husky": true, ".devcontainer": true,
+	".claude": true, ".codex": true, ".cursor": true, ".gemini": true, ".agent": true,
+	".agents": true, ".windsurf": true, ".vscode": true, ".idea": true, ".jevguard": true,
+}
+
+// executionSensitiveFiles are basenames of agent instruction/config files.
+var executionSensitiveFiles = map[string]bool{
+	"claude.md": true, "agents.md": true, "gemini.md": true, ".mcp.json": true, ".envrc": true,
+}
+
+// isExecutionSensitivePath reports whether target lies in a directory or file
+// that runs code or configures the agent. Matching is case-insensitive and
+// accepts both slash styles.
+func isExecutionSensitivePath(target string) bool {
+	segments := strings.Split(strings.ReplaceAll(target, "\\", "/"), "/")
+	for i, seg := range segments {
+		seg = strings.ToLower(strings.TrimSpace(seg))
+		if executionSensitiveDirs[seg] {
+			return true
+		}
+		if i == len(segments)-1 && executionSensitiveFiles[seg] {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalPathVerified reports whether the local resolver positively proved a
+// filesystem target is inside the workspace. Shell commands, empty targets
+// (where checkWorkspaceBoundary is vacuously true), URLs, mixed path
+// arguments and execution-sensitive paths never qualify.
+func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool {
+	key, ok := singleTargetFileTools[call.ToolName]
+	target := strings.TrimSpace(call.TargetPath)
+	if !contained || !ok || target == "" || strings.TrimSpace(call.Command) != "" || strings.Contains(target, "://") {
+		return false
+	}
+	raw, isString := call.RawArgs[key].(string)
+	if !isString || strings.TrimSpace(raw) != target {
+		return false
+	}
+	for _, k := range harness.PathArgKeys {
+		if k == key {
+			continue
+		}
+		if _, present := call.RawArgs[k]; present {
+			return false
+		}
+	}
+	return !isExecutionSensitivePath(target)
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {

@@ -88,9 +88,88 @@ func TestEvalJSONParses(t *testing.T) {
 }
 
 func TestEvalUsageErrors(t *testing.T) {
-	for _, args := range [][]string{{}, {"--tool", "Write"}, {"--cmd", "ls", "--payload", "x"}, {"--bogus"}} {
-		if code, _, _ := runEvalForTest(t, args...); code == 0 {
-			t.Errorf("args %v: expected non-zero exit", args)
+	for _, args := range [][]string{
+		{}, {"--tool", "Write"}, {"--cmd", "ls", "--payload", "x"}, {"--bogus"},
+		{"--cmd", "--offline", "--json"}, {"--cmd", "ls", "--cwd", "--offline"},
+		{"--tool", "Write", "--target", "--offline"}, {"--payload", "--offline"},
+		{"--tool", "--offline", "--target", "x"}, {"--cmd=", "--payload=x"},
+		{"--cmd", "ls", "--offline=invalid"}, {"--cmd", "ls", "--json="},
+		{"--cmd", "ls", "--explain=nope"},
+	} {
+		if code, out, _ := runEvalForTest(t, args...); code != 2 || out != "" {
+			t.Errorf("args %v: expected usage exit 2 and empty stdout, got %d, %q", args, code, out)
+		}
+	}
+}
+
+func TestEvalBooleanFlagValues(t *testing.T) {
+	for _, flag := range []string{"--offline", "--explain", "--json"} {
+		for _, value := range []string{"true", "false"} {
+			o, err := parseEvalArgs([]string{"--cmd=git status", flag + "=" + value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]bool{"--offline": o.offline, "--explain": o.explain, "--json": o.asJSON}[flag]
+			if got != (value == "true") {
+				t.Errorf("%s=%s parsed as %t", flag, value, got)
+			}
+		}
+	}
+	// Explicit assignment still supports literal values beginning with --.
+	if o, err := parseEvalArgs([]string{"--cmd=--offline"}); err != nil || o.cmd != "--offline" {
+		t.Fatalf("explicit command value: options=%v err=%v", o, err)
+	}
+}
+
+func TestEvalReportsAppliedProjectConfig(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("TYPESAFE_API_KEY", "eval-secret-never-print")
+	projectPath := filepath.Join(ws, ".jevguard.json")
+	if err := os.WriteFile(projectPath, []byte(`{"sensitive_files":["private.data"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := config.InspectProjectConfig(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := json.Marshal(map[string]interface{}{
+		"version": 1, "entries": []config.ProjectConfigTrust{info.TrustRecord},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryPath := config.TrustRegistryPath()
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registry, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []string{"--explain", "--json"} {
+		var out, errb bytes.Buffer
+		code := runEval([]string{"--tool", "view_file", "--target", "private.data", "--cwd", ws, "--offline", format}, strings.NewReader(""), &out, &errb)
+		if code != 0 || errb.Len() != 0 {
+			t.Fatalf("%s: code=%d stderr=%q", format, code, errb.String())
+		}
+		if strings.Contains(out.String(), "eval-secret-never-print") {
+			t.Fatal("report exposed credentials")
+		}
+		if format == "--json" {
+			var rep evalReport
+			if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+				t.Fatal(err)
+			}
+			if rep.ProjectConfigPath != info.ConfigPath || !rep.ProjectConfigTrusted || rep.Source != "fastpath_sensitive" || !strings.Contains(rep.SensitiveFilesSource, "trusted project config") {
+				t.Fatalf("applied project config missing from report: %+v", rep)
+			}
+		} else {
+			for _, want := range []string{info.ConfigPath, "trusted: true, applied", "trusted project config", "private.data"} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("explanation missing %q: %s", want, out.String())
+				}
+			}
 		}
 	}
 }
@@ -177,5 +256,75 @@ func TestEvalIntentIgnoredWhenContextAwarenessDisabled(t *testing.T) {
 	out = runEvalWithConfig(t, cfg, "--cmd", "ls", "--intent", "stop", "--offline", "--explain", "--cwd", ws)
 	if strings.Contains(out, "session_aborted") || !strings.Contains(out, "context_awareness_enabled is false") {
 		t.Errorf("abort intent should be ignored with a reason:\n%s", out)
+	}
+}
+
+func TestEvalIntentUsageErrors(t *testing.T) {
+	for _, suffix := range [][]string{
+		{"--intent"},
+		{"--intent", "--offline", "--json"},
+		{"--intent", ""},
+		{"--intent", "   "},
+		{"--intent="},
+		{"--intent=   "},
+	} {
+		args := append([]string{"--cmd", "cat .env"}, suffix...)
+		t.Run(strings.Join(suffix, " "), func(t *testing.T) {
+			code, out, errOut := runEvalForTest(t, args...)
+			if code != 2 || out != "" || !strings.Contains(errOut, "--intent") {
+				t.Fatalf("expected intent usage error: code=%d stdout=%q stderr=%q", code, out, errOut)
+			}
+		})
+	}
+}
+
+func TestEvalIntentAbortReportsSkippedBoundary(t *testing.T) {
+	ws := t.TempDir()
+	for _, mode := range []string{"enforcing", "audit"} {
+		t.Run(mode, func(t *testing.T) {
+			out := runEvalWithConfig(t, `{"mode":"`+mode+`"}`, "--tool", "Write", "--target", filepath.Join(ws, "inside.txt"), "--cwd", ws, "--intent", "stop", "--offline", "--json")
+			var rep map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &rep); err != nil {
+				t.Fatal(err)
+			}
+			contained, present := rep["boundary_contained"]
+			if !present || contained != nil {
+				t.Fatalf("aborted boundary should be explicitly null: %s", out)
+			}
+			want := applyAuditMode(abortedSessionResult(), mode)
+			if rep["decision"] != string(want.Decision) || rep["source"] != want.Source || rep["reason"] != want.Reason {
+				t.Fatalf("abort result differs from hook: %s", out)
+			}
+			for _, field := range []string{"fastpath_ran", "typesafe_ran", "would_send_to_typesafe"} {
+				if rep[field] != false {
+					t.Errorf("%s should be false after abort: %s", field, out)
+				}
+			}
+		})
+	}
+}
+
+func TestEvalJSONBoundaryContainment(t *testing.T) {
+	ws := t.TempDir()
+	for _, tc := range []struct {
+		name, target string
+		contained    bool
+	}{
+		{"inside", filepath.Join(ws, "inside.txt"), true},
+		{"outside", filepath.Join(t.TempDir(), "outside.txt"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out, errOut := runEvalForTest(t, "--tool", "Read", "--target", tc.target, "--cwd", ws, "--offline", "--json")
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, errOut)
+			}
+			var rep evalReport
+			if err := json.Unmarshal([]byte(out), &rep); err != nil {
+				t.Fatal(err)
+			}
+			if rep.Contained == nil || *rep.Contained != tc.contained {
+				t.Fatalf("incorrect containment report: %s", out)
+			}
+		})
 	}
 }
