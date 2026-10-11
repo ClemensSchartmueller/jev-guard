@@ -23,8 +23,25 @@ func NewDefaultPolicy() *Policy {
 	}
 }
 
+// BoundaryEvidence carries the deterministic local boundary facts for a tool call.
+type BoundaryEvidence struct {
+	// Contained is the local resolver's containment result.
+	Contained bool
+	// PathVerified is true only when the local resolver positively proved a
+	// concrete filesystem target path (non-empty, not a URL, not a shell command)
+	// is inside the workspace. Contained alone can be true vacuously.
+	PathVerified bool
+}
+
 // Resolve translates Jev judgments, boundary containment, and errors into a final Decision.
+// It treats containment as unverified; use ResolveWithEvidence for verified file-path proofs.
 func (p *Policy) Resolve(j *evaluator.JevJudgments, boundaryContained bool, evalErr error) *harness.EvaluationResult {
+	return p.ResolveWithEvidence(j, BoundaryEvidence{Contained: boundaryContained}, evalErr)
+}
+
+// ResolveWithEvidence is like Resolve but accepts richer local boundary evidence.
+func (p *Policy) ResolveWithEvidence(j *evaluator.JevJudgments, ev BoundaryEvidence, evalErr error) *harness.EvaluationResult {
+	boundaryContained := ev.Contained
 	if evalErr != nil {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
@@ -43,10 +60,10 @@ func (p *Policy) Resolve(j *evaluator.JevJudgments, boundaryContained bool, eval
 		}
 	}
 
-	return p.evaluateJudgments(j)
+	return p.evaluateJudgments(j, ev.PathVerified)
 }
 
-func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.EvaluationResult {
+func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool) *harness.EvaluationResult {
 	minConfidence := p.MinIntentConfidence
 	if minConfidence <= 0 {
 		minConfidence = 0.70
@@ -77,7 +94,10 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments) *harness.Evaluatio
 		return violationResult
 	}
 
-	if j.IsWorkspaceContained < p.MinContainedThreshold {
+	// For pure file-path operations the deterministic local resolver is authoritative:
+	// the model's containment probability is a guess and must not override a proof.
+	// Only this check is skipped; a model-reported workspace_escape category still asks above.
+	if !pathVerified && j.IsWorkspaceContained < p.MinContainedThreshold {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     fmt.Sprintf("Potential workspace escape (containment probability: %.2f)", j.IsWorkspaceContained),

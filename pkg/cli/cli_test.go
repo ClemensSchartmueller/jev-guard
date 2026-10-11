@@ -2,8 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"jev-guard/pkg/session"
 )
@@ -368,7 +370,7 @@ func TestEndTurn_ClearsOnlyNamedSession(t *testing.T) {
 	}
 }
 
-func TestEndTurn_ExplicitSessionFlagAndAbortCleared(t *testing.T) {
+func TestEndTurn_ExplicitSessionFlagKeepsAbort(t *testing.T) {
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
 	_ = session.SaveSession(&session.SessionState{SessionID: "x", Prompt: "stop"})
 	_ = session.SaveSession(&session.SessionState{SessionID: "y", Prompt: "keep"})
@@ -379,11 +381,97 @@ func TestEndTurn_ExplicitSessionFlagAndAbortCleared(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout must be empty, got %q", stdout.String())
 	}
-	if s, _ := session.LoadSession("x"); s != nil {
-		t.Fatal("aborted session x should be cleared")
+	if s, _ := session.LoadSession("x"); s == nil || !s.Aborted {
+		t.Fatal("aborted session x must survive end-turn")
 	}
 	if s, _ := session.LoadSession("y"); s == nil {
 		t.Fatal("session y must survive")
+	}
+
+	_ = session.SaveSession(&session.SessionState{SessionID: "z", Prompt: "do it"})
+	runner, _, _ = newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"end-turn", "--session", "z"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if s, _ := session.LoadSession("z"); s != nil {
+		t.Fatal("non-aborted session z should be cleared")
+	}
+}
+
+func TestEndTurn_PayloadWithoutSessionIDUsesDefault(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "default", Prompt: "p"})
+	_ = session.SaveSession(&session.SessionState{SessionID: "other", Prompt: "p"})
+	runner, stdout, _ := newStdinRunner(`{"hook_event_name":"Stop"}`)
+	action, code := runner.EvaluateArgs([]string{"end-turn"})
+	if action != ActionHandled || code != 0 {
+		t.Fatalf("got %v, %d", action, code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout must be empty, got %q", stdout.String())
+	}
+	if s, _ := session.LoadSession("default"); s != nil {
+		t.Fatal("session default should be cleared")
+	}
+	if s, _ := session.LoadSession("other"); s == nil {
+		t.Fatal("session other must survive")
+	}
+}
+
+// neverClosedStdinRunner returns a runner whose stdin never delivers data or
+// EOF, with a short read timeout restored after the test.
+func neverClosedStdinRunner(t *testing.T) (*Runner, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	oldTimeout := stdinReadTimeout
+	stdinReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { stdinReadTimeout = oldTimeout })
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	runner.Stdin = pr
+	return runner, &stdout, &stderr
+}
+
+func TestEndTurn_NeverClosedStdinDoesNotHang(t *testing.T) {
+	runner, _, _ := neverClosedStdinRunner(t)
+	_ = session.SaveSession(&session.SessionState{SessionID: "default", Prompt: "p"})
+	done := make(chan int, 1)
+	go func() {
+		_, code := runner.EvaluateArgs([]string{"end-turn"})
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung")
+	}
+	if s, _ := session.LoadSession("default"); s == nil {
+		t.Fatal("session default must survive when stdin times out")
+	}
+}
+
+func TestClearIntent_NeverClosedStdinDoesNotHang(t *testing.T) {
+	runner, _, stderr := neverClosedStdinRunner(t)
+	done := make(chan int, 1)
+	go func() {
+		_, code := runner.EvaluateArgs([]string{"clear-intent"})
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("expected exit 1, got %d", code)
+		}
+		if !strings.Contains(stderr.String(), "--all") {
+			t.Fatalf("expected --all usage on stderr, got %q", stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung")
 	}
 }
 
