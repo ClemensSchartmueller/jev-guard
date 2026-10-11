@@ -158,7 +158,89 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 			}
 		}
 	}
+	return checkRepoGitConfig(targetRaw, call.Command, call.Cwd)
+}
+
+// repoGitConfigReason is reported for Git config files inside a repository's Git directory
+// that the ".git/config" pattern cannot express: submodule and worktree configs, and paths
+// that only resolve into the Git directory relative to the working directory.
+const repoGitConfigReason = "Access to repository Git config file"
+
+// checkRepoGitConfig applies the built-in repository Git config rule to the target path and
+// to every path-like command argument. Relative paths are also resolved against cwd so that
+// "config" run from inside a .git directory is recognised.
+func checkRepoGitConfig(target, command, cwd string) string {
+	if isRepoGitConfigCandidate(target, cwd) {
+		return repoGitConfigReason
+	}
+	tokens := strings.Fields(command)
+	for i, token := range tokens {
+		// Skip the program name and Git subcommands ("git config") so that running
+		// git from inside a .git directory is not mistaken for naming the file.
+		if i == 0 || strings.EqualFold(strings.Trim(tokens[i-1], `"'`), "git") {
+			continue
+		}
+		arg := strings.Trim(token, `"'`)
+		if isRepoGitConfigCandidate(arg, cwd) {
+			return repoGitConfigReason
+		}
+		if idx := strings.Index(arg, "="); idx >= 0 && isRepoGitConfigCandidate(strings.Trim(arg[idx+1:], `"'`), cwd) {
+			return repoGitConfigReason
+		}
+	}
 	return ""
+}
+
+func isRepoGitConfigCandidate(p, cwd string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || isURL(p) {
+		return false
+	}
+	if isFileURI(p) {
+		p = extractFilePathFromURI(p)
+	}
+	p = strings.ToLower(normalizePathSeparators(p))
+	if isRepoGitConfigPath(p) {
+		return true
+	}
+	cwd = strings.ToLower(normalizePathSeparators(strings.TrimSpace(cwd)))
+	if cwd == "" || isAbsoluteSlashPath(p) {
+		return false
+	}
+	return isRepoGitConfigPath(path.Join(cwd, p))
+}
+
+func isAbsoluteSlashPath(p string) bool {
+	return strings.HasPrefix(p, "/") || (len(p) >= 2 && isDriveLetter(p[0]) && p[1] == ':')
+}
+
+// isRepoGitConfigPath reports whether a lower-case, slash-separated path names a config
+// file inside a Git directory (".git" or a bare "name.git"):
+//
+//	<gitdir>/config, <gitdir>/config.worktree
+//	<gitdir>/worktrees/<name>/config.worktree
+//	<gitdir>/modules/<name...>/config, <gitdir>/modules/<name...>/config.worktree
+func isRepoGitConfigPath(p string) bool {
+	segments := strings.Split(path.Clean(p), "/")
+	for i, seg := range segments {
+		if !strings.HasSuffix(seg, ".git") {
+			continue
+		}
+		rest := segments[i+1:]
+		if len(rest) == 0 {
+			continue
+		}
+		last := rest[len(rest)-1]
+		switch {
+		case len(rest) == 1 && (last == "config" || last == "config.worktree"):
+			return true
+		case rest[0] == "worktrees" && len(rest) == 3 && last == "config.worktree":
+			return true
+		case rest[0] == "modules" && len(rest) >= 3 && (last == "config" || last == "config.worktree"):
+			return true
+		}
+	}
+	return false
 }
 
 func normalizePathSeparators(value string) string {

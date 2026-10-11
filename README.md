@@ -214,11 +214,19 @@ The built-in `.git/config` sensitive-file pattern asks for confirmation (`ASK`, 
 - File tools that read, write, or edit the file (`Read`, `Write`, `Edit`, `view_file`, `write_to_file`, `file://` URIs, and so on).
 - Shell commands that name the file, such as `cat .git/config`, `type .git\config`, `Get-Content C:\repo\.git\config`, `git config --file .git/config ...`, or `git log -- .git/config`. A trusted command prefix does not override the prompt.
 
-Matching ignores case and treats `/` and `\` as equivalent. It is a substring match, so bare-repository configs (`repo.git/config`) and siblings such as `.git/config.lock` also prompt. Paths that only look similar, such as `.github/config.yml` or `internal/git/config.go`, are not affected.
+Matching ignores case and treats `/` and `\` as equivalent. The `.git/config` pattern is a substring match, so bare-repository configs (`repo.git/config`) and siblings such as `.git/config.lock` and `.git/config.worktree` also prompt. A built-in structural rule also covers the Git config files that a substring cannot express. These matches are reported as `Access to repository Git config file`:
+
+- Submodule configs: `.git/modules/<name...>/config` and `.git/modules/<name...>/config.worktree`, including nested submodules and names that contain `/`.
+- Linked worktree configs: `.git/worktrees/<name>/config.worktree`.
+- Relative paths that only reach a Git directory when joined with the working directory. Examples are `cat config` run from `repo/.git`, `../config` run from `.git/hooks`, and `config` run from a bare `repo.git`. Inside a command, the program name and the word after `git` are not treated as paths, so `git config --list` run from inside `.git` is unaffected.
+
+Any path segment that ends in `.git` counts as a Git directory. Paths that only look similar, such as `.github/config.yml`, `internal/git/config.go`, `src/modules/lib/config`, or `config` in a working tree, are not affected.
 
 The prompt does not depend on what the file contains. A file with a credential-free `[core]` section prompts the same way as one with `url = https://user:token@host/repo.git`. When the session has an active user intent, the fast path does not prompt. It defers to TypeSafe AI semantic evaluation, as it does for every sensitive file.
 
 Git CLI commands that do not name the file are outside this rule. Examples are `git config --get remote.origin.url`, `git config --local --list`, `git remote -v`, and `git remote set-url`. They are not trusted commands, so the fast path never auto-allows them. Instead, TypeSafe AI evaluates them semantically.
+
+`git remote -v` and `git config --list` can print a credential embedded in a remote URL, yet they deliberately stay with semantic evaluation. Agents run `git remote -v` routinely to identify a repository's host and owner, and most remotes carry no credentials. Prompting on it would add the most frequent prompt of this policy while rarely protecting a secret. A narrow rule would also be incomplete. The same URL is printed by `git remote show`, `git remote get-url`, `git ls-remote --get-url`, `git config --get-regexp`, `git config --get remote.<name>.url`, `git submodule foreach`, and verbose fetch or push output. Guarding a few of these would suggest coverage that does not exist. The reliable mitigation is to keep credentials out of remote URLs and use a credential helper.
 
 **Why this policy.** We considered three alternatives:
 
@@ -226,7 +234,7 @@ Git CLI commands that do not name the file are outside this rule. Examples are `
 - *Ask on reads but allow writes or `git config` usage.* This has the same code-execution problem for writes. Matching on `git config` subcommands would also mean parsing every Git flag form and config scope locally, which belongs in semantic evaluation.
 - *Never ask, rely on semantic evaluation.* Without a user intent, a read tool is auto-allowed by the fast path. Embedded tokens would then reach the agent with no confirmation.
 
-**Trade-off.** Agents seldom open `.git/config` directly. They use the Git CLI, which this rule does not affect. The extra prompts are therefore limited to deliberate direct access, including harmless reads of credential-free config. This rule does not yet cover submodule configs (`.git/modules/<name>/config`), worktree configs (`config.worktree`), or relative paths like `config` when the working directory is already `.git`.
+**Trade-off.** Agents seldom open `.git/config` directly. They use the Git CLI, which this rule does not affect. The extra prompts are therefore limited to deliberate direct access, including harmless reads of credential-free config. Because any segment ending in `.git` counts as a Git directory, a normal checkout in a folder named like `dotfiles.git` also prompts for its `config` file. Relative paths resolve only against the call's working directory, so a shell `cd .git && cat config` inside a single command is not resolved locally and goes to semantic evaluation.
 
 ### Operating Modes
 
