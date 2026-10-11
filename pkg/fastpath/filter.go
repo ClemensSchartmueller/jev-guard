@@ -57,6 +57,15 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
+	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     "Read target cannot be verified from tool arguments",
+			Source:     "fastpath_boundary",
+			Confidence: 1.0,
+		}
+	}
+
 	if reason := f.checkSensitive(call); reason != "" {
 		if strings.TrimSpace(call.UserIntent) != "" {
 			// Defer to TypeSafe AI for semantic intent verification.
@@ -566,6 +575,32 @@ func isSafeReadTool(call *harness.NormalizedToolCall) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// A trusted read must act on the same single target that normalization and
+// boundary checks inspect. Known file tools also require their canonical key.
+func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
+	target := strings.TrimSpace(call.TargetPath)
+	if target == "" || isURL(target) || (isCustomURI(target) && !isFileURI(target)) {
+		return false
+	}
+	// Directly constructed calls are used by internal callers and tests. Hook
+	// payloads with arguments always retain RawArgs after ParsePayload.
+	if call.RawArgs == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(call.ToolName)) {
+	case "read", "view":
+		return harness.HasSingleTargetArg(call, "file_path")
+	case "view_file":
+		return harness.HasSingleTargetArg(call, "AbsolutePath")
+	case "read_file", "readlocalfile":
+		return harness.HasSingleTargetArg(call, "file_path", "path")
+	case "read_resource":
+		return harness.HasSingleTargetArg(call, "Uri", "uri")
+	default:
+		return harness.HasSingleTargetArg(call)
 	}
 }
 

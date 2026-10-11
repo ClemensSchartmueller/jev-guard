@@ -180,6 +180,42 @@ var PathArgKeys = []string{
 	"dest", "destination", "source", "src",
 }
 
+// HasSingleTargetArg requires the normalized target to come from exactly one
+// path-like argument. allowedKeys constrains tools with a known target field;
+// an empty list accepts any single path-like argument.
+func HasSingleTargetArg(call *NormalizedToolCall, allowedKeys ...string) bool {
+	if call == nil || call.RawArgs == nil || strings.TrimSpace(call.TargetPath) == "" {
+		return false
+	}
+	var selected string
+	for _, key := range PathArgKeys {
+		value, present := call.RawArgs[key]
+		if !present {
+			continue
+		}
+		if selected != "" {
+			return false
+		}
+		selected = key
+		str, ok := value.(string)
+		if !ok || strings.TrimSpace(str) != call.TargetPath {
+			return false
+		}
+	}
+	if selected == "" {
+		return false
+	}
+	if len(allowedKeys) == 0 {
+		return true
+	}
+	for _, key := range allowedKeys {
+		if selected == key {
+			return true
+		}
+	}
+	return false
+}
+
 func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	if args == nil {
 		return "", ""
