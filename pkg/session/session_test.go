@@ -441,6 +441,59 @@ func TestLoadSession_TransientReadErrorRetried(t *testing.T) {
 	}
 }
 
+func TestLoadSession_ExhaustedTransientRetriesReturnError(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "ex", Prompt: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	oldRead, oldSleep, oldRetryable := readFileFunc, retrySleep, retryable
+	defer func() { readFileFunc, retrySleep, retryable = oldRead, oldSleep, oldRetryable }()
+	errTransient := errors.New("transient")
+	calls := 0
+	retrySleep = func(time.Duration) {}
+	retryable = func(err error) bool { return errors.Is(err, errTransient) }
+	readFileFunc = func(string) ([]byte, error) {
+		calls++
+		return nil, errTransient
+	}
+	s, err := LoadSession("ex")
+	if s != nil || err == nil {
+		t.Fatalf("expected (nil, error), got (%+v, %v)", s, err)
+	}
+	if !errors.Is(err, errTransient) {
+		t.Fatalf("expected errTransient in chain, got %v", err)
+	}
+	if calls != retryAttempts {
+		t.Fatalf("expected %d read attempts, got %d", retryAttempts, calls)
+	}
+}
+
+func TestLoadSession_CorruptFileReturnsError(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := SessionFilePath("corrupt")
+	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSession("corrupt")
+	if s != nil || err == nil {
+		t.Fatalf("expected (nil, error), got (%+v, %v)", s, err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("corrupt file should remain: %v", statErr)
+	}
+}
+
+func TestLoadSession_AbsentReturnsNilNil(t *testing.T) {
+	setupTestJevguardDir(t)
+	s, err := LoadSession("absent")
+	if s != nil || err != nil {
+		t.Fatalf("expected (nil, nil), got (%+v, %v)", s, err)
+	}
+}
+
 // TestSaveSession_ConcurrentSaveLoadNeverMissing only reproduces the original
 // bug on Windows: on POSIX, rename(2) replaces the target atomically, so the
 // old remove-then-rename fallback was never reached. CI runs windows-latest.

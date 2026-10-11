@@ -42,7 +42,7 @@ func (r *Runner) handleDoctor(args []string) (Action, int) {
 		return ActionHandled, 1
 	}
 	home, _ := os.UserHomeDir()
-	return ActionHandled, r.runDoctor(config.LoadConfig(cwd), cwd, home, offline)
+	return ActionHandled, r.runDoctor(loadConfig(cwd), cwd, home, offline)
 }
 
 // runDoctor prints one line per check and returns 1 if any check failed, else 0.

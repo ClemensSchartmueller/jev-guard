@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -520,5 +521,46 @@ func TestClearIntent_NoFlagsDoesNotClearAll(t *testing.T) {
 	}
 	if s, _ := session.LoadSession("s1"); s != nil {
 		t.Fatal("--all should clear everything")
+	}
+}
+
+func TestEndTurn_UnreadableSessionIsKept(t *testing.T) {
+	cases := map[string]func(t *testing.T, path string){
+		"corrupt json": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			const id = "u1"
+			path := session.SessionFilePath(id)
+			setup(t, path)
+
+			runner, stdout, stderr := newStdinRunner("")
+			action, code := runner.EvaluateArgs([]string{"end-turn", "--session", id})
+			if action != ActionHandled || code != 0 {
+				t.Fatalf("got %v, %d; want ActionHandled, 0", action, code)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout must be empty, got %q", stdout.String())
+			}
+			if stderr.Len() == 0 {
+				t.Fatal("expected stderr diagnostic")
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("session path should still exist: %v", err)
+			}
+		})
 	}
 }

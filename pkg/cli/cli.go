@@ -43,6 +43,10 @@ type Runner struct {
 	HTTPClient *http.Client
 }
 
+// loadConfig resolves the effective config for a working directory. It is a
+// variable so tests can load from temp paths instead of the real user profile.
+var loadConfig = config.LoadConfig
+
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
 func NewRunner(stdout, stderr io.Writer, isTerminal func() bool) *Runner {
 	return &Runner{
@@ -133,7 +137,7 @@ func (r *Runner) handleConfig(args []string) (Action, int) {
 
 func (r *Runner) handleConfigShow() (Action, int) {
 	cwd, _ := os.Getwd()
-	cfg := config.LoadConfig(cwd)
+	cfg := loadConfig(cwd)
 	fmt.Fprintln(r.Stdout, "jev-guard effective configuration:")
 	fmt.Fprintf(r.Stdout, "  User config:          %s\n", cfg.UserConfigPath)
 	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", config.TrustRegistryPath())
@@ -464,11 +468,18 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 
 	// Apply the configured TTL so LoadSession does not expire a session early.
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
 	}
 	// A recorded "stop" must keep holding background work after the reply ends;
 	// it expires via the TTL or is replaced by the next ingested prompt.
-	if state, err := session.LoadSession(sessionID); err == nil && state != nil && state.Aborted {
+	// If the state cannot be read, the abort status is unknown, so the file
+	// is kept rather than risk deleting a recorded stop.
+	state, err := session.LoadSession(sessionID)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept session '%s' because its state could not be read: %v\n", sessionID, err)
+		return ActionHandled, 0
+	}
+	if state != nil && state.Aborted {
 		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept abort flag for session '%s'\n", sessionID)
 		return ActionHandled, 0
 	}
@@ -483,7 +494,7 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 
 func (r *Runner) handleStatus() (Action, int) {
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
 	}
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
