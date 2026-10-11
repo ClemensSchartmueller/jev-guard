@@ -23,6 +23,7 @@ func main() {
 		os.Exit(2)
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
+	runner.Eval = runEval
 	action, exitCode := runner.EvaluateArgs(os.Args[1:])
 	if action == cli.ActionHandled {
 		os.Exit(exitCode)
@@ -85,38 +86,94 @@ func readStandardInput() ([]byte, error) {
 	return io.ReadAll(os.Stdin)
 }
 
+// gateTrace records the intermediate results of the gate pipeline so that both the
+// hook path and `jev-guard eval --explain` share a single implementation.
+type gateTrace struct {
+	FastpathRan      bool
+	Fastpath         *harness.EvaluationResult
+	Contained        bool
+	SemanticRan      bool
+	Judgments        *evaluator.JevJudgments
+	EvalErr          error
+	WouldSendToJudge bool
+	Final            *harness.EvaluationResult
+}
+
+type boundaryResult struct {
+	contained bool
+	err       error
+}
+
+// cachedBoundaryChecker shares path resolution between the trace and fastpath
+// for one evaluation. Distinct targets (including URI forms) stay independent.
+type cachedBoundaryChecker struct {
+	checker fastpath.BoundaryChecker
+	results map[[2]string]boundaryResult
+}
+
+func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error) {
+	key := [2]string{target, cwd}
+	if result, ok := c.results[key]; ok {
+		return result.contained, result.err
+	}
+	contained, err := c.checker.IsPathContained(target, cwd)
+	if c.results == nil {
+		c.results = make(map[[2]string]boundaryResult)
+	}
+	c.results[key] = boundaryResult{contained: contained, err: err}
+	return contained, err
+}
+
 func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
+	return traceGateEvaluation(call, cfg, false).Final
+}
+
+// traceGateEvaluation runs boundary, fastpath, semantic evaluation, and policy.
+// When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
+func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
+	trace := &gateTrace{}
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
-		checker = resolver
+		checker = &cachedBoundaryChecker{checker: resolver}
 	}
+	trace.Contained = checkWorkspaceBoundary(call, checker)
 
 	if cfg.IsFastpathEnabled() {
+		trace.FastpathRan = true
 		fastFilter := fastpath.NewFilter(checker, cfg)
 		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
-			return applyAuditMode(fastResult, cfg.Mode)
+			trace.Fastpath = fastResult
+			trace.Final = applyAuditMode(fastResult, cfg.Mode)
+			return trace
 		}
 	}
 
-	contained := checkWorkspaceBoundary(call, resolver)
-	pathVerified := isLocalPathVerified(call, contained)
-	judgments, evalErr := performSemanticEvaluation(call, cfg)
+	if offline {
+		trace.WouldSendToJudge = true
+		return trace
+	}
+
+	trace.SemanticRan = true
+	trace.Judgments, trace.EvalErr = performSemanticEvaluation(call, cfg)
 
 	pol := policy.NewDefaultPolicy()
-	resolved := pol.ResolveWithEvidence(judgments, policy.BoundaryEvidence{Contained: contained, PathVerified: pathVerified}, evalErr)
-
-	return applyAuditMode(resolved, cfg.Mode)
+	resolved := pol.ResolveWithEvidence(trace.Judgments, policy.BoundaryEvidence{
+		Contained:    trace.Contained,
+		PathVerified: isLocalPathVerified(call, trace.Contained),
+	}, trace.EvalErr)
+	trace.Final = applyAuditMode(resolved, cfg.Mode)
+	return trace
 }
 
-func checkWorkspaceBoundary(call *harness.NormalizedToolCall, resolver *boundary.Resolver) bool {
+func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
 	if strings.TrimSpace(call.TargetPath) == "" {
 		return true
 	}
-	if resolver == nil {
+	if checker == nil {
 		return false
 	}
-	contained, err := resolver.IsPathContained(call.TargetPath, call.Cwd)
+	contained, err := checker.IsPathContained(call.TargetPath, call.Cwd)
 	if err != nil {
 		return false
 	}
