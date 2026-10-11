@@ -488,7 +488,7 @@ When running agents in autonomous, turbo, or bypass modes, `jev-guard` maintains
 go test -v ./...
 
 # Build binary locally
-go build -o jev-guard main.go
+go build -o jev-guard .
 ```
 
 ---

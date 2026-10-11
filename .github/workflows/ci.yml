@@ -9,6 +9,46 @@ on:
       - main
 
 jobs:
+  release-build:
+    name: Release build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            output: jev-guard-linux-amd64
+          - os: linux
+            arch: arm64
+            output: jev-guard-linux-arm64
+          - os: darwin
+            arch: amd64
+            output: jev-guard-darwin-amd64
+          - os: darwin
+            arch: arm64
+            output: jev-guard-darwin-arm64
+          - os: windows
+            arch: amd64
+            output: jev-guard-windows-amd64.exe
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Build release binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags="-s -w -X jev-guard/pkg/cli.Version=ci -X jev-guard/pkg/cli.Commit=${{ github.sha }} -X 'jev-guard/pkg/cli.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" -o dist/${{ matrix.output }} .
+
   npm-launcher:
     name: npm launcher
     runs-on: ubuntu-24.04
