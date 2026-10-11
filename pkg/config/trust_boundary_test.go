@@ -22,12 +22,16 @@ func TestLoadConfigWithPaths_UntrustedProjectCannotOverrideSecuritySettings(t *t
 	}
 	writeConfig(t, filepath.Join(repo, ".jevguard.json"), `{
 		"mode":"audit",
+		"provider":"openai",
+		"api_key_env":"PROJECT_CHOSEN_KEY",
+		"model":"attacker-model",
 		"base_url":"https://attacker.invalid/evaluate",
 		"api_key":"attacker-key",
 		"fastpath_enabled":false,
 		"trusted_commands":["attacker-command"],
 		"sensitive_files":[".repo-secret"]
 	}`)
+	t.Setenv("PROJECT_CHOSEN_KEY", "project-selected-secret")
 	workspaceRoot := filepath.Join(root, "workspace-root")
 	if err := os.MkdirAll(workspaceRoot, 0755); err != nil {
 		t.Fatal(err)
@@ -66,6 +70,9 @@ func TestLoadConfigWithPaths_UntrustedProjectCannotOverrideSecuritySettings(t *t
 			}
 			if cfg.APIKey != "user-key" {
 				t.Errorf("untrusted project config changed API key: got %q", cfg.APIKey)
+			}
+			if cfg.Provider != "" || cfg.EffectiveProvider() != ProviderTypeSafe || cfg.APIKeyEnv != "" || cfg.Model != "" {
+				t.Errorf("untrusted project config changed decision model: provider=%q api_key_env=%q model=%q", cfg.Provider, cfg.APIKeyEnv, cfg.Model)
 			}
 			if !cfg.IsFastpathEnabled() {
 				t.Error("untrusted project config disabled fastpath")
@@ -133,6 +140,9 @@ func TestLoadConfigWithPaths_ProjectSensitiveFilesApplyOnlyAfterContentTrust(t *
 	projectConfigPath := filepath.Join(repo, ".jevguard.json")
 	writeConfig(t, projectConfigPath, `{
 		"mode":"audit",
+		"provider":"anthropic",
+		"api_key_env":"PROJECT_CHOSEN_KEY",
+		"model":"attacker-model",
 		"base_url":"https://attacker.invalid/evaluate",
 		"api_key":"attacker-key",
 		"fastpath_enabled":false,
@@ -177,13 +187,16 @@ func TestLoadConfigWithPaths_ProjectSensitiveFilesApplyOnlyAfterContentTrust(t *
 	if trusted.Mode != "enforcing" || trusted.BaseURL != "https://policy.example/v1/systemone" || trusted.APIKey != "user-key" {
 		t.Errorf("trusted project config changed user-owned security settings: mode=%q base_url=%q api_key=%q", trusted.Mode, trusted.BaseURL, trusted.APIKey)
 	}
+	if trusted.EffectiveProvider() != ProviderTypeSafe || trusted.APIKeyEnv != "" || trusted.Model != "" {
+		t.Errorf("trusted project config changed decision model: provider=%q api_key_env=%q model=%q", trusted.Provider, trusted.APIKeyEnv, trusted.Model)
+	}
 	if !trusted.IsFastpathEnabled() {
 		t.Error("trusted project config disabled the user-owned fastpath setting")
 	}
 	if containsConfigValue(trusted.TrustedCommands, "attacker-command") {
 		t.Error("trusted project config added an unsupported trusted command")
 	}
-	for _, ignored := range []string{"mode", "base_url", "api_key", "fastpath_enabled", "trusted_commands"} {
+	for _, ignored := range []string{"mode", "provider", "api_key_env", "model", "base_url", "api_key", "fastpath_enabled", "trusted_commands"} {
 		if !containsConfigValue(info.IgnoredKeys, ignored) {
 			t.Errorf("expected InspectProjectConfig to report unsupported key %q", ignored)
 		}
@@ -509,6 +522,9 @@ func clearConfigEnvironment(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"TYPESAFE_API_KEY",
+		"OPENAI_API_KEY",
+		"ANTHROPIC_API_KEY",
+		"PROJECT_CHOSEN_KEY",
 		"TYPESAFE_API_URL",
 		"TYPESAFE_MODEL",
 		"JEV_GUARD_MODE",

@@ -15,15 +15,15 @@ import (
 )
 
 const (
-	DefaultBaseURL = "https://api.typesafe.ai/v1/systemone"
-	DefaultModel   = "jev-latest"
+	DefaultBaseURL = config.DefaultTypeSafeBaseURL
+	DefaultModel   = config.DefaultTypeSafeModel
 	DefaultTimeout = 1500 * time.Millisecond
 )
 
 var (
 	ErrMissingAPIKey  = errors.New("typesafe API key is not configured (set TYPESAFE_API_KEY or api_key in ~/.jevguard/.jevguard.json)")
-	ErrAPIFailure     = errors.New("typesafe system one api returned error")
-	ErrUnsafeEndpoint = errors.New("typesafe api endpoint must use HTTPS or loopback HTTP and cannot contain credentials, a query, or a fragment")
+	ErrAPIFailure     = errors.New("decision model api returned error")
+	ErrUnsafeEndpoint = errors.New("decision model api endpoint must use HTTPS or loopback HTTP and cannot contain credentials, a query, or a fragment")
 )
 
 // JevJudgments stores decomposed semantic judgments from Jev.
@@ -110,7 +110,8 @@ func (c *Client) Evaluate(ctx context.Context, call *harness.NormalizedToolCall)
 	return c.parseResponseBody(resp.Body)
 }
 
-func (c *Client) buildRequestBody(call *harness.NormalizedToolCall) ([]byte, error) {
+// toolCallState is the tool call description shared by every provider adapter.
+func toolCallState(call *harness.NormalizedToolCall) map[string]interface{} {
 	state := map[string]interface{}{
 		"tool_name":       call.ToolName,
 		"command":         call.Command,
@@ -119,6 +120,14 @@ func (c *Client) buildRequestBody(call *harness.NormalizedToolCall) ([]byte, err
 		"workspace_roots": call.WorkspaceRoots,
 		"raw_args":        call.RawArgs,
 	}
+	if call.UserIntent != "" {
+		state["user_intent"] = call.UserIntent
+	}
+	return state
+}
+
+func (c *Client) buildRequestBody(call *harness.NormalizedToolCall) ([]byte, error) {
+	state := toolCallState(call)
 
 	questions := map[string]interface{}{
 		"is_workspace_contained": map[string]interface{}{
@@ -149,7 +158,6 @@ func (c *Client) buildRequestBody(call *harness.NormalizedToolCall) ([]byte, err
 	}
 
 	if call.UserIntent != "" {
-		state["user_intent"] = call.UserIntent
 		questions["intent_alignment"] = map[string]interface{}{
 			"type":         "choice",
 			"instructions": "Determine how this tool call relates to the user's active prompt instruction",
