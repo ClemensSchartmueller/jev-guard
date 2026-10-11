@@ -100,6 +100,100 @@ func TestFastPath_SensitiveFiles_DockerAndGitconfig(t *testing.T) {
 		t.Errorf("expected generic config.json NOT to be flagged sensitive, got %+v", res)
 	}
 }
+
+func assertSensitiveAsk(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	res := filter.Evaluate(call)
+	if res == nil {
+		t.Errorf("%s: expected decision %q with source %q, got nil", name, harness.DecisionAsk, "fastpath_sensitive")
+		return
+	}
+	if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+		t.Errorf("%s: expected decision %q with source %q, got decision %q with source %q", name, harness.DecisionAsk, "fastpath_sensitive", res.Decision, res.Source)
+	}
+}
+
+// assertTrustedAllow is the non-sensitive control: an ordinary read of a
+// contained file must reach the trusted fast path rather than the sensitive check.
+func assertTrustedAllow(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	res := filter.Evaluate(call)
+	if res == nil {
+		t.Errorf("%s: expected decision %q with source %q, got nil", name, harness.DecisionAllow, "fastpath_trusted")
+		return
+	}
+	if res.Decision != harness.DecisionAllow || res.Source != "fastpath_trusted" {
+		t.Errorf("%s: expected decision %q with source %q, got decision %q with source %q", name, harness.DecisionAllow, "fastpath_trusted", res.Decision, res.Source)
+	}
+}
+
+// assertDeferred is the non-sensitive control for commands outside the trusted
+// cache: the fast path must return nil so semantic evaluation decides.
+func assertDeferred(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	if res := filter.Evaluate(call); res != nil {
+		t.Errorf("%s: expected nil (deferred to semantic evaluation), got decision %q with source %q", name, res.Decision, res.Source)
+	}
+}
+
+func TestFastPath_SensitiveFiles_DockerAndGitconfigCommandAccess(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		command string
+	}{
+		{"posix gitconfig command", "Bash", "cat ~/.gitconfig"},
+		{"posix docker config command", "Bash", "cat ~/.docker/config.json"},
+		{"windows gitconfig command", "run_command", `type C:\Users\u\.gitconfig`},
+		{"windows docker config command", "run_command", `type C:\Users\u\.docker\config.json`},
+		{"trusted ls of gitconfig", "Bash", "ls ~/.gitconfig"},
+		{"trusted ls of docker config", "Bash", "ls ~/.docker/config.json"},
+	} {
+		assertSensitiveAsk(t, filter, tc.name, &harness.NormalizedToolCall{ToolName: tc.tool, Command: tc.command})
+	}
+
+	assertSensitiveAsk(t, filter, "windows gitconfig target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `C:\Users\u\.gitconfig`})
+
+	assertDeferred(t, filter, "ordinary config.json command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat config.json"})
+	assertTrustedAllow(t, filter, "trusted ls of ordinary config.json", &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls config.json"})
+	assertTrustedAllow(t, filter, "ordinary config.json target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/project/config.json"})
+}
+
+func TestFastPath_SensitiveFiles_GitXDGConfig(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"posix xdg git config", "/home/u/.config/git/config"},
+		{"posix xdg git credentials", "/home/u/.config/git/credentials"},
+		{"windows xdg git config", `C:\Users\u\.config\git\config`},
+		{"windows xdg git credentials", `C:\Users\u\.config\git\credentials`},
+	} {
+		assertSensitiveAsk(t, filter, tc.name+" target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: tc.path})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		command string
+	}{
+		{"posix xdg git config", "Bash", "cat ~/.config/git/config"},
+		{"posix xdg git credentials", "Bash", "cat ~/.config/git/credentials"},
+		{"windows xdg git config", "run_command", `type C:\Users\u\.config\git\config`},
+		{"windows xdg git credentials", "run_command", `type C:\Users\u\.config\git\credentials`},
+		{"trusted ls of xdg git credentials", "Bash", "ls ~/.config/git/credentials"},
+	} {
+		assertSensitiveAsk(t, filter, tc.name+" command", &harness.NormalizedToolCall{ToolName: tc.tool, Command: tc.command})
+	}
+
+	assertTrustedAllow(t, filter, "ordinary xdg config.json target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/.config/app/config.json"})
+	assertDeferred(t, filter, "ordinary xdg config.json command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat ~/.config/app/config.json"})
+}
+
 func TestNormalizePathSeparators(t *testing.T) {
 	got := normalizePathSeparators(`C:\Users\User\.aws\credentials`)
 	want := "C:/Users/User/.aws/credentials"
