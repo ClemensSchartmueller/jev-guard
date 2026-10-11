@@ -194,6 +194,61 @@ func TestFastPath_SensitiveFiles_GitXDGConfig(t *testing.T) {
 	assertDeferred(t, filter, "ordinary xdg config.json command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat ~/.config/app/config.json"})
 }
 
+func TestFastPath_SensitiveFiles_CustomXDGConfigHome(t *testing.T) {
+	t.Run("posix absolute", func(t *testing.T) {
+		for _, dir := range []string{"/srv/xdg", "/srv/xdg/"} {
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+			assertSensitiveAsk(t, filter, dir+" config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/config"})
+			assertSensitiveAsk(t, filter, dir+" credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/credentials"})
+			assertSensitiveAsk(t, filter, dir+" config command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/git/config"})
+			assertSensitiveAsk(t, filter, dir+" credentials command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/git/credentials"})
+		}
+	})
+
+	t.Run("windows absolute", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", `D:\xdg`)
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertSensitiveAsk(t, filter, "windows credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `D:\xdg\git\credentials`})
+		assertSensitiveAsk(t, filter, "windows config command", &harness.NormalizedToolCall{ToolName: "run_command", Command: `type D:\xdg\git\config`})
+	})
+
+	t.Run("controls with custom home", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "/srv/xdg")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "ordinary app config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/app/config.json"})
+		assertDeferred(t, filter, "ordinary app config command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/app/config.json"})
+	})
+
+	t.Run("relative value ignored", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "xdg")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "relative xdg git config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/project/xdg/git/config"})
+	})
+
+	t.Run("unset or empty", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "empty xdg git config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/config"})
+		assertSensitiveAsk(t, filter, "static default credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/.config/git/credentials"})
+	})
+
+	t.Run("unexpanded variable references", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertSensitiveAsk(t, filter, "posix $VAR credentials", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat $XDG_CONFIG_HOME/git/credentials"})
+		assertSensitiveAsk(t, filter, "posix ${VAR} config", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat ${XDG_CONFIG_HOME}/git/config"})
+		assertSensitiveAsk(t, filter, "cmd %VAR% credentials", &harness.NormalizedToolCall{ToolName: "run_command", Command: `type %XDG_CONFIG_HOME%\git\credentials`})
+		assertSensitiveAsk(t, filter, "powershell $env:VAR config", &harness.NormalizedToolCall{ToolName: "run_command", Command: `Get-Content $env:XDG_CONFIG_HOME\git\config`})
+	})
+}
+
 func TestNormalizePathSeparators(t *testing.T) {
 	got := normalizePathSeparators(`C:\Users\User\.aws\credentials`)
 	want := "C:/Users/User/.aws/credentials"
