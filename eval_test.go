@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
@@ -474,7 +475,8 @@ func TestEvalAuditModeRewritesAsk(t *testing.T) {
 	}
 }
 
-// snapshotTree records every file under root with its content and modification time.
+// snapshotTree records entry modes and file contents/modification times.
+// Directory timestamps can update asynchronously on Windows after fixture setup.
 func snapshotTree(t *testing.T, root string) map[string]string {
 	t.Helper()
 	snap := map[string]string{}
@@ -489,13 +491,13 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 		if err != nil {
 			return err
 		}
-		entry := info.Mode().String() + " " + info.ModTime().String()
+		entry := info.Mode().String()
 		if !d.IsDir() {
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
-			entry += " " + string(data)
+			entry += " " + info.ModTime().String() + " " + string(data)
 		}
 		snap[path] = entry
 		return nil
@@ -504,6 +506,53 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 		t.Fatal(err)
 	}
 	return snap
+}
+
+func TestSnapshotTreeDetectsFileAndDirectoryChanges(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "config.json")
+	if err := os.WriteFile(file, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotTree(t, root)
+	changedTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(root, changedTime, changedTime); err != nil {
+		t.Fatal(err)
+	}
+	if !equalSnapshots(before, snapshotTree(t, root)) {
+		t.Fatal("directory timestamp change should not count as a write")
+	}
+	if err := os.Chtimes(file, changedTime, changedTime); err != nil {
+		t.Fatal(err)
+	}
+	if equalSnapshots(before, snapshotTree(t, root)) {
+		t.Fatal("file timestamp change was not detected")
+	}
+	before = snapshotTree(t, root)
+	if err := os.WriteFile(file, []byte("modified"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, changedTime, changedTime); err != nil {
+		t.Fatal(err)
+	}
+	if equalSnapshots(before, snapshotTree(t, root)) {
+		t.Fatal("file content change with preserved timestamp was not detected")
+	}
+	before = snapshotTree(t, root)
+	dir := filepath.Join(root, "audit")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshotTree(t, root)
+	if equalSnapshots(before, after) {
+		t.Fatal("new directory was not detected")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if equalSnapshots(after, snapshotTree(t, root)) {
+		t.Fatal("removed directory was not detected")
+	}
 }
 
 func TestEvalWritesNoAuditLog(t *testing.T) {
