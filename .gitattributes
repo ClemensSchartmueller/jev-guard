@@ -1,0 +1,4 @@
+# Keep LF in the working tree so gofmt and CI see the same bytes on every OS.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.exe binary

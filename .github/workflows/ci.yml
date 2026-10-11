@@ -52,6 +52,10 @@ jobs:
       - name: Verify Dependencies
         run: go mod verify
 
+      - name: Check Formatting
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
       - name: Vet Code
         run: go vet ./...
 
