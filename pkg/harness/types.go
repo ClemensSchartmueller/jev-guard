@@ -91,8 +91,8 @@ type AntigravityDecisionOutput struct {
 
 // EvaluationResult contains the decision, reason, and telemetry for the invocation.
 type EvaluationResult struct {
-	Decision  Decision
-	Reason    string
-	Source    string // "fastpath", "typesafe", or "policy_fallback"
+	Decision   Decision
+	Reason     string
+	Source     string // "fastpath", "typesafe", or "policy_fallback"
 	Confidence float64
 }
