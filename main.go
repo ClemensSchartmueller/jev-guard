@@ -272,19 +272,7 @@ func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool 
 	if !contained || !ok || target == "" || strings.TrimSpace(call.Command) != "" || strings.Contains(target, "://") {
 		return false
 	}
-	raw, isString := call.RawArgs[key].(string)
-	if !isString || strings.TrimSpace(raw) != target {
-		return false
-	}
-	for _, k := range harness.PathArgKeys {
-		if k == key {
-			continue
-		}
-		if _, present := call.RawArgs[k]; present {
-			return false
-		}
-	}
-	return !isExecutionSensitivePath(target)
+	return harness.HasSingleTargetArg(call, key) && !isExecutionSensitivePath(target)
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {
