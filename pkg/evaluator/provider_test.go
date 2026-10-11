@@ -26,6 +26,12 @@ var validJudgment = JevJudgments{
 	ViolationConfidence:   0.95,
 }
 
+// withProvider returns a copy of j with the Provider field set.
+func withProvider(j JevJudgments, provider string) JevJudgments {
+	j.Provider = provider
+	return j
+}
+
 func newTestEvaluator(t *testing.T, provider, apiKey, baseURL string) Evaluator {
 	t.Helper()
 	ev, err := New(Options{Provider: provider, APIKey: apiKey, APIKeyEnv: "TEST_KEY_ENV", BaseURL: baseURL, Model: "test-model", Timeout: time.Second})
@@ -156,8 +162,8 @@ func TestOpenAIClient_RequestShapeAndJudgments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if *got != validJudgment {
-		t.Errorf("judgments = %+v, want %+v", *got, validJudgment)
+	if want := withProvider(validJudgment, "openai"); *got != want {
+		t.Errorf("judgments = %+v, want %+v", *got, want)
 	}
 	if requests.Load() != 1 {
 		t.Errorf("requests = %d, want 1", requests.Load())
@@ -179,7 +185,7 @@ func TestOpenAIClient_IntentAlignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	want := JevJudgments{IsWorkspaceContained: 1, DestructivePotential: 2, DestructiveConfidence: 0.8, ViolationCategory: "none", ViolationConfidence: 0.9, IntentAlignment: "explicitly_requested", IntentConfidence: 0.85}
+	want := JevJudgments{IsWorkspaceContained: 1, DestructivePotential: 2, DestructiveConfidence: 0.8, ViolationCategory: "none", ViolationConfidence: 0.9, IntentAlignment: "explicitly_requested", IntentConfidence: 0.85, Provider: "openai"}
 	if *got != want {
 		t.Errorf("judgments = %+v, want %+v", *got, want)
 	}
@@ -213,8 +219,8 @@ func TestOpenAIClient_LoopbackEndpointNeedsNoKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if *got != validJudgment {
-		t.Errorf("judgments = %+v", *got)
+	if want := withProvider(validJudgment, "openai"); *got != want {
+		t.Errorf("judgments = %+v, want %+v", *got, want)
 	}
 }
 
@@ -292,6 +298,57 @@ func TestParseLLMJudgment_RejectsInvalidOutput(t *testing.T) {
 	}
 }
 
+func TestOpenAIClient_JSONObjectResponseFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := decodeBody(t, r)
+		format, ok := body["response_format"]
+		if !ok {
+			t.Errorf("response_format missing from request body")
+		}
+		if !reflect.DeepEqual(format, map[string]interface{}{"type": "json_object"}) {
+			t.Errorf("response_format = %#v, want exactly {\"type\":\"json_object\"}", format)
+		}
+		fmt.Fprint(w, chatCompletion(validJudgmentJSON))
+	}))
+	defer server.Close()
+
+	ev, err := New(Options{Provider: "openai", APIKey: "k", BaseURL: server.URL, Model: "m", Timeout: time.Second, ResponseFormat: "json_object"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := ev.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "Read"})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if want := withProvider(validJudgment, "openai"); got == nil || *got != want {
+		t.Errorf("judgments = %+v, want %+v", got, want)
+	}
+}
+
+func TestOpenAIClient_JSONObjectModeRejectsInvalidContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Valid JSON but missing destructive_level.
+		fmt.Fprint(w, chatCompletion(`{"is_workspace_contained":1,"destructive_confidence":0.9,"violation_category":"none","violation_confidence":0.9}`))
+	}))
+	defer server.Close()
+
+	ev, err := New(Options{Provider: "openai", APIKey: "k", BaseURL: server.URL, Model: "m", Timeout: time.Second, ResponseFormat: "json_object"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := ev.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "Read"})
+	if got != nil || !errors.Is(err, ErrInvalidJudgment) {
+		t.Fatalf("Evaluate = %+v, %v; want nil, ErrInvalidJudgment", got, err)
+	}
+}
+
+func TestNew_RejectsUnsupportedResponseFormat(t *testing.T) {
+	_, err := New(Options{Provider: "openai", Model: "m", ResponseFormat: "xml"})
+	if !errors.Is(err, ErrUnsupportedResponseFormat) {
+		t.Fatalf("New error = %v, want ErrUnsupportedResponseFormat", err)
+	}
+}
+
 func TestAnthropicClient_RequestShapeAndJudgments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
@@ -333,7 +390,7 @@ func TestAnthropicClient_RequestShapeAndJudgments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	want := JevJudgments{IsWorkspaceContained: 0.5, DestructivePotential: 0, DestructiveConfidence: 0.99, ViolationCategory: "workspace_escape", ViolationConfidence: 0.7, IntentAlignment: "incidental_or_unclear", IntentConfidence: 0.6}
+	want := JevJudgments{IsWorkspaceContained: 0.5, DestructivePotential: 0, DestructiveConfidence: 0.99, ViolationCategory: "workspace_escape", ViolationConfidence: 0.7, IntentAlignment: "incidental_or_unclear", IntentConfidence: 0.6, Provider: "anthropic"}
 	if *got != want {
 		t.Errorf("judgments = %+v, want %+v", *got, want)
 	}

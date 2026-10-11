@@ -35,6 +35,9 @@ type JevJudgments struct {
 	ViolationConfidence   float64
 	IntentAlignment       string // "explicitly_requested", "incidental_or_unclear", "unprompted_or_contrary"
 	IntentConfidence      float64
+	// Provider names the adapter that produced the judgments. It is empty for
+	// TypeSafe System One so existing reasons and results stay unchanged.
+	Provider string
 }
 
 // Client conducts semantic safety evaluations via TypeSafe System One.

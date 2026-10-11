@@ -142,6 +142,9 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Base URL:             %s (%s)\n", effectiveValue(cfg.EffectiveBaseURL(), "not configured"), cfg.Sources["base_url"])
 	fmt.Fprintf(r.Stdout, "  API key env:          %s (%s)\n", effectiveValue(cfg.EffectiveAPIKeyEnv(), "none"), cfg.Sources["api_key_env"])
 	fmt.Fprintf(r.Stdout, "  API key:              %s (%s)\n", configuredValue(cfg.APIKey), cfg.Sources["api_key"])
+	if cfg.EffectiveProvider() == config.ProviderOpenAI {
+		fmt.Fprintf(r.Stdout, "  Response format:      %s (%s)\n", effectiveValue(cfg.ResponseFormat, config.ResponseFormatJSONSchema), cfg.Sources["response_format"])
+	}
 	fmt.Fprintf(r.Stdout, "  Model:                %s (%s)\n", effectiveValue(cfg.EffectiveModel(), "not configured"), cfg.Sources["model"])
 	fmt.Fprintf(r.Stdout, "  Timeout:              %d ms (%s)\n", effectiveTimeout(cfg.TimeoutMs), cfg.Sources["timeout_ms"])
 	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])

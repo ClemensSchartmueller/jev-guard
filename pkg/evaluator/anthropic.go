@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 )
 
@@ -80,7 +81,12 @@ func (c *AnthropicClient) Evaluate(ctx context.Context, call *harness.Normalized
 	}
 	for _, block := range resp.Content {
 		if block.Type == "text" {
-			return parseLLMJudgment(block.Text, withIntent)
+			judgments, err := parseLLMJudgment(block.Text, withIntent)
+			if err != nil {
+				return nil, err
+			}
+			judgments.Provider = config.ProviderAnthropic
+			return judgments, nil
 		}
 	}
 	return nil, fmt.Errorf("%w: message has no text content", ErrInvalidJudgment)

@@ -123,6 +123,13 @@ compatibility layer [7], so a native adapter adds little now.
   non-integer level, an unknown category, a refusal, or truncation is an error,
   so it fails safe to `ASK` / `policy_failsafe`. Without a user intent, any
   intent claim the model makes is ignored.
+- Offer an opt-in JSON-mode fallback (`"response_format": "json_object"`) for
+  OpenAI-compatible servers that cannot enforce a schema. The prompt already
+  lists every key and the word "JSON", which JSON mode needs. Local validation
+  is the same in both modes, so the fallback cannot weaken fail-safe behavior.
+  It is opt-in rather than an automatic retry, because a retry would double
+  latency inside the hook timeout.
+- Name the judging provider in the allow reason. TypeSafe keeps its wording.
 - Add user-config keys `provider` and `api_key_env`, alongside the existing
   `base_url`, `model`, and `api_key`.
   - No `provider` means `typesafe`, so existing configs keep their behavior.
@@ -144,10 +151,6 @@ compatibility layer [7], so a native adapter adds little now.
 - Azure OpenAI (`api-key` header and deployment-scoped URLs), AWS Bedrock
   (SigV4 signing), and Google Vertex AI (OAuth). Each needs a cloud-specific
   auth flow.
-- A `json_object` fallback for OpenAI-compatible servers without `json_schema`
-  support.
-- Provider-neutral wording in policy reasons. The allow reason still says
-  "verified safe and contained by TypeSafe AI".
 - A calibration corpus that compares LLM judgments with TypeSafe on the same
   tool calls before anyone relies on a general-purpose model for enforcement.
 

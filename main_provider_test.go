@@ -28,9 +28,10 @@ func TestTraceGateEvaluationUsesConfiguredProvider(t *testing.T) {
 		provider   string
 		wantDec    harness.Decision
 		wantSource string
+		wantReason string
 	}{
-		{"openai", harness.DecisionDeny, "policy_jev_destructive"},
-		{"anthropic", harness.DecisionAllow, "policy_jev_allow"},
+		{"openai", harness.DecisionDeny, "policy_jev_destructive", ""},
+		{"anthropic", harness.DecisionAllow, "policy_jev_allow", "Operation verified safe and contained by the anthropic decision model"},
 	} {
 		t.Run(tc.provider, func(t *testing.T) {
 			cfg := config.DefaultConfig()
@@ -38,6 +39,9 @@ func TestTraceGateEvaluationUsesConfiguredProvider(t *testing.T) {
 			trace := traceGateEvaluation(call, cfg, false)
 			if trace.EvalErr != nil || trace.Final == nil || trace.Final.Decision != tc.wantDec || trace.Final.Source != tc.wantSource {
 				t.Fatalf("final=%+v err=%v; want %s from %s", trace.Final, trace.EvalErr, tc.wantDec, tc.wantSource)
+			}
+			if tc.wantReason != "" && trace.Final.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", trace.Final.Reason, tc.wantReason)
 			}
 		})
 	}

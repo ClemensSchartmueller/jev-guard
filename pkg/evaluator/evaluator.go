@@ -21,6 +21,8 @@ const maxResponseBytes = 1 << 20
 var (
 	// ErrUnsupportedProvider means the configured provider name is unknown.
 	ErrUnsupportedProvider = errors.New("decision model provider is not supported")
+	// ErrUnsupportedResponseFormat means response_format is neither json_schema nor json_object.
+	ErrUnsupportedResponseFormat = errors.New("decision model response_format is not supported (expected json_schema or json_object)")
 	// ErrMissingModel means a provider without a default model has no model configured.
 	ErrMissingModel = errors.New("decision model is not configured (set model in ~/.jevguard/.jevguard.json)")
 	// ErrMissingProviderAPIKey means a non-TypeSafe provider has no API key.
@@ -51,6 +53,9 @@ type Options struct {
 	BaseURL   string
 	Model     string
 	Timeout   time.Duration
+	// ResponseFormat applies to the openai provider only: json_schema (default)
+	// or json_object for servers that cannot enforce a schema.
+	ResponseFormat string
 }
 
 // NewFromConfig builds the evaluator selected by the user configuration.
@@ -62,6 +67,8 @@ func NewFromConfig(cfg *config.Config) (Evaluator, error) {
 		BaseURL:   cfg.EffectiveBaseURL(),
 		Model:     cfg.EffectiveModel(),
 		Timeout:   cfg.Timeout,
+
+		ResponseFormat: cfg.ResponseFormat,
 	})
 }
 
@@ -75,7 +82,15 @@ func New(opts Options) (Evaluator, error) {
 		if opts.Model == "" {
 			return nil, ErrMissingModel
 		}
-		return &OpenAIClient{llmClient: newLLMClient(opts, config.DefaultOpenAIBaseURL)}, nil
+		format := strings.ToLower(strings.TrimSpace(opts.ResponseFormat))
+		switch format {
+		case "":
+			format = config.ResponseFormatJSONSchema
+		case config.ResponseFormatJSONSchema, config.ResponseFormatJSONObject:
+		default:
+			return nil, fmt.Errorf("%w: %q", ErrUnsupportedResponseFormat, opts.ResponseFormat)
+		}
+		return &OpenAIClient{llmClient: newLLMClient(opts, config.DefaultOpenAIBaseURL), ResponseFormat: format}, nil
 	case config.ProviderAnthropic:
 		if opts.Model == "" {
 			return nil, ErrMissingModel

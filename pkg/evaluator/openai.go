@@ -12,9 +12,26 @@ import (
 // OpenAIClient evaluates tool calls through an OpenAI-compatible Chat
 // Completions endpoint (OpenAI, OpenRouter, Ollama, vLLM, LM Studio, and the
 // Gemini OpenAI compatibility layer). BaseURL is the API root; the client posts
-// to BaseURL + "/chat/completions" with a strict json_schema response format.
+// to BaseURL + "/chat/completions" with a strict json_schema response format,
+// or with JSON mode (json_object) for servers that cannot enforce a schema.
+// Both modes go through the same strict local validation.
 type OpenAIClient struct {
 	llmClient
+	ResponseFormat string // config.ResponseFormatJSONSchema (default) or config.ResponseFormatJSONObject
+}
+
+func (c *OpenAIClient) responseFormat(withIntent bool) map[string]interface{} {
+	if c.ResponseFormat == config.ResponseFormatJSONObject {
+		return map[string]interface{}{"type": "json_object"}
+	}
+	return map[string]interface{}{
+		"type": "json_schema",
+		"json_schema": map[string]interface{}{
+			"name":   judgmentSchemaName,
+			"strict": true,
+			"schema": judgmentSchema(withIntent),
+		},
+	}
 }
 
 type openAIResponse struct {
@@ -53,14 +70,7 @@ func (c *OpenAIClient) Evaluate(ctx context.Context, call *harness.NormalizedToo
 			{"role": "system", "content": system},
 			{"role": "user", "content": user},
 		},
-		"response_format": map[string]interface{}{
-			"type": "json_schema",
-			"json_schema": map[string]interface{}{
-				"name":   judgmentSchemaName,
-				"strict": true,
-				"schema": judgmentSchema(withIntent),
-			},
-		},
+		"response_format": c.responseFormat(withIntent),
 	}
 
 	data, err := postJSON(ctx, c.HTTPClient, endpoint, headers, body)
@@ -87,5 +97,10 @@ func (c *OpenAIClient) Evaluate(ctx context.Context, call *harness.NormalizedToo
 	if choice.Message.Content == nil {
 		return nil, fmt.Errorf("%w: chat completion has no content", ErrInvalidJudgment)
 	}
-	return parseLLMJudgment(*choice.Message.Content, withIntent)
+	judgments, err := parseLLMJudgment(*choice.Message.Content, withIntent)
+	if err != nil {
+		return nil, err
+	}
+	judgments.Provider = config.ProviderOpenAI
+	return judgments, nil
 }

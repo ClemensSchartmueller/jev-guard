@@ -29,6 +29,7 @@ func TestLoadConfigWithPaths_UntrustedProjectCannotOverrideSecuritySettings(t *t
 		"api_key":"attacker-key",
 		"fastpath_enabled":false,
 		"trusted_commands":["attacker-command"],
+		"response_format":"json_object",
 		"sensitive_files":[".repo-secret"]
 	}`)
 	t.Setenv("PROJECT_CHOSEN_KEY", "project-selected-secret")
@@ -73,6 +74,9 @@ func TestLoadConfigWithPaths_UntrustedProjectCannotOverrideSecuritySettings(t *t
 			}
 			if cfg.Provider != "" || cfg.EffectiveProvider() != ProviderTypeSafe || cfg.APIKeyEnv != "" || cfg.Model != "" {
 				t.Errorf("untrusted project config changed decision model: provider=%q api_key_env=%q model=%q", cfg.Provider, cfg.APIKeyEnv, cfg.Model)
+			}
+			if cfg.ResponseFormat != "" {
+				t.Errorf("untrusted project config set response_format: got %q", cfg.ResponseFormat)
 			}
 			if !cfg.IsFastpathEnabled() {
 				t.Error("untrusted project config disabled fastpath")
@@ -147,6 +151,7 @@ func TestLoadConfigWithPaths_ProjectSensitiveFilesApplyOnlyAfterContentTrust(t *
 		"api_key":"attacker-key",
 		"fastpath_enabled":false,
 		"trusted_commands":["attacker-command"],
+		"response_format":"json_object",
 		"sensitive_files":[".project-secret"]
 	}`)
 	userConfigPath := filepath.Join(root, "user", "config.json")
@@ -190,13 +195,16 @@ func TestLoadConfigWithPaths_ProjectSensitiveFilesApplyOnlyAfterContentTrust(t *
 	if trusted.EffectiveProvider() != ProviderTypeSafe || trusted.APIKeyEnv != "" || trusted.Model != "" {
 		t.Errorf("trusted project config changed decision model: provider=%q api_key_env=%q model=%q", trusted.Provider, trusted.APIKeyEnv, trusted.Model)
 	}
+	if trusted.ResponseFormat != "" {
+		t.Errorf("trusted project config set response_format: got %q", trusted.ResponseFormat)
+	}
 	if !trusted.IsFastpathEnabled() {
 		t.Error("trusted project config disabled the user-owned fastpath setting")
 	}
 	if containsConfigValue(trusted.TrustedCommands, "attacker-command") {
 		t.Error("trusted project config added an unsupported trusted command")
 	}
-	for _, ignored := range []string{"mode", "provider", "api_key_env", "model", "base_url", "api_key", "fastpath_enabled", "trusted_commands"} {
+	for _, ignored := range []string{"mode", "provider", "api_key_env", "model", "base_url", "api_key", "fastpath_enabled", "trusted_commands", "response_format"} {
 		if !containsConfigValue(info.IgnoredKeys, ignored) {
 			t.Errorf("expected InspectProjectConfig to report unsupported key %q", ignored)
 		}

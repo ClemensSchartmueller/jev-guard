@@ -183,6 +183,39 @@ func TestPolicy_Resolve_ExplicitIntent_LowConfidenceRequiresConfirmation(t *test
 	}
 }
 
+func TestPolicy_AllowReasonNamesDecisionModel(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		reason   string
+	}{
+		{"", "Operation verified safe and contained by TypeSafe AI"},
+		{"typesafe", "Operation verified safe and contained by TypeSafe AI"},
+		{"openai", "Operation verified safe and contained by the openai decision model"},
+		{"anthropic", "Operation verified safe and contained by the anthropic decision model"},
+	} {
+		t.Run("provider="+tc.provider, func(t *testing.T) {
+			j := &evaluator.JevJudgments{
+				IsWorkspaceContained:  1.0,
+				DestructivePotential:  0.1,
+				ViolationCategory:     "none",
+				DestructiveConfidence: 0.9,
+				ViolationConfidence:   0.9,
+				Provider:              tc.provider,
+			}
+			res := NewDefaultPolicy().ResolveWithEvidence(j, BoundaryEvidence{Contained: true}, nil)
+			if res.Decision != harness.DecisionAllow {
+				t.Errorf("Decision = %v, want ALLOW", res.Decision)
+			}
+			if res.Source != "policy_jev_allow" {
+				t.Errorf("Source = %q, want policy_jev_allow", res.Source)
+			}
+			if res.Reason != tc.reason {
+				t.Errorf("Reason = %q, want %q", res.Reason, tc.reason)
+			}
+		})
+	}
+}
+
 func TestPolicy_PathVerified(t *testing.T) {
 	policy := NewDefaultPolicy()
 	mk := func(contained, destructive float64, cat string) *evaluator.JevJudgments {

@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,34 @@ func TestProviderConfig_InvalidAPIKeyEnvIgnored(t *testing.T) {
 		if cfg.Mode != "enforcing" {
 			t.Errorf("%q: mode = %q, want enforcing", name, cfg.Mode)
 		}
+	}
+}
+
+func TestProviderConfig_ResponseFormatNormalizedFromUserConfig(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	cfg := loadUserConfig(t, `{"provider":"openai","model":"m","response_format":" JSON_Object "}`)
+	if cfg.ResponseFormat != "json_object" {
+		t.Errorf("ResponseFormat = %q, want json_object", cfg.ResponseFormat)
+	}
+	if cfg.Sources["response_format"] != "user config" {
+		t.Errorf("response_format source = %q, want user config", cfg.Sources["response_format"])
+	}
+}
+
+func TestProviderConfig_InvalidResponseFormatFallsBackToEnforcing(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	cfg := loadUserConfig(t, `{"mode":"audit","provider":"openai","model":"m","response_format":"xml"}`)
+	if cfg.ResponseFormat != "" {
+		t.Errorf("ResponseFormat = %q, want empty", cfg.ResponseFormat)
+	}
+	if cfg.Mode != "enforcing" {
+		t.Errorf("Mode = %q, want enforcing", cfg.Mode)
+	}
+	wantDiagnostics := []string{"user config response_format ignored: expected json_schema or json_object"}
+	if !reflect.DeepEqual(cfg.Diagnostics, wantDiagnostics) {
+		t.Errorf("Diagnostics = %#v, want %#v", cfg.Diagnostics, wantDiagnostics)
 	}
 }
 

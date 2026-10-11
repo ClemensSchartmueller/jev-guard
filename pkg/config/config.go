@@ -27,6 +27,7 @@ type Config struct {
 	TypesafeAPIKey          string             `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
 	Provider                string             `json:"provider,omitempty"`         // decision model provider: "typesafe" (default), "openai", or "anthropic"
 	APIKeyEnv               string             `json:"api_key_env,omitempty"`      // environment variable holding the provider API key
+	ResponseFormat          string             `json:"response_format,omitempty"`  // openai provider: "json_schema" (default) or "json_object"
 	BaseURL                 string             `json:"base_url,omitempty"`         // API endpoint
 	Model                   string             `json:"model,omitempty"`            // e.g. "jev-latest"
 	Timeout                 time.Duration      `json:"-"`
@@ -67,6 +68,14 @@ const (
 	DefaultTypeSafeModel    = "jev-latest"
 	DefaultOpenAIBaseURL    = "https://api.openai.com/v1"
 	DefaultAnthropicBaseURL = "https://api.anthropic.com/v1"
+)
+
+// Response formats for the openai provider. json_schema asks the server to
+// enforce the judgment schema; json_object is JSON mode for servers without
+// schema support. Output is validated locally in both cases.
+const (
+	ResponseFormatJSONSchema = "json_schema"
+	ResponseFormatJSONObject = "json_object"
 )
 
 // SupportedProviders lists the accepted provider names in display order.
@@ -154,7 +163,8 @@ func DefaultConfig() *Config {
 		TrustedCommands:         DefaultTrustedCommands(),
 		Sources: map[string]string{
 			"mode": "built-in default", "provider": "built-in default", "api_key_env": "provider default",
-			"base_url": "built-in default", "api_key": "environment or user config",
+			"response_format": "built-in default",
+			"base_url":        "built-in default", "api_key": "environment or user config",
 			"model": "built-in default", "timeout_ms": "built-in default", "audit_log_path": "built-in default",
 			"fastpath_enabled": "built-in default", "context_awareness_enabled": "built-in default",
 			"intent_ttl_minutes": "built-in default",
@@ -694,6 +704,15 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			cfg.Sources["api_key_env"] = "user config"
 		} else {
 			cfg.Diagnostics = append(cfg.Diagnostics, "user config api_key_env ignored: expected an environment variable name such as OPENAI_API_KEY")
+			invalid = true
+		}
+	}
+	if fileCfg.ResponseFormat != "" {
+		if format := strings.ToLower(strings.TrimSpace(fileCfg.ResponseFormat)); format == ResponseFormatJSONSchema || format == ResponseFormatJSONObject {
+			cfg.ResponseFormat = format
+			cfg.Sources["response_format"] = "user config"
+		} else {
+			cfg.Diagnostics = append(cfg.Diagnostics, "user config response_format ignored: expected json_schema or json_object")
 			invalid = true
 		}
 	}
