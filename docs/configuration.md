@@ -13,6 +13,8 @@
 
 Security settings are read only from `~/.jevguard/.jevguard.json` (on Windows, `%USERPROFILE%\.jevguard\.jevguard.json`). The executable creates this file with enforcing defaults when it is missing and never overwrites an existing file. If creation fails, it reports the error and exits without evaluating the tool call.
 
+The generated file contains `mode`, `timeout_ms`, `fastpath_enabled`, `context_awareness_enabled`, `intent_ttl_minutes`, and the full built-in `sensitive_files` and `trusted_commands` lists. Entries in `sensitive_files` and `trusted_commands` are always merged with the built-in defaults, so defaults cannot be removed.
+
 The same directory holds the binary, trust registry, and session data:
 
 ```text
@@ -20,12 +22,10 @@ The same directory holds the binary, trust registry, and session data:
 └── .jevguard/
     ├── .jevguard.json                    # User-owned security settings
     ├── bin/
-    │   └── jev-guard (or jev-guard.exe)  # Executable binary (added to User PATH)
+    │   └── jev-guard (or jev-guard.exe)  # Executable binary (install.ps1 adds this to User PATH)
     ├── sessions/
     │   └── <session_hash>.json           # Ephemeral, atomic session intent cache
-    ├── trusted-project-configs.json      # Approved project config digests, if configured
-    └── logs/
-        └── audit.log                     # Optional fallback audit log
+    └── trusted-project-configs.json      # Approved project config digests, if configured
 ```
 
 Run `jev-guard config show` to see the effective values and where each comes from. Secrets are never printed.
@@ -63,7 +63,7 @@ export TYPESAFE_API_KEY="your-typesafe-api-key"
 
 `TYPESAFE_API_KEY` supplies credentials only; environment variables cannot change the mode, endpoint, model, timeout, or any other policy setting.
 
-The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. API requests do not follow redirects.
+The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. The URL must not contain credentials, a query string, or a fragment. API requests do not follow redirects.
 
 ## Settings reference
 
@@ -79,7 +79,9 @@ The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs
 | **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1–1440); the Claude `Stop` hook normally ends it sooner. User config only |
 | **Audit log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging. Relative paths are anchored to `~/.jevguard` |
 | **Sensitive files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; a trusted project config can only add more |
-| **Trusted commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes allowed without a network call |
+| **Trusted commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes allowed without a network call; merged with the built-in defaults, same as sensitive files |
+
+**Invalid values.** If the user config is not valid JSON, it is ignored entirely and the enforcing built-in defaults apply. An invalid `mode` or `base_url` is ignored and also forces `mode` to `enforcing` as a safe fallback. An out-of-range `intent_ttl_minutes` (must be 1–1440) is ignored and the default `30` is used. Problems are printed to stderr as `jev-guard: ...` diagnostics and reported by `jev-guard doctor`.
 
 ## Operating modes
 
@@ -90,15 +92,15 @@ The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs
     - **Claude Code and Codex**: exit with **code 2** (blocked, reason on stderr), so bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) cannot run unconfirmed actions.
   - Safe, contained operations are allowed (`ALLOW` / exit code 0).
 - **`audit`** is a dry run for trying `jev-guard` without interrupting your agents.
-  - Every call goes through the fast path and TypeSafe AI as usual, and results are written to the audit log.
-  - Every `DENY`, `ASK`, and `force_ask` is converted to `ALLOW` with an `[AUDIT-MODE: <decision>]` reason prefix.
+  - Every call goes through the fast path and TypeSafe AI as usual. Results are written to the audit log only if `audit_log_path` is set.
+  - Every `DENY`, `ASK`, and `force_ask` is converted to `ALLOW`. Rewritten entries carry an `[AUDIT-MODE: <decision>]` prefix in their reason.
 
 Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
 
 ## Precedence
 
 1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
-2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
+2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key and, when set, overrides `api_key` in the user config.
 3. **Trusted project config** can add `sensitive_files`, only when its canonical path and exact SHA-256 digest match the user trust registry.
 4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, standard sensitive file patterns, and read commands.
 

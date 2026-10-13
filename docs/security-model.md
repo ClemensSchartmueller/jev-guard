@@ -7,7 +7,7 @@ This page describes what `jev-guard` checks, in what order, and why. For a short
 - [Semantic evaluation with TypeSafe AI](#semantic-evaluation-with-typesafe-ai)
 - [Context-aware intent](#context-aware-intent)
 - [Intent policy matrix](#intent-policy-matrix)
-- [Behavior per agent and autonomous modes](#behavior-per-agent-and-autonomous-modes)
+- [Behavior per agent](#behavior-per-agent)
 - [Repository Git config (`.git/config`)](#repository-git-config-gitconfig)
 
 ## Supported tools
@@ -18,7 +18,7 @@ This page describes what `jev-guard` checks, in what order, and why. For a short
 | :--- | :--- |
 | **Claude Code** | `Bash`, `PowerShell`, `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch` (plus legacy `View`, `ReadLocalFile`, `LS`) |
 | **Codex CLI** | `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir` |
-| **Antigravity** | `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content` |
+| **Antigravity** | `run_command`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content` |
 
 MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-guard.
 
@@ -28,7 +28,9 @@ Before any network call, a local filter (under 1 ms) runs these checks. Set `"fa
 
 ### Sensitive file protection
 
-Access to credential files asks for confirmation. Built-in patterns include `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `.gitconfig`, `.config/git/config`, `.config/git/credentials`, `.docker/config.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates.
+Access to credential files asks for confirmation. The built-in patterns are `.env`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, `.ssh/`, `.aws/`, `.kube/`, `.docker/config.json`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git/config`, `.git-credentials`, `.gitconfig`, `.config/git/config`, `.config/git/credentials`, `credentials.json`, `.pem`, `.key`, and `serviceaccount.json`. jev-guard's own files (`.jevguard.json`, `jevguard.json`, `.jevguard.log`) are protected as well.
+
+Patterns are matched case-insensitively as globs and substrings against both the target path and the command text, so `.env` also matches `.env.local`.
 
 - When `XDG_CONFIG_HOME` is set to an absolute path (POSIX, Windows drive, or UNC; Git for Windows honors it too), `$XDG_CONFIG_HOME/git/config` and `$XDG_CONFIG_HOME/git/credentials` are also protected. Relative values are ignored, per the XDG Base Directory specification.
 - Commands that reference the variable unexpanded (`$XDG_CONFIG_HOME`, `${XDG_CONFIG_HOME}`, `%XDG_CONFIG_HOME%`, `$env:XDG_CONFIG_HOME`) followed by `/git/config` or `/git/credentials` are flagged regardless of its value.
@@ -37,21 +39,29 @@ Access to credential files asks for confirmation. Built-in patterns include `.en
 
 You can add patterns through `sensitive_files` in your [configuration](configuration.md).
 
+### Unverifiable read targets
+
+Read tools (`Read`, `view_file`, `read_file`, `Glob`, `Grep`, `LS`, and similar) whose target cannot be verified unambiguously from their arguments are asked about (`ASK`, reason "Read target cannot be verified from tool arguments", source `fastpath_boundary`). This covers a missing target, a URL, or more than one path argument. For example, a `Glob` or `Grep` call without a `path` argument gets `ASK`, which Claude Code turns into a block.
+
 ### Workspace boundary enforcement
 
 Path traversals and directory escapes (`../../`) are resolved locally for write and read operations. This prevents access to, or exfiltration of, files outside the workspace, such as `/etc/shadow` or `C:\Windows\system.ini`. Path case is preserved on Linux and matched case-insensitively on Windows. If a path cannot be resolved, the check fails closed.
 
+One exception: a Claude Code `Read` of a file that Claude Code itself saved for the current session, exactly `~/.claude/projects/<project>/<session_id>/tool-results/<file>` with no symlinks leading out, is not treated as a boundary escape.
+
 ### Anti-tampering
 
-Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files.
+Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied.
 
 ### Trusted commands and read tools
 
-Safe local read tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, and so on) are allowed immediately (`ALLOW`) once the boundary, flag-argument, and sensitive-file checks pass.
+Safe local read tools and trusted shell inspection commands are allowed immediately (`ALLOW`) once the boundary, flag-argument, and sensitive-file checks pass. The built-in trusted commands are `git status`, `git diff`, `git log`, `git branch`, `git show`, `ls`, `dir`, `pwd`, `echo`, `whoami`, `which`, `where.exe`, `node -v`, `go version`, and `python --version`.
+
+A trusted command is still not trusted if any argument starts with `~`, contains `:` (other than a Windows drive letter), uses `-o` or `--output`, or names a path outside the workspace.
 
 These always go to TypeSafe AI for semantic evaluation instead:
 
-- Chained commands (`;`, `&&`, `&`, `|`, `>`, `<`, or newlines).
+- Chained commands (`;`, `&&`, `&`, `|`, `>`, `<`, `` ` ``, or newlines).
 - PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`).
 - Outbound network fetches (`read_url_content`, `WebFetch`, `WebSearch`).
 
@@ -63,7 +73,12 @@ Instead of brittle regex matching, every mutating, destructive, or ambiguous ope
 2. `destructive_potential` (`Score` 0–3): blast radius, from trivial read-only to catastrophic deletion.
 3. `violation_category` (`Choice`): credential leaks, workspace escapes, or persistence attempts.
 
-If TypeSafe AI is unavailable or the request times out, `jev-guard` falls back to asking for confirmation (`ASK` / `force_ask`).
+The policy uses these thresholds:
+
+- `destructive_potential` above 1.2 is a moderate blast radius, which asks (`ASK`) unless the user explicitly requested the action. Above 2.5 it is catastrophic.
+- `is_workspace_contained` below 0.85 asks (source `policy_jev_containment`).
+
+Fail-safe: if the API key is missing, the endpoint is unsafe, the response is not HTTP 200, or the request times out, `jev-guard` asks for confirmation (`ASK` / `force_ask`, source `policy_failsafe`). An unparseable hook payload produces `ASK` (source `fatal_error`).
 
 ## Context-aware intent
 
@@ -88,25 +103,25 @@ When context awareness is enabled and an intent is ingested, TypeSafe AI classif
 | **Workspace boundary escape** (`../../` traversal) | **`force_ask`** | **`force_ask`** | **`force_ask`** |
 | **Anti-tampering** (`~/.jevguard/` access) | **DENY** | **DENY** | **DENY** |
 
-For file-path tools (`Edit`, `Write`, `Read`), a deterministic local proof that the target is inside the workspace overrides the model's containment probability. A low `IsWorkspaceContained` score alone therefore does not trigger a boundary-escape prompt. Shell commands are unaffected.
+For file-path tools, a deterministic local proof that the target is inside the workspace overrides the model's containment probability. The local proof applies only to `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `write_to_file`, `replace_file_content`, and `view_file`, and only when the call has a single path argument. It never applies to execution-sensitive paths: the directories `.git`, `.github`, `.husky`, `.devcontainer`, `.claude`, `.codex`, `.cursor`, `.gemini`, `.agent`, `.agents`, `.windsurf`, `.vscode`, `.idea`, and `.jevguard`, and the files `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.mcp.json`, and `.envrc` (matched case-insensitively). Those always use the model's containment score. For other paths, a low `IsWorkspaceContained` score alone does not trigger a boundary-escape prompt. Shell commands are unaffected.
 
 > [!IMPORTANT]
-> **The catastrophic ceiling.** Even when you explicitly ask for it, an action with a catastrophic blast radius (such as `rm -rf /` or recursive drive formatting) never runs automatically. `jev-guard` downgrades it from `DENY` to an interactive confirmation (`force_ask`), so you have the final veto. This rule takes precedence over all violation categories, including credential access.
+> **The catastrophic ceiling.** Even when you explicitly ask for it, an action with a catastrophic blast radius (such as `rm -rf /` or recursive drive formatting) never runs automatically. `jev-guard` downgrades it from `DENY` to `force_ask`: Antigravity prompts you, so you have the final veto, while Claude Code and Codex block it. This rule takes precedence over all violation categories, including credential access.
 >
 > Explicit authorization also requires high confidence from TypeSafe AI (`intent_confidence >= 0.70`); lower-confidence classifications fall back to confirmation (`force_ask` / `ASK`). When an intent is active, the fast path defers all sensitive file access (`.env`, `.pem`, and so on) to semantic evaluation, so read tools and trusted commands cannot allow it early.
 
-## Behavior per agent and autonomous modes
+## Behavior per agent
 
-Agents in autonomous, turbo, or bypass modes skip their own permission prompts. `jev-guard` still enforces its verdicts through each agent's hook protocol:
+`jev-guard` enforces its verdicts through each agent's hook protocol. In Claude Code and Codex, every `ASK` and `force_ask` is exit code 2 (blocked, reason on stderr) in every mode, interactive or autonomous, because jev-guard never emits Claude's interactive "ask" decision. Autonomous, turbo, and bypass modes therefore do not change the outcome for these agents.
 
-| Verdict | Antigravity (Turbo / `always-proceed`) | Claude Code (`--dangerously-skip-permissions`) | Codex CLI (`--yolo` / `approval_policy = "never"`) |
+| Verdict | Antigravity | Claude Code | Codex CLI |
 | :--- | :--- | :--- | :--- |
-| **`ALLOW`** | Proceeds (`"allow"`) | Proceeds (exit `0`) | Proceeds (exit `0`) |
+| **`ALLOW`** | Proceeds (`"allow"`) | Proceeds (`permissionDecision: "allow"`) | Proceeds (`permissionDecision: "allow"`) |
 | **`ASK`** / sensitive / escape | **Stops and prompts you** (`"force_ask"` overrides the cache) | **Blocks** (exit `2`, reason on stderr) | **Blocks** (exit `2`, reason on stderr) |
 | **`DENY`** / catastrophic | **Blocks** (`"deny"`) | **Blocks** (exit `2`) | **Blocks** (exit `2`) |
 
-- **Antigravity.** Confirmation decisions map to `force_ask`, which overrides Antigravity's auto-execution and turbo cache and guarantees a human review. The response includes `permissionOverrides: ["command(...)"]` to streamline approved actions.
-- **Claude Code and Codex.** Bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) disable interactive prompts, so `jev-guard` turns every `ASK` and `force_ask` into **exit code 2**: the call is rejected and the reason is sent to the agent on stderr. Sensitive files and boundary escapes therefore never run silently.
+- **Antigravity.** Confirmation decisions map to `force_ask`, which overrides Antigravity's auto-execution and turbo cache and guarantees a human review. For calls that carry a shell command and whose verdict is allow or ask, the response includes `permissionOverrides: ["command(...)"]` to streamline the approved action.
+- **Claude Code and Codex.** `ALLOW` is emitted as `hookSpecificOutput.permissionDecision: "allow"`, which pre-approves the call so the agent does not show its own permission prompt. Every `ASK` and `force_ask` is exit code 2, so the call is rejected and the reason is sent to the agent on stderr. Sensitive files and boundary escapes therefore never run silently.
 
 ## Repository Git config (`.git/config`)
 

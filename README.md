@@ -38,7 +38,7 @@ Coding agents are most useful when you let them run without approving every step
 | Verdict | Meaning | Example |
 | :--- | :--- | :--- |
 | ✅ **ALLOW** | Safe; runs without interrupting you. | `git status`, reading a source file |
-| ⚠️ **ASK** | Needs your confirmation. In autonomous modes, it is blocked and the reason goes back to the agent. | Reading `.env`, writing `../outside.txt`, `rm -rf dist` |
+| ⚠️ **ASK** | Needs a human decision. Antigravity prompts you; Claude Code and Codex block the call and tell the agent why. | Reading `.env`, writing `../outside.txt`, `rm -rf dist` |
 | ⛔ **DENY** | Blocked. | Recursive deletion of your home directory, tampering with `jev-guard`'s own config |
 
 Highlights:
@@ -71,13 +71,15 @@ export TYPESAFE_API_KEY="your-typesafe-api-key"     # Linux / macOS
 $env:TYPESAFE_API_KEY = "your-typesafe-api-key"     # Windows PowerShell
 ```
 
+The variable must be set in the environment you start your agent from. To make it persist, add the `export` line to your shell profile (e.g. `~/.bashrc` or `~/.zshrc`). Alternatively, put the key in `"api_key"` in `~/.jevguard/.jevguard.json`.
+
 **3. Check the setup.**
 
 ```bash
 ~/.jevguard/bin/jev-guard doctor
 ```
 
-On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything marked `[FAIL]`; `[WARN]` lines are informational. Then start your agent as usual.
+On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything marked `[FAIL]`, and make sure the `API key` line is not a warning: without a key, every call the local fast path cannot decide is held for confirmation. Then start your agent as usual.
 
 > [!TIP]
 > **Using Codex?** Run `/hooks` inside Codex once to review and trust the new hook; Codex does not run untrusted project hooks.
@@ -87,7 +89,7 @@ On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything
 ### Other installation methods
 
 - **Prebuilt binaries:** download from [GitHub Releases](https://github.com/ClemensSchartmueller/jev-guard/releases) (checksums in `checksums.txt`), then run `jev-guard init` in your project.
-- **From source** (requires Go): clone this repository and run `./install.sh` (Linux/macOS) or `.\install.ps1` (Windows). Both install to `~/.jevguard/bin` and add it to your user `PATH`. Then run `jev-guard init`.
+- **From source:** clone this repository and run `./install.sh` (Linux/macOS) or `.\install.ps1` (Windows). Both install to `~/.jevguard/bin`. `install.sh` builds from source if Go is available, otherwise it downloads the latest release binary, and it only prints a reminder to add `~/.jevguard/bin` to your shell profile. `install.ps1` adds it to your user `PATH`. Then run `jev-guard init`.
 - **Manual hook files:** see [docs/hooks.md](docs/hooks.md).
 
 ## How it works
@@ -110,7 +112,7 @@ On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything
      ✅ ALLOW / ⚠️ ASK / ⛔ DENY  ──▶  translated into each agent's hook format
 ```
 
-Each agent receives the verdict in its own protocol. In Claude Code and Codex, `ASK` becomes a block (exit code 2) with the reason sent to the agent, so bypass flags cannot skip it. In Antigravity, it becomes `force_ask`, which prompts you even in Turbo mode.
+Each agent receives the verdict in its own protocol. In Claude Code and Codex, `ASK` becomes a block (exit code 2) with the reason sent to the agent, in every mode. That is also why bypass flags such as `--dangerously-skip-permissions` and `--yolo` cannot skip it. An `ALLOW` in Claude Code is sent as `permissionDecision: "allow"`, which pre-approves the tool call so Claude Code does not prompt for it. In Antigravity, `ASK` becomes `force_ask`, which prompts you even in Turbo mode.
 
 The full rules, including the list of protected files, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
 
@@ -129,7 +131,7 @@ All commands and flags: [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
-All settings live in **`~/.jevguard/.jevguard.json`**, which is created with safe defaults on first run. Settings are deliberately kept outside your projects, so an agent or a cloned repository cannot weaken them.
+All settings live in **`~/.jevguard/.jevguard.json`**, which is created with safe defaults on first run. The generated file already lists the built-in `sensitive_files` and `trusted_commands`. Entries you add to these lists are merged with the built-in defaults, which cannot be removed. Settings are deliberately kept outside your projects, so an agent or a cloned repository cannot weaken them.
 
 ```json
 {

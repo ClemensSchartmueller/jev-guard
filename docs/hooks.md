@@ -2,6 +2,13 @@
 
 `jev-guard init` writes these hooks for you, and is the recommended route. Use this page if you manage hook files by hand or want to see what `init` generates. The examples call `jev-guard` from `PATH`; `init` uses the binary's absolute path instead.
 
+`init` writes to these files:
+
+- Project scope: `.claude/settings.json`, `.codex/hooks.json`, `.agents/hooks.json`.
+- User scope (`--scope user`): `~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.gemini/config/hooks.json`.
+
+Contents:
+
 - [Claude Code](#claude-code-claudesettingsjson)
 - [Codex CLI](#codex-cli-codexhooksjson)
 - [Antigravity](#antigravity-agentshooksjson)
@@ -56,7 +63,7 @@ Do not add `SubagentStop`: a subagent finishing must not clear the main reply's 
 ```
 
 > [!NOTE]
-> `jev-guard` formats Claude Code `PreToolUse` verdicts using the standard `hookSpecificOutput.permissionDecision` schema. Ingest confirmations go to stderr so they never pollute your prompt.
+> `jev-guard` formats Claude Code `PreToolUse` verdicts using the standard `hookSpecificOutput.permissionDecision` schema. `ALLOW` is returned as `permissionDecision: "allow"`. `ASK` and `DENY` verdicts are returned as exit code 2 with the reason on stderr (Codex behaves the same). Ingest confirmations go to stderr so they never pollute your prompt.
 
 ## Codex CLI (`.codex/hooks.json`)
 
@@ -87,7 +94,7 @@ Codex loads project hooks only when the project is trusted. Run `/hooks` in the 
   "jev-guard": {
     "PreToolUse": [
       {
-        "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
+        "matcher": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
         "hooks": [
           {
             "type": "command",
@@ -99,5 +106,7 @@ Codex loads project hooks only when the project is trusted. Run `/hooks` in the 
   }
 }
 ```
+
+If the `jev-guard` section already exists with `"enabled": false`, `init` sets it to `true`.
 
 Antigravity's documented `PreInvocation` payload includes a transcript path but not the prompt text, and the transcript JSONL format is undocumented. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.

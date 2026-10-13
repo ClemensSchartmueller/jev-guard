@@ -39,7 +39,13 @@ jev-guard --version
 jev-guard --help
 ```
 
+Without `--agent`, `init` prints the agents it detected. With `--scope user`, it writes `~/.claude/settings.json` (Claude Code), `~/.codex/hooks.json` (Codex), and `~/.gemini/config/hooks.json` (Antigravity). See [Manual hook setup](hooks.md) for what is written.
+
 `init` preserves existing hook configuration, and running it again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they work without a `PATH` change.
+
+`doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation.
+
+`version`/`-v` and `help`/`-h` also work as aliases for `--version` and `--help`.
 
 ## Simulating decisions with `eval`
 
@@ -124,3 +130,4 @@ jev-guard status                   # also: jev-guard cache status, jev-guard cac
 - `end-turn` clears only that session's intent, prints nothing to stdout, and always exits 0. A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it. A session file that cannot be read is also kept, since its abort state is unknown.
 - `clear-intent` without `--session`, a stdin payload, or `--all` prints usage and exits 1.
 - `status` lists unreadable session files together with their error.
+- Aliases: `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.
