@@ -1,511 +1,182 @@
 # jev-guard
 
-High-speed, cross-agent safety gate plugin for **Claude Code**, **Codex CLI**, and **Antigravity**.
+[![CI](https://github.com/ClemensSchartmueller/jev-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/ClemensSchartmueller/jev-guard/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ClemensSchartmueller/jev-guard)](https://github.com/ClemensSchartmueller/jev-guard/releases)
+[![npm](https://img.shields.io/npm/v/@clemensschartmueller/jev-guard)](https://www.npmjs.com/package/@clemensschartmueller/jev-guard)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 
-`jev-guard` intercepts tool calls (shell executions, file writes, patch applications, file reads, and directory inspections) before execution, performs sub-millisecond local boundary and sensitive file checks, and utilizes **TypeSafe AI's System One (Jev)** model to evaluate blast radius, reversibility, and destructive potential.
+**A safety gate for AI coding agents.** `jev-guard` checks every shell command, file write, and file read your agent attempts *before* it runs, and blocks or asks you about the risky ones.
 
----
-
-## Key Features
-
-- **Multi-Agent Interception**: Automatically detects and handles payload structures from:
-  - **Claude Code**: `Bash`, `PowerShell`, `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch` (plus legacy `View`, `ReadLocalFile`, `LS`)
-  - MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-guard.
-  - **Antigravity**: `run_command`, `write_to_file`, `replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content`
-  - **Codex CLI**: `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir`
-- **Sub-1ms Local Invariant & Latency Gate**:
-  - **Sensitive File Protection**: Immediately prompts confirmation for credentials, `.env*`, `.ssh/`, `.aws/`, `.kube/`, `kubeconfig`, `.npmrc`, `.yarnrc`, `.pypirc`, `.git-credentials`, `.gitconfig`, `.config/git/config`, `.config/git/credentials`, `.docker/config.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, and private certificates before network calls. When `XDG_CONFIG_HOME` is set to an absolute path (POSIX, Windows drive, or UNC; Git for Windows honors it too), `$XDG_CONFIG_HOME/git/config` and `$XDG_CONFIG_HOME/git/credentials` are also protected. Relative values are ignored, per the XDG Base Directory specification. Commands that reference the variable unexpanded (`$XDG_CONFIG_HOME`, `${XDG_CONFIG_HOME}`, `%XDG_CONFIG_HOME%`, `$env:XDG_CONFIG_HOME`) followed by `/git/config` or `/git/credentials` are flagged regardless of its value. These environment-derived patterns are resolved from the hook process environment when the filter is built. They are not written to `.jevguard.json`, so the sensitive-file count reported by `eval` and `doctor` does not include them. Normalizes both POSIX (`/`) and Windows (`\`) path separators for consistent matching across OS environments.
-  - **Workspace Boundary Enforcement**: Resolves path traversals and directory escapes (`../../`) locally across write and read operations (preventing unauthorized access or exfiltration of files outside workspace boundaries such as `/etc/shadow` or `C:\Windows\system.ini`). Preserves path case sensitivity on Linux while performing case-insensitive matching on Windows. Enforces fail-closed containment on path resolution errors.
-  - **Anti-Tampering Invariants**: Direct access, reads, writes, or modifications targeting `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` are strictly blocked (`DENY`) to prevent secret exposure or policy tampering.
-  - **Trusted Command & Read Tool Cache**: Zero-latency approval (`ALLOW`) for safe local read inspection tools and trusted shell inspection commands (`git status`, `git diff`, `git log`, `ls`, `dir`, `pwd`, etc.) once boundary, command flag arguments, and sensitive file checks pass. Chained commands (using `;`, `&&`, `&`, `|`, `>`, `<`, or newlines), PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`), and outbound network fetch operations (`read_url_content`, `WebFetch`, `WebSearch`) are strictly routed to TypeSafe AI System One for semantic evaluation.
-  - **User-controlled Bypass Toggle**: Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to route operations directly to Jev.
-- **Platform-Specific Safety Enforcement**:
-  - **Antigravity Human Escalation via `force_ask`**: Maps confirmation decisions to `force_ask` in Antigravity hook responses, ensuring guaranteed human operator review by overriding Antigravity's auto-execution and turbo cache. Emits `permissionOverrides: ["command(...)"]` to streamline approved actions.
-  - **Claude Code & Codex Fail-Safe Blocking**: In Claude Code and Codex, autonomous/bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) disable interactive prompts. `jev-guard` enforces safety by defaulting all `ASK` and `force_ask` escalations to **exit code 2** (rejection with feedback to `stderr`), preventing sensitive files or boundary escapes from silently executing.
-- **Flexible Operating Modes**:
-  - **`enforcing`** (default): Actively enforces policy verdicts—blocking catastrophic commands (`DENY`), prompting confirmation for sensitive or moderate operations (`force_ask` in Antigravity, exit code 2 in Claude/Codex), and approving verified actions (`ALLOW`).
-  - **`audit`**: Passive monitoring dry-run. Logs every tool call and evaluation result to `.jevguard.log`, but rewrites blocking decisions to `ALLOW` (`[AUDIT-MODE: <decision>]`) so agent workflows are never interrupted.
-- **TypeSafe AI (Jev) Semantic & Catastrophic Evaluation**:
-  - Eliminates brittle command-line regex matching. All mutating, destructive, or ambiguous operations are evaluated by TypeSafe System One (`POST https://api.typesafe.ai/v1/systemone`).
-  - Evaluates 3 primitives:
-    1. `is_workspace_contained` (`Noul`): Probability the operation stays strictly inside workspace roots.
-    2. `destructive_potential` (`Score` 0-3): Evaluates blast radius from trivial read-only to catastrophic deletion.
-    3. `violation_category` (`Choice`): Identifies credential leaks, workspace escapes, or persistence attempts.
-- **Context-Aware Intent Authorization & Ephemeral Cache (Fully Optional)**:
-  - **User Intent Ingestion**: Ingests active user prompts from Claude Code's `UserPromptSubmit` hook into an ephemeral session cache stored in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating. Intent is scoped to a single reply: Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it, and `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn` so background work stays held until the TTL expires or the next prompt. If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate fails closed with a `force_ask` hold (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out; `end-turn` likewise keeps the file. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
-  - **Zero False-Positive Confirmations**: When the human operator explicitly requests an action (e.g. *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms intent alignment and auto-approves (`ALLOW`), removing repetitive interactive prompts.
-  - **Strict Catastrophic Ceiling**: Even with proven intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) **cap at `force_ask`**, never `ALLOW`, guaranteeing human oversight for dangerous actions.
-  - **Anti-Tampering Invariants**: `~/.jevguard` is physically decoupled from project workspaces, and fastpath immediately denies any tool call attempting to read, write, or modify session cache files.
-  - **Fully Optional & Zero-Guess Fallback**: Set `"context_awareness_enabled": false` in `~/.jevguard/.jevguard.json`. If the cache is cold, `jev-guard` falls back deterministically to strict stateless safety.
-- **Fail-Safe Operation**: If TypeSafe AI is unavailable or network times out, safely falls back to interactive confirmation (`ASK` / `force_ask`).
-
----
-
-## User Home Layout
-
-The user config shares the directory for the binary, trust registry, and session data. The executable creates it with enforcing defaults on first launch if it is missing:
+It works with **Claude Code**, **Codex CLI**, and **Antigravity**, including in autonomous modes such as `--dangerously-skip-permissions` and `--yolo`.
 
 ```text
-~/
-└── .jevguard/
-    ├── .jevguard.json                 # User-owned security settings
-    ├── bin/
-    │   └── jev-guard (or jev-guard.exe)  # Executable binary (added to User PATH)
-    ├── sessions/
-    │   └── <session_hash>.json           # Ephemeral, atomic session intent cache
-    ├── trusted-project-configs.json      # Approved project config digests, if configured
-    └── logs/
-        └── audit.log                     # Optional fallback audit log
+$ jev-guard eval --cmd "git status"
+ALLOW: Trusted read-only operation verified by fast-path (source: fastpath_trusted)
+
+$ jev-guard eval --cmd "cat .env"
+ASK: Access to sensitive file or credential pattern: .env (source: fastpath_sensitive)
+
+$ jev-guard eval --tool Read --target /etc/shadow
+ASK: Target path escapes workspace boundaries: /etc/shadow (source: fastpath_boundary)
 ```
 
-## Installation
+## Contents
 
-### One-command setup (Node.js and npm)
+- [Why jev-guard?](#why-jev-guard)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Common tasks](#common-tasks)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
-From the project you want to protect, run:
+## Why jev-guard?
+
+Coding agents are most useful when you let them run without approving every step, which is exactly when a mistaken `rm -rf`, a leaked `.env`, or a write outside your project does the most damage. `jev-guard` sits in the agent's hook pipeline and gives every tool call one of three verdicts:
+
+| Verdict | Meaning | Example |
+| :--- | :--- | :--- |
+| ✅ **ALLOW** | Safe; runs without interrupting you. | `git status`, reading a source file |
+| ⚠️ **ASK** | Needs a human decision. Antigravity prompts you; Claude Code and Codex block the call and tell the agent why. | Reading `.env`, writing `../outside.txt`, `rm -rf dist` |
+| ⛔ **DENY** | Blocked. | Recursive deletion of your home directory, tampering with `jev-guard`'s own config |
+
+Highlights:
+
+- **Fast.** Most calls are decided locally in under a millisecond: credential files, workspace escapes, and trusted read-only commands.
+- **Context-aware.** Ambiguous or destructive calls are judged by [TypeSafe AI](https://typesafe.ai)'s System One model, which also considers what you actually asked for. If you said *"delete the build folder"*, `rm -rf build` is not questioned again.
+- **Fails safe.** If the API is unreachable, `jev-guard` asks instead of allowing.
+- **Catastrophic ceiling.** Catastrophic actions never run automatically, even when you requested them.
+- **Try before enforcing.** `audit` mode logs what *would* have been blocked without interrupting anything.
+
+## Quick start
+
+**Requirements:** Node.js 18+ for the one-command installer (the hooks themselves run a native binary), and a [TypeSafe AI](https://typesafe.ai) API key for semantic evaluation.
+
+**1. Install and set up hooks.** From the project you want to protect:
 
 ```bash
 npx --yes @clemensschartmueller/jev-guard@latest
 ```
 
-The npm launcher downloads the matching `jev-guard` release for your operating system and architecture, checks its SHA256 digest against the release checksums, installs it under `~/.jevguard/bin`, and runs `jev-guard init`. Setup adds hooks for detected agents in the current project; when none are detected, it sets up all supported agents. Existing hook configuration is preserved, and running setup again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they do not depend on a new terminal picking up a changed `PATH`.
+This downloads the right binary for your platform, verifies its SHA-256 checksum, installs it to `~/.jevguard/bin`, and adds hooks for the agents it detects in the project (all supported agents if none are detected). Existing hooks are preserved, and running it again is safe.
 
-To choose an agent explicitly, pass `--agent claude`, `--agent codex`, `--agent antigravity`, or `--agent all` after the package name. The default scope is the current project; `--scope user` configures supported user-level hooks. You can also run `jev-guard init` after installing a binary by another method.
-
-The release tag and npm package version must match (for example, package `0.2.0` downloads release `v0.2.0`). The npm command becomes available after `@clemensschartmueller/jev-guard` is first published. Node.js and npm are only needed for this setup route; the installed hooks run the native binary.
-
-Set a TypeSafe AI API key before using semantic evaluation:
+**2. Add your API key.**
 
 ```bash
-export TYPESAFE_API_KEY="your-typesafe-api-key" # Linux / macOS
+export TYPESAFE_API_KEY="your-typesafe-api-key"     # Linux / macOS
 ```
 
 ```powershell
-$env:TYPESAFE_API_KEY = "your-typesafe-api-key" # PowerShell, current session
+$env:TYPESAFE_API_KEY = "your-typesafe-api-key"     # Windows PowerShell
 ```
 
-Run `~/.jevguard/bin/jev-guard config show` (or `%USERPROFILE%\.jevguard\bin\jev-guard.exe config show` on Windows) to check policy and API key status. For Codex project hooks, review and trust the new hook through `/hooks` in Codex before it runs.
+The variable must be set in the environment you start your agent from. To make it persist, add the `export` line to your shell profile (e.g. `~/.bashrc` or `~/.zshrc`). Alternatively, put the key in `"api_key"` in `~/.jevguard/.jevguard.json`.
 
-### Prebuilt Binaries
-
-Download precompiled binaries for Linux, macOS, and Windows from the [GitHub Releases](https://github.com/ClemensSchartmueller/jev-guard/releases) page. Each release includes SHA256 checksums in `checksums.txt`.
-
-### Local Installation
-
-Build and install directly to `~/.jevguard/bin` (automatically configured in your User `PATH`):
-
-#### Linux / macOS:
-```bash
-./install.sh
-```
-
-#### Windows (PowerShell):
-```powershell
-.\install.ps1
-```
-
----
-
-## CLI Usage & Commands
-
-`jev-guard` includes subcommands for intent management, diagnostics, and testing:
+**3. Check the setup.**
 
 ```bash
-# Display version and build information
-jev-guard --version
-
-# Show help and command reference
-jev-guard --help
-
-# Ingest active user prompt/intent into the session cache (supports space-separated or --flag=value)
-jev-guard ingest --session "my-session" --turn 1 --prompt "Delete the build folder"
-jev-guard ingest --session="my-session" --turn=1 --prompt="Delete the build folder"
-
-# Or pipe a hook event JSON payload directly on stdin
-cat hook_payload.json | jev-guard ingest
-
-# End the current reply for the session named in a hook payload on stdin (Claude Code Stop hook).
-# Clears only that session's intent, prints nothing to stdout, and always exits 0.
-# A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it.
-# A session file that cannot be read is also kept, since its abort state is unknown.
-cat stop_payload.json | jev-guard end-turn
-jev-guard end-turn --session "my-session"
-
-# Clear active intent for a specific session, or every session with --all.
-# Without --session, a stdin payload, or --all, clear-intent prints usage and exits 1.
-jev-guard clear-intent --session "my-session"
-jev-guard clear-intent --session="my-session"
-jev-guard clear-intent --all
-jev-guard cache clear
-
-# Display status of active sessions and cache directory (unreadable session files are listed with their error)
-jev-guard status
-jev-guard cache status
-jev-guard cache
-
-# Diagnose config, API key, network, audit log, and hook setup (exit 1 on any [FAIL])
-jev-guard doctor
-jev-guard doctor --offline   # skip the network check
-
-# Test gate evaluation manually by piping a tool call payload JSON
-cat payload.json | jev-guard
-
-# Simulate how a tool call would be judged, without a live agent (supports --flag value and --flag=value)
-jev-guard eval --cmd "git diff .env"
-jev-guard eval --tool Write --target ../outside.txt --cwd /path/to/project --offline
-jev-guard eval --payload payload.json --explain   # any supported harness payload ('-' reads stdin)
-jev-guard eval --cmd "cat .env" --json
-jev-guard eval --cmd "rm -rf build" --intent "Delete the build folder" --explain
-jev-guard explain --cmd "git diff .env"            # shorthand for eval --explain
+~/.jevguard/bin/jev-guard doctor
 ```
 
-> [!NOTE]
-> When executed directly in an interactive terminal without piped input or flags, `jev-guard` displays help and usage guidance instead of blocking on stdin.
+On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything marked `[FAIL]`, and make sure the `API key` line is not a warning: without a key, every call the local fast path cannot decide is held for confirmation. Then start your agent as usual.
 
-`jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fastpath, TypeSafe, policy, harness formatting):
+> [!TIP]
+> **Using Codex?** Run `/hooks` inside Codex once to review and trust the new hook; Codex does not run untrusted project hooks.
+>
+> **Want a specific agent or user-wide hooks?** Append flags after the package name: `--agent claude|codex|antigravity|all` and `--scope user`.
 
-- `--cmd CMD` simulates a Claude Code `Bash` call; `--tool NAME --target PATH` simulates any other tool in a Claude Code-shaped payload, passing the target under the tool's canonical path argument (`TargetFile` for `write_to_file`/`replace_file_content`, `AbsolutePath` for `view_file`, `notebook_path` for `NotebookEdit`, `path` for Glob/Grep/LS, otherwise `file_path`); `--payload FILE` uses a raw hook JSON payload of any harness, which is the way to reproduce an exact Antigravity or Codex call.
-- `--cwd DIR` sets the working directory (default: current directory).
-- `--intent TEXT` simulates the user's prompt for intent-aware (context-aware) decisions, e.g. `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent on the call exactly as the hook does, so the fastpath defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (e.g. `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
-- `--offline` skips the TypeSafe network call. If the fastpath has no verdict, the result says the call "would be sent to TypeSafe".
-- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fastpath result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
-- `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
-- `jev-guard explain ...` is shorthand for `jev-guard eval --explain ...`; it rejects `--json` and `--explain`.
-- Flags take values as `--flag value` or `--flag=value`. Boolean flags accept explicit values such as `--offline=false` and `--json=true` (`false`/`0` disables). A string flag never consumes a following `--option` as its value: `--cmd --offline` is a usage error. To pass a literal value beginning with `--`, use the `=` form, e.g. `--cmd=--version`. Each flag may be given only once.
-- `eval` never writes session state, ingests intents, or writes audit-log entries.
-- Exit code: `0` whenever the evaluation succeeded, regardless of the decision (the hook exit code is reported in `--explain`/`--json`); `2` on usage errors or unreadable payloads, with a `jev-guard eval: usage error: ...` diagnostic on stderr and nothing on stdout.
+### Other installation methods
 
-Boundary fields in `--json` output:
+- **Prebuilt binaries:** download from [GitHub Releases](https://github.com/ClemensSchartmueller/jev-guard/releases) (checksums in `checksums.txt`), then run `jev-guard init` in your project.
+- **From source:** clone this repository and run `./install.sh` (Linux/macOS) or `.\install.ps1` (Windows). Both install to `~/.jevguard/bin`. `install.sh` builds from source if Go is available, otherwise it downloads the latest release binary, and it only prints a reminder to add `~/.jevguard/bin` to your shell profile. `install.ps1` adds it to your user `PATH`. Then run `jev-guard init`.
+- **Manual hook files:** see [docs/hooks.md](docs/hooks.md).
 
-| `boundary_status` | Meaning | `boundary_contained` |
-| :--- | :--- | :--- |
-| `contained` | The target resolved inside the workspace. | `true` |
-| `escaped` | The target is outside the workspace or could not be resolved. | `false` |
-| `no_target` | The call has no target path (e.g. a shell command); treated as contained, as in the hook. | `true` |
-| `skipped` | The boundary stage did not run because a stop/cancel `--intent` held the call as an aborted session. | `null` |
+## How it works
 
-Use `boundary_status` to tell a skipped check from an uncontained target; `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
+```text
+ Agent wants to run a tool
+            │
+            ▼
+ ┌──────────────────────┐   tampering with jev-guard            ⛔ DENY
+ │  Local fast path     │── sensitive file / workspace escape ──▶ ⚠️ ASK
+ │  (< 1 ms, offline)   │── trusted read-only command ─────────▶ ✅ ALLOW
+ └──────────┬───────────┘
+            │ anything else (writes, deletes, chained commands, web fetches)
+            ▼
+ ┌──────────────────────┐
+ │  TypeSafe AI         │  judges blast radius, containment,
+ │  System One (Jev)    │  violation type, and your stated intent
+ └──────────┬───────────┘
+            ▼
+     ✅ ALLOW / ⚠️ ASK / ⛔ DENY  ──▶  translated into each agent's hook format
+```
 
----
+Each agent receives the verdict in its own protocol. In Claude Code and Codex, `ASK` becomes a block (exit code 2) with the reason sent to the agent, in every mode. That is also why bypass flags such as `--dangerously-skip-permissions` and `--yolo` cannot skip it. An `ALLOW` in Claude Code is sent as `permissionDecision: "allow"`, which pre-approves the tool call so Claude Code does not prompt for it. In Antigravity, `ASK` becomes `force_ask`, which prompts you even in Turbo mode.
+
+The full rules, including the list of protected files, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
+
+## Common tasks
+
+| I want to… | Run |
+| :--- | :--- |
+| See why a command would be blocked | `jev-guard explain --cmd "rm -rf build"` |
+| Test a decision without a network call | `jev-guard eval --cmd "cat .env" --offline` |
+| Check my installation | `jev-guard doctor` |
+| See the effective configuration | `jev-guard config show` |
+| Try jev-guard without blocking anything | Set `"mode": "audit"` in `~/.jevguard/.jevguard.json` |
+| Add hooks to another project | `jev-guard init` (inside that project) |
+
+All commands and flags: [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
-### User-owned security settings
+All settings live in **`~/.jevguard/.jevguard.json`**, which is created with safe defaults on first run. The generated file already lists the built-in `sensitive_files` and `trusted_commands`. Entries you add to these lists are merged with the built-in defaults, which cannot be removed. Settings are deliberately kept outside your projects, so an agent or a cloned repository cannot weaken them.
 
-Security settings are read only from `~/.jevguard/.jevguard.json` (on Windows, `%USERPROFILE%\.jevguard\.jevguard.json`). The executable creates this file with enforcing defaults when it is missing and does not overwrite an existing file. If creation fails, it reports the error and exits without evaluating the tool call. This file owns the enforcement mode, API endpoint, model, timeout, API key, audit log path, fastpath, context awareness, sensitive-file patterns, and trusted commands. Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
-
-Repository files named `.jevguard.json` or `jevguard.json` are ignored until their exact contents are explicitly trusted. Even after trust, only additive `sensitive_files` entries are applied. Project values for `mode`, `base_url`, API keys, `fastpath_enabled`, `context_awareness_enabled`, and `trusted_commands` are ignored. Discovery checks the tool call's working directory and walks up to the nearest declared workspace root, inclusive. It also checks declared workspace roots directly. If no workspace root contains the working directory, discovery is bounded by the nearest `.git` directory or file; without one, it checks only the candidate directory. When a hook payload has neither a working directory nor workspace roots, the process working directory is the fallback and uses the same bounds. Target file directories are never used for config discovery.
-
-Relative `audit_log_path` values are anchored to `~/.jevguard`, the directory containing the user config.
-
-Use the CLI to inspect effective values and prepare or revoke a trust record:
-
-```text
-jev-guard config show
-jev-guard config trust .jevguard.json
-jev-guard config untrust .jevguard.json
-```
-
-`config trust` prints the file's canonical path, root, SHA-256 digest, supported settings, and the registry entry to review. It does not grant trust. To approve it, manually add that entry to `~/.jevguard/trusted-project-configs.json`:
-
-```json
-{
-  "version": 1,
-  "entries": [
-    {
-      "project_root": "/path/to/project",
-      "config_path": "/path/to/project/.jevguard.json",
-      "sha256": "digest-printed-by-config-trust"
-    }
-  ]
-}
-```
-
-The digest is checked on every invocation. Editing or replacing the config requires a new reviewed record. `config untrust` identifies the user-owned registry entry to remove. The CLI does not write trust approvals because a confirmation typed into an agent-controlled shell would not prove that the user reviewed them. This design assumes the agent process cannot write the selected user config or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as the user, manual approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
-
-### Repository Git config (`.git/config`)
-
-The built-in `.git/config` sensitive-file pattern asks for confirmation (`ASK`, source `fastpath_sensitive`) whenever a tool call accesses a repository's Git config file directly:
-
-- File tools that read, write, or edit the file (`Read`, `Write`, `Edit`, `view_file`, `write_to_file`, `file://` URIs, and so on).
-- Shell commands that name the file, such as `cat .git/config`, `type .git\config`, `Get-Content C:\repo\.git\config`, `git config --file .git/config ...`, or `git log -- .git/config`. A trusted command prefix does not override the prompt.
-
-Matching ignores case and treats `/` and `\` as equivalent. The `.git/config` pattern is a substring match, so bare-repository configs (`repo.git/config`) and siblings such as `.git/config.lock` and `.git/config.worktree` also prompt. A built-in structural rule also covers the Git config files that a substring cannot express. These matches are reported as `Access to repository Git config file`:
-
-- Submodule configs: `.git/modules/<name...>/config` and `.git/modules/<name...>/config.worktree`, including nested submodules and names that contain `/`.
-- Linked worktree configs: `.git/worktrees/<name>/config.worktree`.
-- Relative paths that only reach a Git directory when joined with the working directory. Examples are `cat config` run from `repo/.git`, `../config` run from `.git/hooks`, and `config` run from a bare `repo.git`. Inside a command, the program name and the word after `git` are not treated as paths, so `git config --list` run from inside `.git` is unaffected.
-
-Any path segment that ends in `.git` counts as a Git directory. Paths that only look similar, such as `.github/config.yml`, `internal/git/config.go`, `src/modules/lib/config`, or `config` in a working tree, are not affected.
-
-The prompt does not depend on what the file contains. A file with a credential-free `[core]` section prompts the same way as one with `url = https://user:token@host/repo.git`. When the session has an active user intent, the fast path does not prompt. It defers to TypeSafe AI semantic evaluation, as it does for every sensitive file.
-
-Git CLI commands that do not name the file are outside this rule. Examples are `git config --get remote.origin.url`, `git config --local --list`, `git remote -v`, and `git remote set-url`. They are not trusted commands, so the fast path never auto-allows them. Instead, TypeSafe AI evaluates them semantically.
-
-`git remote -v` and `git config --list` can print a credential embedded in a remote URL, yet they deliberately stay with semantic evaluation. Agents run `git remote -v` routinely to identify a repository's host and owner, and most remotes carry no credentials. Prompting on it would add the most frequent prompt of this policy while rarely protecting a secret. A narrow rule would also be incomplete. The same URL is printed by `git remote show`, `git remote get-url`, `git ls-remote --get-url`, `git config --get-regexp`, `git config --get remote.<name>.url`, `git submodule foreach`, and verbose fetch or push output. Guarding a few of these would suggest coverage that does not exist. The reliable mitigation is to keep credentials out of remote URLs and use a credential helper.
-
-**Why this policy.** We considered three alternatives:
-
-- *Ask only when the content has credentials, such as a URL with userinfo.* A pre-tool hook runs before a read, so it cannot see what the read will return. Reads are the main exposure path, so a content check would leave them unprotected. For writes, the credential is not the only risk. Keys such as `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, and `alias.*` make later `git` invocations run arbitrary commands, so even a credential-free write needs a confirmation.
-- *Ask on reads but allow writes or `git config` usage.* This has the same code-execution problem for writes. Matching on `git config` subcommands would also mean parsing every Git flag form and config scope locally, which belongs in semantic evaluation.
-- *Never ask, rely on semantic evaluation.* Without a user intent, a read tool is auto-allowed by the fast path. Embedded tokens would then reach the agent with no confirmation.
-
-**Trade-off.** Agents seldom open `.git/config` directly. They use the Git CLI, which this rule does not affect. The extra prompts are therefore limited to deliberate direct access, including harmless reads of credential-free config. Because any segment ending in `.git` counts as a Git directory, a normal checkout in a folder named like `dotfiles.git` also prompts for its `config` file. Relative paths resolve only against the call's working directory, so a shell `cd .git && cat config` inside a single command is not resolved locally and goes to semantic evaluation.
-
-### Operating Modes
-
-`jev-guard` supports two operational modes configured via `"mode"` in the user-owned config:
-
-- **`enforcing`** (default): Active safety gating.
-  - Catastrophic operations or security violations are blocked (`DENY` / exit code 2).
-  - Sensitive file accesses, boundary escapes, or moderate risk operations trigger safety escalation:
-    - **Antigravity**: Emits `"force_ask"` on stdout with `permissionOverrides`, guaranteeing an interactive approval modal even in Turbo Mode.
-    - **Claude Code & Codex**: Exits with **code 2** (hard block with reason on `stderr`), preventing bypass flags (`--dangerously-skip-permissions`, `--yolo`, headless `-p`) from silently executing unconfirmed actions.
-  - Safe, contained operations are permitted (`ALLOW` / exit code 0).
-- **`audit`**: Passive evaluation and dry-run monitoring.
-  - All operations are processed through fastpath and TypeSafe AI semantic evaluation.
-  - Full evaluation telemetry is written to `.jevguard.log`.
-  - All `DENY`, `ASK`, and `force_ask` decisions are converted to `ALLOW` with an `[AUDIT-MODE: <decision>]` reason prefix, ensuring zero interruption to agent workflows while capturing telemetry.
-
-### Configuration Options
-
-Edit the generated `~/.jevguard/.jevguard.json` for user-owned settings. The API key can be supplied there or through the credential-only environment variable:
-```bash
-export TYPESAFE_API_KEY="your-typesafe-api-key"
-```
-
-Example user config:
 ```json
 {
   "mode": "enforcing",
-  "base_url": "https://api.typesafe.ai/v1/systemone",
-  "api_key": "your-typesafe-api-key",
-  "timeout_ms": 1500,
-  "model": "jev-latest",
   "fastpath_enabled": true,
   "context_awareness_enabled": true,
-  "intent_ttl_minutes": 30,
   "audit_log_path": ".jevguard.log",
-  "sensitive_files": [
-    ".env",
-    "*.pem",
-    "id_rsa"
-  ],
-  "trusted_commands": [
-    "git status",
-    "git log"
-  ]
+  "sensitive_files": [".env", "*.pem", "id_rsa"],
+  "trusted_commands": ["git status", "git log"]
 }
 ```
 
-The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs. API requests do not follow redirects. `TYPESAFE_API_KEY` supplies credentials; environment variables cannot change mode, endpoint, model, timeout, or other policy settings.
+The most common changes:
 
-### Recommended `.gitignore` Entries
+- **`mode`**: `"enforcing"` (default) or `"audit"` (log only, never block).
+- **`sensitive_files`**: extra file patterns that always need confirmation.
+- **`trusted_commands`**: command prefixes allowed instantly without a network call.
+- **`audit_log_path`**: write every decision to a JSONL log.
 
-To protect your TypeSafe AI credentials and prevent committing local telemetry logs, add the following to your project's `.gitignore`:
+Every setting, the project-config trust model, and the audit log format are described in [docs/configuration.md](docs/configuration.md).
 
-```gitignore
-# Optional project additions and local audit logs
-.jevguard.log
-*.jevguard.log
-```
+## Documentation
 
-### Settings & Environment Variables Reference
-
-| Setting | Configuration Key | Environment Variable | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| **Mode** | `mode` | — | `"enforcing"` | Operational mode: `"enforcing"` or `"audit"` |
-| **API Key** | `api_key` / `typesafe_api_key` | `TYPESAFE_API_KEY` | `""` | TypeSafe AI API key |
-| **Base URL** | `base_url` | — | TypeSafe API default | HTTPS endpoint, or loopback HTTP endpoint |
-| **Model** | `model` | — | `"jev-latest"` | System One evaluation model |
-| **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
-| **Fastpath** | `fastpath_enabled` | — | `true` | Enable sub-1ms local fastpath filter |
-| **Context Awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching & intent-aware evaluation |
-| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1-1440); the Claude `Stop` hook normally ends it sooner. User config only |
-| **Audit Log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging |
-| **Sensitive Files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; trusted project config can only add more |
-| **Trusted Commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes cached for zero-latency approval |
-
-### Configuration Precedence
-
-1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
-2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key.
-3. **Trusted project config** can add `sensitive_files` only when the canonical path and exact SHA-256 digest match the user trust registry.
-4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, standard sensitive file patterns, and read commands.
-
-### Audit Log Schema
-
-When `"audit_log_path"` is configured, every tool evaluation produces a JSONL entry:
-
-```json
-{
-  "timestamp": "2026-09-18T12:00:00Z",
-  "tool_name": "run_command",
-  "command": "git diff .env",
-  "target_path": "",
-  "decision": "force_ask",
-  "reason": "Access to sensitive file or credential pattern: .env",
-  "source": "fastpath_sensitive",
-  "confidence": 1.0
-}
-```
-
----
-
-## Hook Setup
-
-### Claude Code (`.claude/settings.json`)
-
-Configure hooks inside `.claude/settings.json` (workspace) or `~/.claude/settings.json` (global). Configure `UserPromptSubmit` to ingest human instructions into the session cache, `Stop` to end that intent when the reply finishes, and `PreToolUse` to enforce safety. Do not add `SubagentStop`: subagents finishing must not cut off the main reply's intent.
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard ingest"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard end-turn"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-> [!NOTE]
-> `jev-guard` formats Claude Code PreToolUse verdicts using the standard `hookSpecificOutput.permissionDecision` schema. Ingest confirmations are sent to `stderr` to ensure they never pollute active user prompts.
-
-### Antigravity (`.agents/hooks.json`)
-
-Configure `PreToolUse` for tool-level gating:
-
-Antigravity's documented `PreInvocation` payload includes a transcript path but does not include the prompt text or document the transcript JSONL format. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported by the explicit `jev-guard ingest` command.
-
-```json
-{
-  "jev-guard": {
-    "PreToolUse": [
-      {
-        "matcher": "run_command|write_to_file|replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Codex CLI (`.codex/hooks.json`)
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jev-guard"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Codex loads this project hook only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the current hook definition before it can run; editing the hook requires a new review.
-
----
-
-## Context-Aware Intent Policy Matrix
-
-When context awareness is enabled and intent is ingested, TypeSafe AI classifies `intent_alignment` into three categories:
-
-| Action Risk / Blast Radius | Unprompted / Contrary Intent | Incidental / Unclear Intent | Explicitly Requested by User |
-| :--- | :--- | :--- | :--- |
-| **Catastrophic Deletion** (`score > 2.5`, `catastrophic_deletion`) | **DENY** (Hard block) | **DENY** (Hard block) | **`force_ask`** (Mandatory interactive confirmation) |
-| **Moderate Blast Radius** (`score 1.2 – 2.4`, e.g. `rm -rf dist`) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`ALLOW`** (Auto-proceeds frictionlessly) |
-| **Sensitive File Access** (`.env`, `.pem`, credentials) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`ALLOW`** (Auto-proceeds frictionlessly) |
-| **Privilege / Persistence** (system profile edits, root escalations) | **DENY** (Hard block) | **DENY** (Hard block) | **`force_ask`** (Mandatory confirmation) |
-| **Workspace Boundary Escape** (`../../` traversal) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) | **`force_ask`** (Confirmation) |
-| **Anti-Tampering** (`~/.jevguard/` cache access) | **DENY** (Strict invariant) | **DENY** (Strict invariant) | **DENY** (Strict invariant) |
-
-For file-path tools (`Edit`/`Write`/`Read`), a deterministic local boundary proof that the target is inside the workspace is authoritative over the model's containment probability, so a low `IsWorkspaceContained` score alone no longer triggers a Workspace Boundary Escape prompt; shell commands are unaffected.
-
-> [!IMPORTANT]
-> **The Catastrophic Ceiling**: Even when explicitly commanded by the user, actions with catastrophic blast radius (e.g. `rm -rf /` or recursive drive formatting) **never auto-execute**. `jev-guard` downgrades them from a hard `DENY` to an interactive confirmation prompt (`force_ask`), giving human operators the final veto. This catastrophic invariant takes precedence over all violation categories (including credential access).
->
-> In addition, explicit authorization requires high confidence from TypeSafe AI (`intent_confidence >= 0.70`); lower-confidence classifications safely fall back to interactive confirmation (`force_ask` / `ASK`). Fastpath strictly defers all sensitive file accesses (`.env`, `.pem`, etc.) to semantic evaluation when user intent is active, preventing read tools or trusted command caches from prematurely auto-allowing access.
-
----
-
-### Platform Safety & Autonomous Matrix
-
-When running agents in autonomous, turbo, or bypass modes, `jev-guard` maintains strict invariants according to each harness's hook protocol:
-
-| Verdict | Antigravity (Turbo / `always-proceed`) | Claude Code (`--dangerously-skip-permissions`) | Codex CLI (`--yolo` / `approval_policy = "never"`) |
-| :--- | :--- | :--- | :--- |
-| **`ALLOW`** | Auto-proceeds (`"allow"`) | Auto-proceeds (Exit `0`) | Auto-proceeds (Exit `0`) |
-| **`ASK` / Sensitive / Escape** | **Halts & Prompts User** (`"force_ask"` overrides cache) | **Fails Safe & Blocks** (Exit `2` with `stderr` feedback) | **Fails Safe & Blocks** (Exit `2` with `stderr` feedback) |
-| **`DENY` / Catastrophic** | **Hard Block** (`"deny"`) | **Hard Block** (Exit `2`) | **Hard Block** (Exit `2`) |
-
----
-
-## Development & Testing
-
-```bash
-# Run all unit tests
-go test -v ./...
-
-# Build binary locally
-go build -o jev-guard .
-```
-
----
+| Guide | Contents |
+| :--- | :--- |
+| [Configuration](docs/configuration.md) | All settings, operating modes, precedence, project config trust, audit log |
+| [CLI reference](docs/cli.md) | Every command, `eval` flags, JSON output, exit codes |
+| [Security model](docs/security-model.md) | Supported tools, fast path rules, TypeSafe evaluation, intent matrix, `.git/config` policy |
+| [Manual hook setup](docs/hooks.md) | Hook JSON for Claude Code, Codex CLI, and Antigravity |
 
 ## Contributing
 
-Contributions are welcome! Whether it is extending harness support, refining detection heuristics, improving TypeSafe System One prompt templates, or reporting issues, community feedback and pull requests are greatly appreciated.
+Contributions are welcome, whether that's support for another agent, better detection rules, documentation fixes, or bug reports. Please [open an issue](https://github.com/ClemensSchartmueller/jev-guard/issues) to discuss larger changes first.
 
----
+To build and test locally (requires Go):
+
+```bash
+go test ./...
+go build -o jev-guard .
+```
 
 ## Disclaimer
 
 This software is provided "as is", without warranty of any kind, express or implied. Neither TypeSafe AI (`typesafe.ai`), the `jev-guard` project, nor its contributors or maintainers are liable for any damages, losses, or claims arising from the use or performance of this hook (including, but not limited to, damages caused by misclassifications, false positives, or false negatives from Jev AI / TypeSafe AI). Users are responsible for evaluating and supervising automated agent tool calls in their own environments.
 
----
-
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
-
+[MIT](LICENSE.md)
