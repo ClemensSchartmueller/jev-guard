@@ -51,7 +51,7 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if hold := applySessionContext(call, cfg, os.Stderr); hold != nil {
+	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 		}
@@ -111,6 +111,16 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 	return nil
 }
 
+// gateHold returns a verdict that stops the call before the gate runs. Anti-tampering
+// comes first: its DENY is stronger than any session hold and must not be downgraded
+// to a hold the user could approve.
+func gateHold(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
+	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
+		return tampering
+	}
+	return applySessionContext(call, cfg, stderr)
+}
+
 // abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.
 func abortedSessionResult() *harness.EvaluationResult {
 	return &harness.EvaluationResult{
@@ -128,6 +138,7 @@ func readStandardInput() ([]byte, error) {
 // gateTrace records the intermediate results of the gate pipeline so that both the
 // hook path and `jev-guard eval --explain` share a single implementation.
 type gateTrace struct {
+	Tampering        *harness.EvaluationResult
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
 	BoundaryRan      bool
@@ -168,10 +179,17 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 	return traceGateEvaluation(call, cfg, false).Final
 }
 
-// traceGateEvaluation runs boundary, fastpath, semantic evaluation, and policy.
+// traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
 	trace := &gateTrace{}
+	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
+	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
+		trace.Tampering = tampering
+		trace.Final = applyAuditMode(tampering, cfg.Mode)
+		return trace
+	}
+
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
