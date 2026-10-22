@@ -47,16 +47,9 @@ func NewDefaultFilter() *Filter {
 
 // Evaluate checks the tool call against local invariants and latency cache.
 // Returns nil if semantic analysis by TypeSafe AI (Jev) is needed.
+// Anti-tampering is not part of the filter: callers run CheckAntiTampering first,
+// regardless of whether the fast path is enabled.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
-	if reason := f.checkAntiTampering(call); reason != "" {
-		return &harness.EvaluationResult{
-			Decision:   harness.DecisionDeny,
-			Reason:     reason,
-			Source:     "fastpath_tampering",
-			Confidence: 1.0,
-		}
-	}
-
 	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
@@ -101,21 +94,30 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	return nil
 }
 
-func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
+// CheckAntiTampering denies any access to jev-guard's own configuration, log, or
+// session state. It is a hard invariant: it runs before every other check and does
+// not depend on fastpath_enabled or user intent. Returns nil when the call is clean.
+func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
 	if call == nil {
-		return ""
+		return nil
 	}
 
-	if session.IsJevguardPath(call.TargetPath) {
-		return "Direct access to jev-guard security directory or configuration file is prohibited"
-	}
-
+	reason := ""
 	lowerCmd := strings.ToLower(call.Command)
-	if strings.Contains(lowerCmd, ".jevguard") || strings.Contains(lowerCmd, "jevguard.json") {
-		return "Access to jev-guard configuration or session state via command is prohibited"
+	if session.IsJevguardPath(call.TargetPath) {
+		reason = "Direct access to jev-guard security directory or configuration file is prohibited"
+	} else if strings.Contains(lowerCmd, ".jevguard") || strings.Contains(lowerCmd, "jevguard.json") {
+		reason = "Access to jev-guard configuration or session state via command is prohibited"
+	} else {
+		return nil
 	}
 
-	return ""
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionDeny,
+		Reason:     reason,
+		Source:     "fastpath_tampering",
+		Confidence: 1.0,
+	}
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {

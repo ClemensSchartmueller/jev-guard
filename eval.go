@@ -46,6 +46,7 @@ type evalReport struct {
 	WorkspaceRoots        []string `json:"workspace_roots,omitempty"`
 	BoundaryStatus        string   `json:"boundary_status"`
 	Contained             *bool    `json:"boundary_contained"`
+	TamperingDenied       bool     `json:"tampering_denied"`
 	FastpathRan           bool     `json:"fastpath_ran"`
 	FastpathDecision      string   `json:"fastpath_decision,omitempty"`
 	FastpathReason        string   `json:"fastpath_reason,omitempty"`
@@ -313,6 +314,7 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 		TargetPath:            call.TargetPath,
 		Cwd:                   call.Cwd,
 		WorkspaceRoots:        call.WorkspaceRoots,
+		TamperingDenied:       t.Tampering != nil,
 		FastpathRan:           t.FastpathRan,
 		TypeSafeRan:           t.SemanticRan,
 		WouldSendToJudge:      t.WouldSendToJudge,
@@ -390,13 +392,24 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	default:
 		fmt.Fprintf(w, "    %q %s\n", rep.Intent, in.Note)
 	}
-	hdr("Boundary")
-	switch rep.BoundaryStatus {
-	case boundaryStatusSkipped:
+	hdr("Anti-tampering")
+	switch {
+	case in.Aborted:
 		fmt.Fprintln(w, "    skipped (session aborted)")
-	case boundaryStatusNoTarget:
+	case t.Tampering != nil:
+		fmt.Fprintf(w, "    verdict: %s - %s\n", t.Tampering.Decision, t.Tampering.Reason)
+	default:
+		fmt.Fprintln(w, "    no jev-guard files touched")
+	}
+	hdr("Boundary")
+	switch {
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    skipped (anti-tampering decided)")
+	case rep.BoundaryStatus == boundaryStatusSkipped:
+		fmt.Fprintln(w, "    skipped (session aborted)")
+	case rep.BoundaryStatus == boundaryStatusNoTarget:
 		fmt.Fprintln(w, "    no target path: treated as contained")
-	case boundaryStatusContained:
+	case rep.BoundaryStatus == boundaryStatusContained:
 		fmt.Fprintln(w, "    target is inside the workspace")
 	default:
 		fmt.Fprintln(w, "    target is OUTSIDE the workspace (or could not be resolved)")
@@ -405,6 +418,8 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	switch {
 	case in.Aborted:
 		fmt.Fprintln(w, "    skipped (session aborted)")
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    skipped (anti-tampering decided)")
 	case !t.FastpathRan:
 		fmt.Fprintln(w, "    disabled")
 	case t.Fastpath != nil:
@@ -423,6 +438,8 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 		fmt.Fprintf(w, "    judgments: %s\n", b)
 	case t.WouldSendToJudge:
 		fmt.Fprintln(w, "    would be sent to TypeSafe (skipped, --offline)")
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    not consulted (anti-tampering decided)")
 	default:
 		fmt.Fprintln(w, "    not consulted (fastpath decided)")
 	}

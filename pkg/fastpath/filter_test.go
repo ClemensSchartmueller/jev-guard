@@ -468,13 +468,11 @@ func TestFastPath_AntiTampering(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("JEV_GUARD_HOME", tempHome)
 
-	filter := NewDefaultFilter()
-
 	callTarget := &harness.NormalizedToolCall{
 		ToolName:   "write_to_file",
 		TargetPath: tempHome + "/sessions/override.json",
 	}
-	resTarget := filter.Evaluate(callTarget)
+	resTarget := CheckAntiTampering(callTarget)
 	if resTarget == nil || resTarget.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for writing to jevguard home, got %+v", resTarget)
 	}
@@ -483,7 +481,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName: "run_command",
 		Command:  "cat ~/.jevguard/sessions/default.json",
 	}
-	resCmd := filter.Evaluate(callCmd)
+	resCmd := CheckAntiTampering(callCmd)
 	if resCmd == nil || resCmd.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for command accessing .jevguard, got %+v", resCmd)
 	}
@@ -492,7 +490,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "write_to_file",
 		TargetPath: ".jevguard/sessions/malicious.json",
 	}
-	resRelTarget := filter.Evaluate(callRelTarget)
+	resRelTarget := CheckAntiTampering(callRelTarget)
 	if resRelTarget == nil || resRelTarget.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for relative path targeting .jevguard, got %+v", resRelTarget)
 	}
@@ -501,7 +499,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "view_file",
 		TargetPath: ".jevguard.json",
 	}
-	resConfig := filter.Evaluate(callConfig)
+	resConfig := CheckAntiTampering(callConfig)
 	if resConfig == nil || resConfig.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for reading .jevguard.json, got %+v", resConfig)
 	}
@@ -510,7 +508,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "read_file",
 		TargetPath: "jevguard.json",
 	}
-	resConfigAlt := filter.Evaluate(callConfigAlt)
+	resConfigAlt := CheckAntiTampering(callConfigAlt)
 	if resConfigAlt == nil || resConfigAlt.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for reading jevguard.json, got %+v", resConfigAlt)
 	}

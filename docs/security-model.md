@@ -24,7 +24,7 @@ MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-gua
 
 ## Local fast path
 
-Before any network call, a local filter (under 1 ms) runs these checks. Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to skip it and send every call to TypeSafe AI.
+Before any network call, a local filter (under 1 ms) runs these checks. Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to skip it and send every call to TypeSafe AI. [Anti-tampering](#anti-tampering) is the exception: it always runs first, even with the fast path disabled.
 
 ### Sensitive file protection
 
@@ -51,7 +51,7 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 
 ### Anti-tampering
 
-Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied.
+Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied. This check runs before every other stage and does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
 
 ### Trusted commands and read tools
 

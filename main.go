@@ -128,6 +128,7 @@ func readStandardInput() ([]byte, error) {
 // gateTrace records the intermediate results of the gate pipeline so that both the
 // hook path and `jev-guard eval --explain` share a single implementation.
 type gateTrace struct {
+	Tampering        *harness.EvaluationResult
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
 	BoundaryRan      bool
@@ -168,10 +169,17 @@ func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config)
 	return traceGateEvaluation(call, cfg, false).Final
 }
 
-// traceGateEvaluation runs boundary, fastpath, semantic evaluation, and policy.
+// traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
 	trace := &gateTrace{}
+	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
+	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
+		trace.Tampering = tampering
+		trace.Final = applyAuditMode(tampering, cfg.Mode)
+		return trace
+	}
+
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {

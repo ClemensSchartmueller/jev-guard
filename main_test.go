@@ -47,6 +47,37 @@ func TestTraceGateEvaluationPreservesVerifiedBoundaryEvidence(t *testing.T) {
 	}
 }
 
+func TestTraceGateEvaluationDeniesTamperingWithFastpathDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.95},
+			"destructive_potential":{"type":"score","score":0.05,"confidence":0.95},
+			"violation_category":{"type":"choice","choice":"none","confidence":0.95},
+			"intent_alignment":{"type":"choice","choice":"explicitly_requested","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	disabled := false
+	cfg := config.DefaultConfig()
+	cfg.APIKey, cfg.BaseURL, cfg.FastpathEnabled = "test-key", server.URL, &disabled
+	call := &harness.NormalizedToolCall{
+		ToolName:   "Bash",
+		Command:    "cat ~/.jevguard/.jevguard.json",
+		Cwd:        t.TempDir(),
+		UserIntent: "show me my jev-guard config",
+	}
+	for _, offline := range []bool{false, true} {
+		trace := traceGateEvaluation(call, cfg, offline)
+		if trace.Final == nil || trace.Final.Decision != harness.DecisionDeny || trace.Final.Source != "fastpath_tampering" {
+			t.Fatalf("offline=%t final=%+v; want fastpath_tampering DENY", offline, trace.Final)
+		}
+		if trace.FastpathRan || trace.SemanticRan || trace.WouldSendToJudge {
+			t.Fatalf("offline=%t trace=%+v; anti-tampering must decide before fastpath and TypeSafe", offline, trace)
+		}
+	}
+}
+
 type countingBoundaryChecker struct {
 	calls     int
 	contained bool

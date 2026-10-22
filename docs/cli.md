@@ -75,7 +75,7 @@ ASK: Access to sensitive file or credential pattern: .env (source: fastpath_sens
 - `--cwd DIR` sets the working directory (default: current directory).
 - `--intent TEXT` simulates the user's prompt for intent-aware decisions, for example `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent exactly as the hook does, so the fast path defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (such as `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
 - `--offline` skips the TypeSafe network call. If the fast path has no verdict, the result says the call "would be sent to TypeSafe".
-- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fast path result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
+- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, anti-tampering result, boundary result, fast path result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
 
 `jev-guard explain ...` is shorthand for `jev-guard eval --explain ...` and rejects `--json` and `--explain`.
@@ -97,7 +97,7 @@ Flags take values as `--flag value` or `--flag=value`. Boolean flags accept expl
 | `contained` | The target resolved inside the workspace. | `true` |
 | `escaped` | The target is outside the workspace or could not be resolved. | `false` |
 | `no_target` | The call has no target path (such as a shell command); treated as contained, as in the hook. | `true` |
-| `skipped` | The boundary stage did not run because a stop/cancel `--intent` held the call as an aborted session. | `null` |
+| `skipped` | The boundary stage did not run, either because a stop/cancel `--intent` held the call as an aborted session or because anti-tampering denied it (`tampering_denied: true`). | `null` |
 
 Use `boundary_status` to tell a skipped check from an uncontained target. `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
 
