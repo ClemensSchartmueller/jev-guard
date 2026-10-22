@@ -51,7 +51,7 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
-	if hold := applySessionContext(call, cfg, os.Stderr); hold != nil {
+	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 		}
@@ -109,6 +109,16 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 		call.UserIntent = intent
 	}
 	return nil
+}
+
+// gateHold returns a verdict that stops the call before the gate runs. Anti-tampering
+// comes first: its DENY is stronger than any session hold and must not be downgraded
+// to a hold the user could approve.
+func gateHold(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
+	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
+		return tampering
+	}
+	return applySessionContext(call, cfg, stderr)
 }
 
 // abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.

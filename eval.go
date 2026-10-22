@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"jev-guard/pkg/config"
+	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
 )
@@ -253,7 +254,8 @@ func evaluate(o *evalOptions, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg := evalLoadConfig(call)
 	intent := applyEvalIntent(call, cfg, o.intent)
 	var trace *gateTrace
-	if intent.Aborted {
+	// Anti-tampering outranks the aborted-session hold, as in the hook (gateHold).
+	if intent.Aborted && fastpath.CheckAntiTampering(call) == nil {
 		trace = &gateTrace{Final: applyAuditMode(abortedSessionResult(), cfg.Mode)}
 	} else {
 		trace = traceGateEvaluation(call, cfg, o.offline)
@@ -394,10 +396,10 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	}
 	hdr("Anti-tampering")
 	switch {
-	case in.Aborted:
-		fmt.Fprintln(w, "    skipped (session aborted)")
 	case t.Tampering != nil:
 		fmt.Fprintf(w, "    verdict: %s - %s\n", t.Tampering.Decision, t.Tampering.Reason)
+	case in.Aborted:
+		fmt.Fprintln(w, "    no jev-guard files touched")
 	default:
 		fmt.Fprintln(w, "    no jev-guard files touched")
 	}
@@ -416,10 +418,10 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	}
 	hdr("Fastpath")
 	switch {
-	case in.Aborted:
-		fmt.Fprintln(w, "    skipped (session aborted)")
 	case t.Tampering != nil:
 		fmt.Fprintln(w, "    skipped (anti-tampering decided)")
+	case in.Aborted:
+		fmt.Fprintln(w, "    skipped (session aborted)")
 	case !t.FastpathRan:
 		fmt.Fprintln(w, "    disabled")
 	case t.Fastpath != nil:
@@ -429,6 +431,8 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	}
 	hdr("TypeSafe")
 	switch {
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    not consulted (anti-tampering decided)")
 	case in.Aborted:
 		fmt.Fprintln(w, "    skipped (session aborted)")
 	case t.SemanticRan && t.EvalErr != nil:
@@ -438,8 +442,6 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 		fmt.Fprintf(w, "    judgments: %s\n", b)
 	case t.WouldSendToJudge:
 		fmt.Fprintln(w, "    would be sent to TypeSafe (skipped, --offline)")
-	case t.Tampering != nil:
-		fmt.Fprintln(w, "    not consulted (anti-tampering decided)")
 	default:
 		fmt.Fprintln(w, "    not consulted (fastpath decided)")
 	}

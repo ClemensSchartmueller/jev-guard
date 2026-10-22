@@ -371,11 +371,24 @@ func TestEvalAntiTamperingWithFastpathDisabled(t *testing.T) {
 		t.Errorf("expected anti-tampering to decide before fastpath and TypeSafe, got %+v", rep)
 	}
 	out := e.mustRun(append(args, "--explain")...)
-	for _, want := range []string{"] Anti-tampering\n    verdict: deny - ", "] Fastpath\n    skipped (anti-tampering decided)\n"} {
+	for _, want := range []string{
+		"] Anti-tampering\n    verdict: deny - ",
+		"] Boundary\n    skipped (anti-tampering decided)\n",
+		"] Fastpath\n    skipped (anti-tampering decided)\n",
+		"] TypeSafe\n    not consulted (anti-tampering decided)\n",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("explain missing %q:\n%s", want, out)
 		}
 	}
+}
+
+func TestEvalAntiTamperingOutranksAbortedSession(t *testing.T) {
+	e := newEvalEnv(t, "")
+	ws := e.workspace()
+	rep := e.report("--cmd", "cat ~/.jevguard/.jevguard.json", "--intent", "stop", "--offline", "--cwd", ws)
+	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+	requireVerdict(t, e.report("--cmd", "ls", "--intent", "stop", "--offline", "--cwd", ws), harness.DecisionForceAsk, sourceSessionAborted)
 }
 
 func TestEvalIntentExplain(t *testing.T) {

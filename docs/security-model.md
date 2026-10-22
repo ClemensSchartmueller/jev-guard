@@ -51,7 +51,11 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 
 ### Anti-tampering
 
-Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied. This check runs before every other stage and does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
+Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering, including tampering with the session cache files in `~/.jevguard`.
+
+- Every path-like argument is checked, not only the one used as the call's target. A `source` argument next to `dest` is also checked.
+- File-name filters (`glob`, `Includes`, `Excludes`, and the `pattern` of `Glob` and `find_by_name`) and shell command text are denied if they contain `.jevguard` or `jevguard.json`. Content search patterns, such as Grep's `pattern`, are not checked.
+- The check runs before every other stage, including the aborted-session and session-read-error holds. It does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
 
 ### Trusted commands and read tools
 

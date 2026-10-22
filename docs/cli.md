@@ -49,7 +49,7 @@ Without `--agent`, `init` prints the agents it detected. With `--scope user`, it
 
 ## Simulating decisions with `eval`
 
-`jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fast path, TypeSafe, policy, harness formatting) without a live agent:
+`jev-guard eval` runs the real gate pipeline (config, normalization, anti-tampering, session hold, boundary, fast path, TypeSafe, policy, harness formatting) without a live agent:
 
 ```bash
 jev-guard eval --cmd "git diff .env"
@@ -100,6 +100,10 @@ Flags take values as `--flag value` or `--flag=value`. Boolean flags accept expl
 | `skipped` | The boundary stage did not run, either because a stop/cancel `--intent` held the call as an aborted session or because anti-tampering denied it (`tampering_denied: true`). | `null` |
 
 Use `boundary_status` to tell a skipped check from an uncontained target. `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
+
+### Anti-tampering fields in `--json` output
+
+`tampering_denied` is `true` when anti-tampering denied the call. Anti-tampering runs before every other stage, so in that case `fastpath_ran` and `typesafe_ran` are `false`, `fastpath_decision` and `fastpath_reason` are omitted, and `boundary_status` is `skipped`. The verdict keeps `source: "fastpath_tampering"` for compatibility with existing audit logs.
 
 ## Session intent
 
