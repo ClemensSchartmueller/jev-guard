@@ -24,7 +24,7 @@ if ((Get-Command go -ErrorAction SilentlyContinue) -and (Test-Path ".\main.go") 
     $GitTag = try { (git describe --tags --exact-match 2>$null).Trim() } catch { "dev" }
     if (!$GitTag) { $GitTag = "dev" }
     $LdFlags = "-s -w -X jev-guard/pkg/cli.Version=$GitTag -X jev-guard/pkg/cli.Commit=$GitCommit -X jev-guard/pkg/cli.Date=$GitDate"
-    go build -ldflags $LdFlags -o $BinaryTarget .\main.go
+    go build -ldflags $LdFlags -o $BinaryTarget .
 } else {
     if (![Environment]::Is64BitOperatingSystem) {
         Write-Error "Unsupported architecture: 32-bit Windows is not supported by prebuilt binaries. Please install Go and compile from source."

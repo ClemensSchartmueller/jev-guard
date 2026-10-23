@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
+	"jev-guard/pkg/session"
 )
 
 func TestTraceGateEvaluationPreservesVerifiedBoundaryEvidence(t *testing.T) {
@@ -228,5 +230,112 @@ func TestIsLocalPathVerifiedSensitivePaths(t *testing.T) {
 	call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: p, RawArgs: map[string]interface{}{"file_path": p}}
 	if !isLocalPathVerified(call, true) {
 		t.Errorf("isLocalPathVerified(%q) = false; want true", p)
+	}
+}
+
+func TestApplySessionContext(t *testing.T) {
+	type setupFn func(t *testing.T)
+	saveSession := func(state *session.SessionState) setupFn {
+		return func(t *testing.T) {
+			if err := session.SaveSession(state); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeCorrupt := func(t *testing.T) {
+		if err := os.WriteFile(session.SessionFilePath("s1"), []byte("{not json"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDirectory := func(t *testing.T) {
+		if err := os.Mkdir(session.SessionFilePath("s1"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name            string
+		setup           setupFn
+		disableContext  bool
+		wantHold        bool
+		wantDecision    harness.Decision
+		wantSource      string
+		wantIntent      string
+		wantStderr      bool
+		wantFileRemains bool
+	}{
+		{name: "absent session", setup: nil},
+		{name: "valid session", setup: saveSession(&session.SessionState{SessionID: "s1", Prompt: "list files"}), wantIntent: "list files"},
+		{name: "aborted session", setup: saveSession(&session.SessionState{SessionID: "s1", Prompt: "stop"}), wantHold: true, wantDecision: harness.DecisionForceAsk, wantSource: sourceSessionAborted},
+		{name: "corrupt json", setup: writeCorrupt, wantHold: true, wantDecision: harness.DecisionForceAsk, wantSource: sourceSessionReadError, wantStderr: true, wantFileRemains: true},
+		{name: "unreadable directory", setup: makeDirectory, wantHold: true, wantDecision: harness.DecisionForceAsk, wantSource: sourceSessionReadError, wantStderr: true, wantFileRemains: true},
+		{name: "context awareness disabled with corrupt file", setup: writeCorrupt, disableContext: true, wantFileRemains: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.setup != nil {
+				tc.setup(t)
+			}
+			cfg := config.DefaultConfig()
+			if tc.disableContext {
+				f := false
+				cfg.ContextAwarenessEnabled = &f
+			}
+			call := &harness.NormalizedToolCall{SessionID: "s1", ToolName: "Bash", Command: "ls"}
+			var stderr bytes.Buffer
+
+			hold := applySessionContext(call, cfg, &stderr)
+
+			if !tc.wantHold {
+				if hold != nil {
+					t.Fatalf("expected nil hold, got %+v", *hold)
+				}
+			} else {
+				if hold == nil {
+					t.Fatal("expected a hold, got nil")
+				}
+				if hold.Decision != tc.wantDecision {
+					t.Errorf("Decision = %q, want %q", hold.Decision, tc.wantDecision)
+				}
+				if hold.Source != tc.wantSource {
+					t.Errorf("Source = %q, want %q", hold.Source, tc.wantSource)
+				}
+			}
+			if call.UserIntent != tc.wantIntent {
+				t.Errorf("UserIntent = %q, want %q", call.UserIntent, tc.wantIntent)
+			}
+			if tc.wantStderr && stderr.Len() == 0 {
+				t.Error("expected stderr diagnostic, got none")
+			}
+			if !tc.wantStderr && stderr.Len() != 0 {
+				t.Errorf("expected empty stderr, got %q", stderr.String())
+			}
+			if tc.wantFileRemains {
+				if _, err := os.Stat(session.SessionFilePath("s1")); err != nil {
+					t.Errorf("session file should remain: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyAuditMode_RewritesSessionReadErrorHold(t *testing.T) {
+	hold := &harness.EvaluationResult{
+		Decision:   harness.DecisionForceAsk,
+		Reason:     "held",
+		Source:     sourceSessionReadError,
+		Confidence: 1.0,
+	}
+	got := applyAuditMode(hold, "audit")
+	if got.Decision != harness.DecisionAllow {
+		t.Errorf("Decision = %q, want %q", got.Decision, harness.DecisionAllow)
+	}
+	if got.Source != sourceSessionReadError {
+		t.Errorf("Source = %q, want %q", got.Source, sourceSessionReadError)
 	}
 }

@@ -1,6 +1,7 @@
 package fastpath
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,4 +147,83 @@ func TestClaudeSessionToolResult_NotAllowed(t *testing.T) {
 			t.Fatalf("expected non-ALLOW for symlink escape, got ALLOW (reason: %s)", res.Reason)
 		}
 	})
+}
+
+func TestClaudeSessionToolResult_RejectsMoreCases(t *testing.T) {
+	home, toolResultsDir, ws, allowed := setupToolResultEnv(t)
+
+	t.Run("directory in tool-results", func(t *testing.T) {
+		dir := filepath.Join(toolResultsDir, "dir")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if isClaudeSessionToolResult(toolResultCall(ws, "Read", dir, testToolResultSID)) {
+			t.Fatal("expected a directory to be rejected")
+		}
+	})
+
+	t.Run("symlink into other session", func(t *testing.T) {
+		other := filepath.Join(home, ".claude", "projects", "C--dev-proj", "other-session", "tool-results", "out.txt")
+		writeTestFile(t, other)
+		link := filepath.Join(toolResultsDir, "other-link.txt")
+		if err := os.Symlink(other, link); err != nil {
+			t.Skipf("symlink not supported: %v", err)
+		}
+		if isClaudeSessionToolResult(toolResultCall(ws, "Read", link, testToolResultSID)) {
+			t.Fatal("expected a symlink into another session to be rejected")
+		}
+	})
+
+	t.Run("home resolution error", func(t *testing.T) {
+		userHomeDir = func() (string, error) { return "", errHomeNotStubbed }
+		if isClaudeSessionToolResult(toolResultCall(ws, "Read", allowed, testToolResultSID)) {
+			t.Fatal("expected rejection when the home directory cannot be resolved")
+		}
+	})
+
+	t.Run("empty home", func(t *testing.T) {
+		userHomeDir = func() (string, error) { return "", nil }
+		if isClaudeSessionToolResult(toolResultCall(ws, "Read", allowed, testToolResultSID)) {
+			t.Fatal("expected rejection for an empty home directory")
+		}
+	})
+}
+
+func TestClaudeSessionToolResult_SymlinkedHome(t *testing.T) {
+	_, _, ws, allowed := setupToolResultEnv(t)
+	realHome, err := userHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkHome := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realHome, linkHome); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	userHomeDir = func() (string, error) { return linkHome, nil }
+
+	rel, err := filepath.Rel(realHome, allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isClaudeSessionToolResult(toolResultCall(ws, "Read", filepath.Join(linkHome, rel), testToolResultSID)) {
+		t.Fatal("expected a tool result under a symlinked home to be allowed")
+	}
+}
+
+// TestClaudeSessionToolResult_IgnoresHostHome proves the matcher reads the
+// home directory only through the userHomeDir seam: a valid layout under
+// $HOME is not allowed while the TestMain default seam is in place.
+func TestClaudeSessionToolResult_IgnoresHostHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	saved := filepath.Join(home, ".claude", "projects", "C--dev-proj", testToolResultSID, "tool-results", "out.txt")
+	writeTestFile(t, saved)
+
+	if _, err := userHomeDir(); !errors.Is(err, errHomeNotStubbed) {
+		t.Fatalf("expected the TestMain default seam, got err=%v", err)
+	}
+	if isClaudeSessionToolResult(toolResultCall(t.TempDir(), "Read", saved, testToolResultSID)) {
+		t.Fatal("matcher resolved the host home instead of the userHomeDir seam")
+	}
 }

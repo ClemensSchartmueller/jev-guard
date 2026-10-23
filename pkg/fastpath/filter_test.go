@@ -100,6 +100,155 @@ func TestFastPath_SensitiveFiles_DockerAndGitconfig(t *testing.T) {
 		t.Errorf("expected generic config.json NOT to be flagged sensitive, got %+v", res)
 	}
 }
+
+func assertSensitiveAsk(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	res := filter.Evaluate(call)
+	if res == nil {
+		t.Errorf("%s: expected decision %q with source %q, got nil", name, harness.DecisionAsk, "fastpath_sensitive")
+		return
+	}
+	if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+		t.Errorf("%s: expected decision %q with source %q, got decision %q with source %q", name, harness.DecisionAsk, "fastpath_sensitive", res.Decision, res.Source)
+	}
+}
+
+// assertTrustedAllow is the non-sensitive control: an ordinary read of a
+// contained file must reach the trusted fast path rather than the sensitive check.
+func assertTrustedAllow(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	res := filter.Evaluate(call)
+	if res == nil {
+		t.Errorf("%s: expected decision %q with source %q, got nil", name, harness.DecisionAllow, "fastpath_trusted")
+		return
+	}
+	if res.Decision != harness.DecisionAllow || res.Source != "fastpath_trusted" {
+		t.Errorf("%s: expected decision %q with source %q, got decision %q with source %q", name, harness.DecisionAllow, "fastpath_trusted", res.Decision, res.Source)
+	}
+}
+
+// assertDeferred is the non-sensitive control for commands outside the trusted
+// cache: the fast path must return nil so semantic evaluation decides.
+func assertDeferred(t *testing.T, filter *Filter, name string, call *harness.NormalizedToolCall) {
+	t.Helper()
+	if res := filter.Evaluate(call); res != nil {
+		t.Errorf("%s: expected nil (deferred to semantic evaluation), got decision %q with source %q", name, res.Decision, res.Source)
+	}
+}
+
+func TestFastPath_SensitiveFiles_DockerAndGitconfigCommandAccess(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		command string
+	}{
+		{"posix gitconfig command", "Bash", "cat ~/.gitconfig"},
+		{"posix docker config command", "Bash", "cat ~/.docker/config.json"},
+		{"windows gitconfig command", "run_command", `type C:\Users\u\.gitconfig`},
+		{"windows docker config command", "run_command", `type C:\Users\u\.docker\config.json`},
+		{"trusted ls of gitconfig", "Bash", "ls ~/.gitconfig"},
+		{"trusted ls of docker config", "Bash", "ls ~/.docker/config.json"},
+	} {
+		assertSensitiveAsk(t, filter, tc.name, &harness.NormalizedToolCall{ToolName: tc.tool, Command: tc.command})
+	}
+
+	assertSensitiveAsk(t, filter, "windows gitconfig target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `C:\Users\u\.gitconfig`})
+
+	assertDeferred(t, filter, "ordinary config.json command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat config.json"})
+	assertTrustedAllow(t, filter, "trusted ls of ordinary config.json", &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls config.json"})
+	assertTrustedAllow(t, filter, "ordinary config.json target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/project/config.json"})
+}
+
+func TestFastPath_SensitiveFiles_GitXDGConfig(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"posix xdg git config", "/home/u/.config/git/config"},
+		{"posix xdg git credentials", "/home/u/.config/git/credentials"},
+		{"windows xdg git config", `C:\Users\u\.config\git\config`},
+		{"windows xdg git credentials", `C:\Users\u\.config\git\credentials`},
+	} {
+		assertSensitiveAsk(t, filter, tc.name+" target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: tc.path})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		command string
+	}{
+		{"posix xdg git config", "Bash", "cat ~/.config/git/config"},
+		{"posix xdg git credentials", "Bash", "cat ~/.config/git/credentials"},
+		{"windows xdg git config", "run_command", `type C:\Users\u\.config\git\config`},
+		{"windows xdg git credentials", "run_command", `type C:\Users\u\.config\git\credentials`},
+		{"trusted ls of xdg git credentials", "Bash", "ls ~/.config/git/credentials"},
+	} {
+		assertSensitiveAsk(t, filter, tc.name+" command", &harness.NormalizedToolCall{ToolName: tc.tool, Command: tc.command})
+	}
+
+	assertTrustedAllow(t, filter, "ordinary xdg config.json target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/.config/app/config.json"})
+	assertDeferred(t, filter, "ordinary xdg config.json command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat ~/.config/app/config.json"})
+}
+
+func TestFastPath_SensitiveFiles_CustomXDGConfigHome(t *testing.T) {
+	t.Run("posix absolute", func(t *testing.T) {
+		for _, dir := range []string{"/srv/xdg", "/srv/xdg/"} {
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+			assertSensitiveAsk(t, filter, dir+" config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/config"})
+			assertSensitiveAsk(t, filter, dir+" credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/credentials"})
+			assertSensitiveAsk(t, filter, dir+" config command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/git/config"})
+			assertSensitiveAsk(t, filter, dir+" credentials command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/git/credentials"})
+		}
+	})
+
+	t.Run("windows absolute", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", `D:\xdg`)
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertSensitiveAsk(t, filter, "windows credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `D:\xdg\git\credentials`})
+		assertSensitiveAsk(t, filter, "windows config command", &harness.NormalizedToolCall{ToolName: "run_command", Command: `type D:\xdg\git\config`})
+	})
+
+	t.Run("controls with custom home", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "/srv/xdg")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "ordinary app config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/app/config.json"})
+		assertDeferred(t, filter, "ordinary app config command", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat /srv/xdg/app/config.json"})
+	})
+
+	t.Run("relative value ignored", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "xdg")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "relative xdg git config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/project/xdg/git/config"})
+	})
+
+	t.Run("unset or empty", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertTrustedAllow(t, filter, "empty xdg git config target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/srv/xdg/git/config"})
+		assertSensitiveAsk(t, filter, "static default credentials target", &harness.NormalizedToolCall{ToolName: "view_file", TargetPath: "/home/u/.config/git/credentials"})
+	})
+
+	t.Run("unexpanded variable references", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+		assertSensitiveAsk(t, filter, "posix $VAR credentials", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat $XDG_CONFIG_HOME/git/credentials"})
+		assertSensitiveAsk(t, filter, "posix ${VAR} config", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat ${XDG_CONFIG_HOME}/git/config"})
+		assertSensitiveAsk(t, filter, "cmd %VAR% credentials", &harness.NormalizedToolCall{ToolName: "run_command", Command: `type %XDG_CONFIG_HOME%\git\credentials`})
+		assertSensitiveAsk(t, filter, "powershell $env:VAR config", &harness.NormalizedToolCall{ToolName: "run_command", Command: `Get-Content $env:XDG_CONFIG_HOME\git\config`})
+	})
+}
+
 func TestNormalizePathSeparators(t *testing.T) {
 	got := normalizePathSeparators(`C:\Users\User\.aws\credentials`)
 	want := "C:/Users/User/.aws/credentials"
@@ -574,4 +723,284 @@ func TestFastPath_ClaudeToolCoverage(t *testing.T) {
 	if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com", WorkspaceRoots: []string{"."}}); res != nil {
 		t.Errorf("WebFetch must defer to semantic evaluation, got %+v", res)
 	}
+}
+
+// Repository-local .git/config policy (#30): any direct access to the file, by a file
+// tool or by a command that names it, asks for confirmation regardless of content.
+// Pre-tool hooks cannot see what a read will return, and writes can set
+// command-executing keys, so credential-free configuration is not exempt.
+func TestFastPath_RepoGitConfig_DirectAccessAsks(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	const wantReason = "Access to sensitive file or credential pattern: .git/config"
+
+	cases := []struct {
+		name string
+		call harness.NormalizedToolCall
+	}{
+		{"read posix absolute", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/config"}},
+		{"read relative", harness.NormalizedToolCall{ToolName: "view_file", TargetPath: ".git/config"}},
+		{"read windows separators", harness.NormalizedToolCall{ToolName: "view_file", TargetPath: `C:\Users\u\repo\.git\config`}},
+		{"read windows mixed case", harness.NormalizedToolCall{ToolName: "read_file", TargetPath: `C:\Users\u\Repo\.GIT\Config`}},
+		{"read file uri", harness.NormalizedToolCall{ToolName: "read_resource", TargetPath: "file:///home/u/repo/.git/config"}},
+		{"read bare repository config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/srv/git/repo.git/config"}},
+		{"write credential-bearing remote", harness.NormalizedToolCall{
+			ToolName:   "Write",
+			TargetPath: "/home/u/repo/.git/config",
+			RawArgs:    map[string]interface{}{"content": "[remote \"origin\"]\n\turl = https://user:ghp_token@github.com/o/r.git\n"},
+		}},
+		{"write ordinary config", harness.NormalizedToolCall{
+			ToolName:   "Write",
+			TargetPath: "/home/u/repo/.git/config",
+			RawArgs:    map[string]interface{}{"content": "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"},
+		}},
+		{"edit windows separators", harness.NormalizedToolCall{ToolName: "Edit", TargetPath: `D:\work\repo\.git\config`}},
+		{"cat posix", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .git/config"}},
+		{"type windows", harness.NormalizedToolCall{ToolName: "run_command", Command: `type .git\config`}},
+		{"powershell windows absolute", harness.NormalizedToolCall{ToolName: "PowerShell", Command: `Get-Content C:\Users\u\repo\.git\config`}},
+		{"git config with explicit file", harness.NormalizedToolCall{ToolName: "Bash", Command: "git config --file .git/config --list"}},
+		{"trusted prefix naming the file", harness.NormalizedToolCall{ToolName: "Bash", Command: "git log -- .git/config"}},
+		{"sed writing credential url", harness.NormalizedToolCall{ToolName: "Bash", Command: `sed -i "s#url = .*#url = https://user:token@example.com/r.git#" .git/config`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res == nil {
+				t.Fatalf("expected fastpath_sensitive ASK, got nil")
+			}
+			if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" || res.Reason != wantReason {
+				t.Errorf("got decision=%q source=%q reason=%q; want %q %q %q",
+					res.Decision, res.Source, res.Reason, harness.DecisionAsk, "fastpath_sensitive", wantReason)
+			}
+		})
+	}
+}
+
+// Git CLI usage that does not name the file is outside the sensitive-file rule.
+// It is not a trusted command, so it defers to semantic evaluation (nil) rather than
+// being auto-allowed or prompted by the fast path.
+func TestFastPath_RepoGitConfig_CLIWithoutPathDefers(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, cmd := range []string{
+		"git config --get remote.origin.url",
+		"git config --local --list",
+		"git remote -v",
+		"git remote set-url origin https://github.com/o/r.git",
+	} {
+		if res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Bash", Command: cmd}); res != nil {
+			t.Errorf("%q: expected nil (semantic evaluation), got %+v", cmd, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_LookalikePathsNotSensitive(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	for _, target := range []string{
+		"/home/u/repo/.github/config.yml",
+		"/home/u/repo/internal/git/config.go",
+		`C:\Users\u\repo\config\git.yaml`,
+	} {
+		res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: "Read", TargetPath: target})
+		if res == nil || res.Decision != harness.DecisionAllow || res.Source != "fastpath_trusted" {
+			t.Errorf("%s: expected fastpath_trusted ALLOW, got %+v", target, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_UserIntentDefersToSemantic(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	res := filter.Evaluate(&harness.NormalizedToolCall{
+		ToolName:   "Read",
+		TargetPath: "/home/u/repo/.git/config",
+		UserIntent: "show me which remote this repository pushes to",
+	})
+	if res != nil {
+		t.Errorf("expected nil (semantic intent verification), got %+v", res)
+	}
+}
+
+// Git config files inside submodule Git directories (.git/modules/<name...>/) are not
+// covered by the ".git/config" pattern and are reported with the repository Git config reason.
+func TestFastPath_RepoGitConfig_SubmoduleConfigsAsk(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	const wantReason = "Access to repository Git config file"
+
+	cases := []struct {
+		name string
+		call harness.NormalizedToolCall
+	}{
+		{"read submodule config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/modules/lib/config"}},
+		{"read nested submodule config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/modules/a/modules/b/config"}},
+		{"read submodule name with slash", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/modules/vendor/lib/config"}},
+		{"read windows submodule config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: `C:\Users\u\repo\.git\modules\lib\config`}},
+		{"read windows mixed case submodule config", harness.NormalizedToolCall{ToolName: "Read", TargetPath: `C:\Repo\.GIT\Modules\Lib\CONFIG`}},
+		{"write submodule config.worktree", harness.NormalizedToolCall{ToolName: "Write", TargetPath: "/home/u/repo/.git/modules/lib/config.worktree"}},
+		{"cat submodule config", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .git/modules/lib/config"}},
+		{"type windows submodule config", harness.NormalizedToolCall{ToolName: "run_command", Command: `type .git\modules\lib\config`}},
+		{"git config file flag submodule config", harness.NormalizedToolCall{ToolName: "Bash", Command: "git config --file=.git/modules/lib/config --list"}},
+		{"read submodule config file uri", harness.NormalizedToolCall{ToolName: "read_resource", TargetPath: "file:///home/u/repo/.git/modules/lib/config"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res == nil {
+				t.Fatalf("expected fastpath_sensitive ASK, got nil")
+			}
+			if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" || res.Reason != wantReason {
+				t.Errorf("got decision=%q source=%q reason=%q; want %q %q %q",
+					res.Decision, res.Source, res.Reason, harness.DecisionAsk, "fastpath_sensitive", wantReason)
+			}
+		})
+	}
+}
+
+// Worktree-specific configs. Paths containing ".git/config" as a substring (config.worktree
+// directly under .git) match the earlier sensitive pattern first and keep its reason; paths
+// under .git/worktrees/<name>/ are reported with the repository Git config reason.
+func TestFastPath_RepoGitConfig_WorktreeConfigsAsk(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	const patternReason = "Access to sensitive file or credential pattern: .git/config"
+	const wantReason = "Access to repository Git config file"
+
+	cases := []struct {
+		name       string
+		call       harness.NormalizedToolCall
+		wantReason string
+	}{
+		{"read git dir config.worktree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/config.worktree"}, patternReason},
+		{"read windows git dir config.worktree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: `C:\repo\.git\config.worktree`}, patternReason},
+		{"read worktree config.worktree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/worktrees/feature/config.worktree"}, wantReason},
+		{"read windows worktree config.worktree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: `C:\repo\.git\worktrees\feature\config.worktree`}, wantReason},
+		{"cat worktree config.worktree", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .git/worktrees/feature/config.worktree"}, wantReason},
+		{"edit windows worktree config.worktree", harness.NormalizedToolCall{ToolName: "Edit", TargetPath: `D:\w\repo\.git\worktrees\feature\config.worktree`}, wantReason},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res == nil {
+				t.Fatalf("expected fastpath_sensitive ASK, got nil")
+			}
+			if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" || res.Reason != tc.wantReason {
+				t.Errorf("got decision=%q source=%q reason=%q; want %q %q %q",
+					res.Decision, res.Source, res.Reason, harness.DecisionAsk, "fastpath_sensitive", tc.wantReason)
+			}
+		})
+	}
+}
+
+// Relative paths that only resolve into a Git directory once joined with Cwd are reported
+// with the repository Git config reason.
+func TestFastPath_RepoGitConfig_RelativeFromGitDirAsks(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	const wantReason = "Access to repository Git config file"
+
+	cases := []struct {
+		name string
+		call harness.NormalizedToolCall
+	}{
+		{"read config from git dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/home/u/repo/.git"}},
+		{"read config from windows git dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: `C:\Users\u\repo\.git`}},
+		{"read config.worktree from git dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config.worktree", Cwd: "/home/u/repo/.git"}},
+		{"read config from submodule git dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/home/u/repo/.git/modules/lib"}},
+		{"read parent config from hooks dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "../config", Cwd: "/home/u/repo/.git/hooks"}},
+		{"cat config from git dir", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat config", Cwd: "/home/u/repo/.git"}},
+		{"type config from windows git dir", harness.NormalizedToolCall{ToolName: "run_command", Command: "type config", Cwd: `C:\repo\.git`}},
+		{"read config from bare repository", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/srv/git/repo.git"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res == nil {
+				t.Fatalf("expected fastpath_sensitive ASK, got nil")
+			}
+			if res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" || res.Reason != wantReason {
+				t.Errorf("got decision=%q source=%q reason=%q; want %q %q %q",
+					res.Decision, res.Source, res.Reason, harness.DecisionAsk, "fastpath_sensitive", wantReason)
+			}
+		})
+	}
+}
+
+// Paths and commands that look structurally similar to repository Git config files but are
+// not one must not be classified as fastpath_sensitive.
+func TestFastPath_RepoGitConfig_StructuralLookalikesNotSensitive(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+
+	cases := []struct {
+		name string
+		call harness.NormalizedToolCall
+	}{
+		{"config relative to work tree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/home/u/repo"}},
+		{"modules config too shallow", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/modules/config"}},
+		{"worktree config not config.worktree", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/worktrees/feature/config"}},
+		{"git hooks file", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/.git/hooks/pre-commit"}},
+		{"modules directory outside git dir", harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/home/u/repo/src/modules/lib/config"}},
+		{"git subcommand is not a file argument", harness.NormalizedToolCall{ToolName: "Bash", Command: "git config --list", Cwd: "/home/u/repo/.git"}},
+		{"cat readme from git dir", harness.NormalizedToolCall{ToolName: "Bash", Command: "cat README.md", Cwd: "/home/u/repo/.git"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := tc.call
+			res := filter.Evaluate(&call)
+			if res != nil && res.Source == "fastpath_sensitive" {
+				t.Errorf("expected not fastpath_sensitive, got %+v", res)
+			}
+		})
+	}
+}
+
+func TestFastPath_RepoGitConfig_QuotedCommands(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	for _, command := range []string{
+		`ls ".git/modules/my module/config"`,
+		`cat '.git/worktrees/my branch/config.worktree'`,
+		`git config --file=".git/modules/my module/config" --list`,
+		`type "C:\my repo\.git\modules\my module\config"`,
+	} {
+		call := &harness.NormalizedToolCall{ToolName: "Bash", Command: command}
+		res := filter.Evaluate(call)
+		if res == nil || res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+			t.Errorf("%q: expected sensitive ASK, got %+v", command, res)
+		}
+	}
+}
+
+func TestFastPath_RepoGitConfig_GitNamedArgument(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "ls git config", Cwd: "/repo/.git"}
+	res := filter.Evaluate(call)
+	if res == nil || res.Decision != harness.DecisionAsk || res.Source != "fastpath_sensitive" {
+		t.Fatalf("expected sensitive ASK for config argument after git filename, got %+v", res)
+	}
+}
+
+func TestFastPath_CustomXDGResolvedAccess(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/srv/xdg")
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	for _, call := range []harness.NormalizedToolCall{
+		{ToolName: "Read", TargetPath: "git/config", Cwd: "/srv/xdg"},
+		{ToolName: "Read", TargetPath: "config", Cwd: "/srv/xdg/git"},
+		{ToolName: "Read", TargetPath: "/srv/xdg/git/../git/credentials"},
+		{ToolName: "Bash", Command: "ls git/config", Cwd: "/srv/xdg"},
+		{ToolName: "Bash", Command: "cat config", Cwd: "/srv/xdg/git"},
+		{ToolName: "Bash", Command: `ls "git/../git/config"`, Cwd: "/srv/xdg"},
+		{ToolName: "Read", TargetPath: "file:///srv/xdg/git/../git/config"},
+	} {
+		assertSensitiveAsk(t, filter, fmt.Sprintf("%+v", call), &call)
+	}
+	assertTrustedAllow(t, filter, "different cwd is not the XDG directory", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "git/config", Cwd: "/repo"})
+	assertDeferred(t, filter, "resolved sensitive file with intent", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "config", Cwd: "/srv/xdg/git", UserIntent: "Read the Git config"})
+}
+
+func TestFastPath_CustomXDGWhitespaceDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/srv/xdg ")
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, config.DefaultConfig())
+	assertSensitiveAsk(t, filter, "trailing space is part of directory", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "/srv/xdg /git/config"})
+	assertSensitiveAsk(t, filter, "quoted relative whitespace directory", &harness.NormalizedToolCall{ToolName: "Bash", Command: `ls "xdg /git/config"`, Cwd: "/srv"})
 }

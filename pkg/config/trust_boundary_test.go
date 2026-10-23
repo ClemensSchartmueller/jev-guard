@@ -169,7 +169,7 @@ func TestLoadConfigWithPaths_ProjectSensitiveFilesApplyOnlyAfterContentTrust(t *
 		t.Fatal("untrusted project settings were applied")
 	}
 
-	info, err := InspectProjectConfig(projectConfigPath)
+	info, err := inspectProjectConfigIsolated(t, projectConfigPath)
 	if err != nil {
 		t.Fatalf("inspect project config: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestLoadConfigWithPaths_EditingTrustedProjectConfigRevokesTrust(t *testing.
 	writeConfig(t, projectConfigPath, `{"sensitive_files":[".approved-secret"]}`)
 	userConfigPath := filepath.Join(root, "user", "config.json")
 	trustRegistryPath := filepath.Join(root, "user", "trusted-project-configs.json")
-	info, err := InspectProjectConfig(projectConfigPath)
+	info, err := inspectProjectConfigIsolated(t, projectConfigPath)
 	if err != nil {
 		t.Fatalf("inspect project config: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestLoadConfigWithPaths_TrustDoesNotTransferToAnotherProjectRoot(t *testing
 	writeConfig(t, originalPath, content)
 	writeConfig(t, clonedPath, content)
 
-	info, err := InspectProjectConfig(originalPath)
+	info, err := inspectProjectConfigIsolated(t, originalPath)
 	if err != nil {
 		t.Fatalf("inspect original project config: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestLoadConfigWithPathsAndRoots_TrustedRootConfigAppliesFromNestedWorkingDi
 	}
 	projectConfigPath := filepath.Join(repo, ".jevguard.json")
 	writeConfig(t, projectConfigPath, `{"sensitive_files":[".repo-root-secret"]}`)
-	info, err := InspectProjectConfig(projectConfigPath)
+	info, err := inspectProjectConfigIsolated(t, projectConfigPath)
 	if err != nil {
 		t.Fatalf("inspect project config: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestLoadConfigWithPathsAndRoots_DoesNotTraverseAboveWorkspaceRoot(t *testin
 		t.Fatal(err)
 	}
 
-	info, err := InspectProjectConfig(parentConfigPath)
+	info, err := inspectProjectConfigIsolated(t, parentConfigPath)
 	if err != nil {
 		t.Fatalf("inspect parent config: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestLoadConfigWithPaths_UsesNearestGitRootForNestedDirectory(t *testing.T) 
 	}
 	projectConfigPath := filepath.Join(repo, ".jevguard.json")
 	writeConfig(t, projectConfigPath, `{"sensitive_files":[".git-root-secret"]}`)
-	info, err := InspectProjectConfig(projectConfigPath)
+	info, err := inspectProjectConfigIsolated(t, projectConfigPath)
 	if err != nil {
 		t.Fatalf("inspect project config: %v", err)
 	}
@@ -491,9 +491,16 @@ func TestLoadConfigWithPaths_RejectsSymlinkProjectConfig(t *testing.T) {
 	if containsConfigValue(cfg.SensitiveFiles, ".outside-secret") {
 		t.Fatal("project config symlink caused an external config to become active")
 	}
-	if _, err := InspectProjectConfig(symlinkConfig); err == nil {
+	if _, err := inspectProjectConfigIsolated(t, symlinkConfig); err == nil {
 		t.Fatal("InspectProjectConfig accepted a symlinked project config")
 	}
+}
+
+// inspectProjectConfigIsolated inspects a project config against an empty temporary trust
+// registry so tests never read the operating system user's registry.
+func inspectProjectConfigIsolated(t *testing.T, path string) (*ProjectConfigInfo, error) {
+	t.Helper()
+	return inspectProjectConfigWithRegistry(path, filepath.Join(t.TempDir(), "trusted-project-configs.json"))
 }
 
 func writeConfig(t *testing.T, path, contents string) {

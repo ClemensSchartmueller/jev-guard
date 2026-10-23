@@ -16,7 +16,7 @@ import (
 
 // Version information configured at compile-time or defaulted.
 var (
-	Version = "0.2.0"
+	Version = "0.3.0"
 	Commit  = "none"
 	Date    = "unknown"
 )
@@ -39,9 +39,25 @@ type Runner struct {
 	IsTerminal func() bool
 	// Eval implements the eval subcommand; it lives in package main because it reuses the gate pipeline.
 	Eval func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
+	// Explain implements the explain subcommand (shorthand for eval --explain).
+	Explain func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	// HTTPClient is used by doctor's network check; nil uses a default client.
 	HTTPClient *http.Client
 }
+
+// Profile seams. Production code resolves these from the operating system
+// user profile; tests replace them so they never touch the real ~/.jevguard
+// or home directory.
+var (
+	// loadConfig resolves the effective config for a working directory.
+	loadConfig = config.LoadConfig
+	// trustRegistryPath is the user-owned project trust registry path.
+	trustRegistryPath = config.TrustRegistryPath
+	// inspectProjectConfig hashes a project config and checks it against the trust registry.
+	inspectProjectConfig = config.InspectProjectConfig
+	// userHomeDir locates agent hook settings for init and doctor.
+	userHomeDir = os.UserHomeDir
+)
 
 // NewRunner creates a Runner with injected I/O streams and terminal detector.
 func NewRunner(stdout, stderr io.Writer, isTerminal func() bool) *Runner {
@@ -106,6 +122,8 @@ func (r *Runner) handleArgs(args []string) (Action, int) {
 		return r.handleInit(args[1:])
 	case "eval":
 		return r.handleEval(args[1:])
+	case "explain":
+		return r.handleExplain(args[1:])
 	case "doctor":
 		return r.handleDoctor(args[1:])
 	default:
@@ -133,10 +151,10 @@ func (r *Runner) handleConfig(args []string) (Action, int) {
 
 func (r *Runner) handleConfigShow() (Action, int) {
 	cwd, _ := os.Getwd()
-	cfg := config.LoadConfig(cwd)
+	cfg := loadConfig(cwd)
 	fmt.Fprintln(r.Stdout, "jev-guard effective configuration:")
 	fmt.Fprintf(r.Stdout, "  User config:          %s\n", cfg.UserConfigPath)
-	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", config.TrustRegistryPath())
+	fmt.Fprintf(r.Stdout, "  Trust registry:       %s\n", trustRegistryPath())
 	fmt.Fprintf(r.Stdout, "  Mode:                 %s (%s)\n", cfg.Mode, cfg.Sources["mode"])
 	fmt.Fprintf(r.Stdout, "  Provider:             %s (%s)\n", cfg.EffectiveProvider(), cfg.Sources["provider"])
 	fmt.Fprintf(r.Stdout, "  Base URL:             %s (%s)\n", effectiveValue(cfg.EffectiveBaseURL(), "not configured"), cfg.Sources["base_url"])
@@ -153,7 +171,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
-		if info, err := config.InspectProjectConfig(file); err == nil {
+		if info, err := inspectProjectConfig(file); err == nil {
 			trustState := "not trusted"
 			if info.Trusted {
 				trustState = "trusted for this exact SHA-256"
@@ -195,7 +213,7 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	} else {
 		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
 	}
-	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", config.TrustRegistryPath())
+	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", trustRegistryPath())
 	fmt.Fprintln(r.Stdout, "This command does not edit user-owned files; edit the registry manually to revoke trust.")
 	return ActionHandled, 0
 }
@@ -210,7 +228,7 @@ func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("no project config found; pass a config file or directory path")
 	}
-	return config.InspectProjectConfig(path)
+	return inspectProjectConfig(path)
 }
 
 func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
@@ -224,7 +242,7 @@ func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
 	if len(info.IgnoredKeys) > 0 {
 		fmt.Fprintf(out, "Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
 	}
-	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", config.TrustRegistryPath(), entry)
+	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", trustRegistryPath(), entry)
 	fmt.Fprintln(out, "The registry is user-owned. Review the file and add this record manually; this command does not grant trust.")
 }
 
@@ -462,11 +480,18 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 
 	// Apply the configured TTL so LoadSession does not expire a session early.
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
 	}
 	// A recorded "stop" must keep holding background work after the reply ends;
 	// it expires via the TTL or is replaced by the next ingested prompt.
-	if state, err := session.LoadSession(sessionID); err == nil && state != nil && state.Aborted {
+	// If the state cannot be read, the abort status is unknown, so the file
+	// is kept rather than risk deleting a recorded stop.
+	state, err := session.LoadSession(sessionID)
+	if err != nil {
+		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept session '%s' because its state could not be read: %v\n", sessionID, err)
+		return ActionHandled, 0
+	}
+	if state != nil && state.Aborted {
 		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept abort flag for session '%s'\n", sessionID)
 		return ActionHandled, 0
 	}
@@ -481,12 +506,12 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 
 func (r *Runner) handleStatus() (Action, int) {
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(config.LoadConfig(cwd).IntentTTL())
+		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
 	}
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
 
-	list, err := session.ListSessions()
+	scan, err := session.ScanSessions()
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "Error reading sessions: %v\n", err)
 		return ActionHandled, 1
@@ -495,9 +520,12 @@ func (r *Runner) handleStatus() (Action, int) {
 	fmt.Fprintln(r.Stdout, "jev-guard status:")
 	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
 	fmt.Fprintf(r.Stdout, "  Sessions Directory: %s\n", sessionsDir)
-	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(list))
+	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(scan.Active))
+	if len(scan.Unreadable) > 0 {
+		fmt.Fprintf(r.Stdout, "  Unreadable Sessions: %d (tool calls in these sessions are held)\n", len(scan.Unreadable))
+	}
 
-	for _, s := range list {
+	for _, s := range scan.Active {
 		status := "Active"
 		if s.Aborted {
 			status = "Aborted"
@@ -511,6 +539,9 @@ func (r *Runner) handleStatus() (Action, int) {
 		if promptPreview != "" {
 			fmt.Fprintf(r.Stdout, "    Prompt: %q\n", promptPreview)
 		}
+	}
+	for _, u := range scan.Unreadable {
+		fmt.Fprintf(r.Stdout, "  - [%s] Status: Unreadable, Error: %v\n", u.FileName, u.Err)
 	}
 
 	return ActionHandled, 0
@@ -530,6 +561,7 @@ Commands:
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
+  explain         Shorthand for 'eval --explain': show every pipeline stage for a simulated call
   status          Display active sessions and jev-guard environment status
   doctor          Diagnose environment, network, and hook setup (--offline skips network)
   config show     Show effective policy and its source without printing secrets
@@ -551,10 +583,13 @@ Eval Flags:
   --target <path>      Target path for --tool
   --payload <file>     Raw hook JSON payload (any harness; '-' for stdin)
   --cwd <dir>          Working directory (defaults to current directory)
+  --intent <text>      Simulate the user's prompt (a stop/cancel prompt simulates an abort)
   --offline            Skip the TypeSafe network call
   --explain            Show every pipeline stage
   --json               Machine-readable output
-  Exit code is 0 whenever evaluation succeeded (any decision), non-zero on usage errors.
+  Values may be given as --flag value or --flag=value; use --cmd=VALUE for values starting with --.
+  Boolean flags accept =true/=false. Each flag may be given once.
+  Exit code is 0 whenever evaluation succeeded (any decision), 2 on usage errors.
 
 Clear-Intent Flags:
   -s, --session <id>   Session ID to clear (or pipe a hook payload via stdin)
@@ -600,12 +635,21 @@ func parseFlagValue(args []string, i *int, flagNames ...string) (string, bool) {
 
 // handleEval delegates to the injected eval implementation.
 func (r *Runner) handleEval(args []string) (Action, int) {
-	if r.Eval == nil {
-		return r.handleUnknown("eval")
+	return r.delegate("eval", r.Eval, args)
+}
+
+// handleExplain delegates to the injected explain implementation.
+func (r *Runner) handleExplain(args []string) (Action, int) {
+	return r.delegate("explain", r.Explain, args)
+}
+
+func (r *Runner) delegate(name string, impl func([]string, io.Reader, io.Writer, io.Writer) int, args []string) (Action, int) {
+	if impl == nil {
+		return r.handleUnknown(name)
 	}
 	stdin := r.Stdin
 	if stdin == nil {
 		stdin = os.Stdin
 	}
-	return ActionHandled, r.Eval(args, stdin, r.Stdout, r.Stderr)
+	return ActionHandled, impl(args, stdin, r.Stdout, r.Stderr)
 }

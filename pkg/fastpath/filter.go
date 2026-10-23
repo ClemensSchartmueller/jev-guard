@@ -2,6 +2,7 @@ package fastpath
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"strings"
 
@@ -29,9 +30,12 @@ func NewFilter(checker BoundaryChecker, cfg *config.Config) *Filter {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
+	// Copy so environment-derived patterns never alias the caller's config slice.
+	sensitiveFiles := append([]string{}, cfg.SensitiveFiles...)
+	sensitiveFiles = append(sensitiveFiles, xdgGitSensitivePatterns(os.Getenv("XDG_CONFIG_HOME"))...)
 	return &Filter{
 		boundaryChecker: checker,
-		sensitiveFiles:  cfg.SensitiveFiles,
+		sensitiveFiles:  sensitiveFiles,
 		trustedCommands: cfg.TrustedCommands,
 	}
 }
@@ -49,6 +53,15 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 			Decision:   harness.DecisionDeny,
 			Reason:     reason,
 			Source:     "fastpath_tampering",
+			Confidence: 1.0,
+		}
+	}
+
+	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     "Read target cannot be verified from tool arguments",
+			Source:     "fastpath_boundary",
 			Confidence: 1.0,
 		}
 	}
@@ -106,6 +119,10 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+	if reason := f.checkResolvedXDGConfig(call); reason != "" {
+		return reason
+	}
+
 	targetRaw := call.TargetPath
 	if isFileURI(targetRaw) {
 		targetRaw = extractFilePathFromURI(targetRaw)
@@ -158,7 +175,215 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 			}
 		}
 	}
+	return checkRepoGitConfig(targetRaw, call.Command, call.Cwd)
+}
+
+// repoGitConfigReason is reported for Git config files inside a repository's Git directory
+// that the ".git/config" pattern cannot express: submodule and worktree configs, and paths
+// that only resolve into the Git directory relative to the working directory.
+const repoGitConfigReason = "Access to repository Git config file"
+
+// checkRepoGitConfig applies the built-in repository Git config rule to the target path and
+// to every path-like command argument. Relative paths are also resolved against cwd so that
+// "config" run from inside a .git directory is recognised.
+func checkRepoGitConfig(target, command, cwd string) string {
+	if isRepoGitConfigCandidate(target, cwd) {
+		return repoGitConfigReason
+	}
+	tokens := sensitiveCommandArguments(command)
+	for i, token := range tokens {
+		// Skip the program name and Git subcommands ("git config") so that running
+		// git from inside a .git directory is not mistaken for naming the file.
+		if i == 0 || (i == 1 && strings.EqualFold(tokens[0], "git")) {
+			continue
+		}
+		arg := strings.Trim(token, `"'`)
+		if isRepoGitConfigCandidate(arg, cwd) {
+			return repoGitConfigReason
+		}
+		if idx := strings.Index(arg, "="); idx >= 0 && isRepoGitConfigCandidate(strings.Trim(arg[idx+1:], `"'`), cwd) {
+			return repoGitConfigReason
+		}
+	}
 	return ""
+}
+
+// sensitiveCommandArguments keeps quoted path spans together for local sensitive-file
+// checks. It is deliberately not a shell evaluator: substitutions and chained
+// commands still require semantic evaluation.
+func sensitiveCommandArguments(command string) []string {
+	var args []string
+	var arg strings.Builder
+	var quote rune
+	started := false
+	for _, ch := range command {
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else {
+				arg.WriteRune(ch)
+			}
+			started = true
+		case ch == '\'' || ch == '"':
+			quote = ch
+			started = true
+		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+			if started {
+				args = append(args, arg.String())
+				arg.Reset()
+				started = false
+			}
+		default:
+			arg.WriteRune(ch)
+			started = true
+		}
+	}
+	if started {
+		args = append(args, arg.String())
+	}
+	return args
+}
+
+func isRepoGitConfigCandidate(p, cwd string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" || isURL(p) {
+		return false
+	}
+	if isFileURI(p) {
+		p = extractFilePathFromURI(p)
+	}
+	p = strings.ToLower(normalizePathSeparators(p))
+	if isRepoGitConfigPath(p) {
+		return true
+	}
+	cwd = strings.ToLower(normalizePathSeparators(strings.TrimSpace(cwd)))
+	if cwd == "" || isAbsoluteSlashPath(p) {
+		return false
+	}
+	return isRepoGitConfigPath(path.Join(cwd, p))
+}
+
+func isAbsoluteSlashPath(p string) bool {
+	return strings.HasPrefix(p, "/") || (len(p) >= 2 && isDriveLetter(p[0]) && p[1] == ':')
+}
+
+// isRepoGitConfigPath reports whether a lower-case, slash-separated path names a config
+// file inside a Git directory (".git" or a bare "name.git"):
+//
+//	<gitdir>/config, <gitdir>/config.worktree
+//	<gitdir>/worktrees/<name>/config.worktree
+//	<gitdir>/modules/<name...>/config, <gitdir>/modules/<name...>/config.worktree
+func isRepoGitConfigPath(p string) bool {
+	segments := strings.Split(path.Clean(p), "/")
+	for i, seg := range segments {
+		if !strings.HasSuffix(seg, ".git") {
+			continue
+		}
+		rest := segments[i+1:]
+		if len(rest) == 0 {
+			continue
+		}
+		last := rest[len(rest)-1]
+		switch {
+		case len(rest) == 1 && (last == "config" || last == "config.worktree"):
+			return true
+		case rest[0] == "worktrees" && len(rest) == 3 && last == "config.worktree":
+			return true
+		case rest[0] == "modules" && len(rest) >= 3 && (last == "config" || last == "config.worktree"):
+			return true
+		}
+	}
+	return false
+}
+
+// checkResolvedXDGConfig resolves equivalent and cwd-relative spellings before
+// trusted reads can allow access to the environment-derived Git config files.
+func (f *Filter) checkResolvedXDGConfig(call *harness.NormalizedToolCall) string {
+	candidates := []string{call.TargetPath}
+	for i, arg := range sensitiveCommandArguments(call.Command) {
+		if i == 0 {
+			continue
+		}
+		candidates = append(candidates, arg)
+		if idx := strings.Index(arg, "="); idx >= 0 {
+			candidates = append(candidates, arg[idx+1:])
+		}
+	}
+	for _, pattern := range f.sensitiveFiles {
+		normalized := strings.ToLower(normalizePathSeparators(pattern))
+		if !isAbsoluteConfigDir(normalized) {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate == "" || isURL(candidate) {
+				continue
+			}
+			if isFileURI(candidate) {
+				candidate = extractFilePathFromURI(candidate)
+			}
+			candidate = strings.ToLower(normalizePathSeparators(candidate))
+			if !isAbsoluteConfigDir(candidate) {
+				if call.Cwd == "" {
+					continue
+				}
+				candidate = path.Join(strings.ToLower(normalizePathSeparators(call.Cwd)), candidate)
+			}
+			if path.Clean(candidate) == path.Clean(normalized) {
+				return "Access to sensitive file or credential pattern: " + pattern
+			}
+		}
+	}
+	return ""
+}
+
+// xdgGitFiles are the Git files that Git reads from $XDG_CONFIG_HOME/git/.
+var xdgGitFiles = []string{"git/config", "git/credentials"}
+
+// xdgGitSensitivePatterns returns sensitive patterns for Git's XDG config files
+// that the static defaults cannot express. Git reads $XDG_CONFIG_HOME/git/config
+// and $XDG_CONFIG_HOME/git/credentials on every platform, including Git for
+// Windows, and falls back to ~/.config when the variable is unset (already
+// covered by the static ".config/git/..." defaults).
+//
+// The returned patterns cover:
+//   - the expanded location when xdgConfigHome is an absolute POSIX, Windows
+//     drive, or UNC path. Relative values are ignored, as the XDG Base
+//     Directory specification requires, so they cannot widen matching to
+//     arbitrary "git/config" fragments;
+//   - unexpanded references to the variable in shell commands, in POSIX
+//     ($VAR, ${VAR}), cmd.exe (%VAR%) and PowerShell ($env:VAR) forms. These
+//     are added regardless of the variable's value because the command is
+//     expanded by the shell, not by jev-guard.
+//
+// The patterns are derived at filter construction rather than added to
+// config.DefaultSensitiveFiles, because defaults are persisted to the user
+// config file and must not capture one process's environment.
+func xdgGitSensitivePatterns(xdgConfigHome string) []string {
+	var patterns []string
+	for _, prefix := range []string{"$xdg_config_home", "${xdg_config_home}", "%xdg_config_home%", "$env:xdg_config_home"} {
+		for _, file := range xdgGitFiles {
+			patterns = append(patterns, prefix+"/"+file)
+		}
+	}
+	dir := normalizePathSeparators(xdgConfigHome)
+	if !isAbsoluteConfigDir(dir) {
+		return patterns
+	}
+	dir = strings.TrimSuffix(path.Clean(dir), "/")
+	for _, file := range xdgGitFiles {
+		patterns = append(patterns, dir+"/"+file)
+	}
+	return patterns
+}
+
+// isAbsoluteConfigDir reports whether a separator-normalized directory is an
+// absolute POSIX path, UNC path, or Windows drive path, independent of the host OS.
+func isAbsoluteConfigDir(dir string) bool {
+	if strings.HasPrefix(dir, "/") {
+		return true
+	}
+	return len(dir) >= 3 && isDriveLetter(dir[0]) && dir[1] == ':' && dir[2] == '/'
 }
 
 func normalizePathSeparators(value string) string {
@@ -350,6 +575,32 @@ func isSafeReadTool(call *harness.NormalizedToolCall) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// A trusted read must act on the same single target that normalization and
+// boundary checks inspect. Known file tools also require their canonical key.
+func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
+	target := strings.TrimSpace(call.TargetPath)
+	if target == "" || isURL(target) || (isCustomURI(target) && !isFileURI(target)) {
+		return false
+	}
+	// Directly constructed calls are used by internal callers and tests. Hook
+	// payloads with arguments always retain RawArgs after ParsePayload.
+	if call.RawArgs == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(call.ToolName)) {
+	case "read", "view":
+		return harness.HasSingleTargetArg(call, "file_path")
+	case "view_file":
+		return harness.HasSingleTargetArg(call, "AbsolutePath")
+	case "read_file", "readlocalfile":
+		return harness.HasSingleTargetArg(call, "file_path", "path")
+	case "read_resource":
+		return harness.HasSingleTargetArg(call, "Uri", "uri")
+	default:
+		return harness.HasSingleTargetArg(call)
 	}
 }
 
