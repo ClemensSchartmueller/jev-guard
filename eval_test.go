@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"jev-guard/internal/testprofile"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
@@ -19,12 +20,14 @@ import (
 // TestMain makes the production config loader unusable in this package's tests: every test
 // that runs eval must go through newEvalEnv, which injects temp paths. Without this, a test
 // would read (and the trust-registry helpers would write) the real ~/.jevguard, because
-// config paths come from the OS account (user.Current), not from $HOME.
+// config paths come from the OS account (user.Current), not from $HOME. The whole binary also
+// runs in a temp HOME/JEV_GUARD_HOME, and fails if the real user config or trust registry changed.
 func TestMain(m *testing.M) {
-	evalLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
-		panic("eval test ran without newEvalEnv: it would read the real user configuration")
-	}
-	os.Exit(m.Run())
+	os.Exit(testprofile.Run(m, func(string) {
+		evalLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
+			panic("eval test ran without newEvalEnv: it would read the real user configuration")
+		}
+	}))
 }
 
 // evalEnv is an isolated configuration, trust registry, session and audit environment.

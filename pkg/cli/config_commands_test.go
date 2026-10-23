@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,41 +30,59 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	}
 	digest := sha256.Sum256(original)
 	sha := hex.EncodeToString(digest[:])
-	wantInfo := &config.ProjectConfigInfo{
-		ProjectRoot:    resolvedRoot,
-		ConfigPath:     resolvedConfigPath,
-		SHA256:         sha,
-		SensitiveFiles: []string{".secret"},
-		IgnoredKeys:    []string{"base_url", "mode"},
-		TrustRecord: config.ProjectConfigTrust{
-			ProjectRoot: resolvedRoot,
-			ConfigPath:  resolvedConfigPath,
-			SHA256:      sha,
-		},
+	wantRecord := config.ProjectConfigTrust{
+		ProjectRoot: resolvedRoot,
+		ConfigPath:  resolvedConfigPath,
+		SHA256:      sha,
 	}
-	var stubbedPath string
-	originalInspect := inspectProjectConfig
-	inspectProjectConfig = func(path string) (*config.ProjectConfigInfo, error) {
-		stubbedPath = path
-		return wantInfo, nil
+	recordJSON, err := json.MarshalIndent(wantRecord, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { inspectProjectConfig = originalInspect })
 
-	var stdout, stderr bytes.Buffer
-	runner := NewRunner(&stdout, &stderr, func() bool { return false })
-	action, code := runner.EvaluateArgs([]string{"config", "trust", configPath})
-	if action != ActionHandled || code != 0 {
-		t.Fatalf("expected config trust command to succeed, got action=%v code=%d stderr=%q", action, code, stderr.String())
+	runConfig := func(args ...string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		runner := NewRunner(&stdout, &stderr, func() bool { return false })
+		action, code := runner.EvaluateArgs(append([]string{"config"}, args...))
+		if action != ActionHandled || code != 0 {
+			t.Fatalf("expected config %v to succeed, got action=%v code=%d stderr=%q", args, action, code, stderr.String())
+		}
+		return stdout.String()
 	}
-	if stubbedPath != configPath {
-		t.Fatalf("inspectProjectConfig received %q, want %q", stubbedPath, configPath)
-	}
-	output := stdout.String()
-	for _, want := range []string{sha, resolvedRoot, "Trust record to add to " + trustRegistryPath(), "does not grant trust", "mode", "base_url"} {
+
+	// Before approval the temp registry does not exist, so the digest is not trusted.
+	output := runConfig("trust", configPath)
+	for _, want := range []string{
+		"SHA-256: " + sha,
+		"Project root: " + resolvedRoot,
+		"Project config: " + resolvedConfigPath,
+		"Additive sensitive_files: [.secret]",
+		"Ignored project keys: base_url, mode",
+		"Existing trust registry status: trust registry does not exist",
+		"Trust record to add to " + trustRegistryPath() + ":\n" + string(recordJSON),
+		"does not grant trust",
+	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected trust proposal to contain %q, got %q", want, output)
 		}
 	}
+	if _, err := os.Stat(trustRegistryPath()); !os.IsNotExist(err) {
+		t.Fatalf("config trust must not create the trust registry, stat err=%v", err)
+	}
+
+	// Approve the printed record in the temp registry. The exact digest is now trusted.
+	writeTrustRegistry(t, wantRecord)
+	if output := runConfig("untrust", configPath); !strings.Contains(output, "Current digest "+sha+" is trusted.") {
+		t.Errorf("expected the approved digest to be trusted, got %q", output)
+	}
+
+	// The same project with a stale digest is not trusted.
+	writeTrustRegistry(t, config.ProjectConfigTrust{ProjectRoot: resolvedRoot, ConfigPath: resolvedConfigPath, SHA256: strings.Repeat("0", 64)})
+	if output := runConfig("untrust", configPath); !strings.Contains(output, "Current digest is not trusted.") {
+		t.Errorf("expected a stale digest not to be trusted, got %q", output)
+	}
+
 	after, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -92,4 +111,22 @@ func TestConfigShowNeverPrintsAPIKey(t *testing.T) {
 	if strings.Contains(stdout.String(), secret) {
 		t.Fatal("config show exposed the API key")
 	}
+}
+
+// writeTrustRegistry replaces the temp trust registry installed by TestMain with the
+// given entries and removes it when the test ends.
+func writeTrustRegistry(t *testing.T, entries ...config.ProjectConfigTrust) {
+	t.Helper()
+	path := trustRegistryPath()
+	data, err := json.Marshal(map[string]any{"version": 1, "entries": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
 }
