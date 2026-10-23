@@ -154,6 +154,8 @@ When `audit_log_path` is set, every tool evaluation produces a JSONL entry:
 }
 ```
 
+When TypeSafe answered the call, the entry also has `"model"`: the model id TypeSafe reported, for example a specific Jev version behind `jev-latest`. Comparing it across entries shows when the model behind a floating alias changed. Fast-path and fail-safe entries have no `model`.
+
 ## Recommended `.gitignore` entries
 
 Keep local audit logs out of your repository:

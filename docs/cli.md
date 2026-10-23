@@ -101,6 +101,10 @@ Flags take values as `--flag value` or `--flag=value`. Boolean flags accept expl
 
 Use `boundary_status` to tell a skipped check from an uncontained target. `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
 
+### Model field in `--json` output
+
+`typesafe_model` is the model id that TypeSafe reported as having answered. This can be a specific version even when the configured `model` is a floating alias such as `jev-latest`. The field is omitted when TypeSafe was not consulted (the fast path decided, `--offline`, or the request failed) or when the response did not report a model. `--explain` prints it as `model:` in the TypeSafe stage. `jev-guard doctor` shows the *configured* model.
+
 ## Session intent
 
 These commands are normally called by hooks. See [Context-aware intent](security-model.md#context-aware-intent) for how intent affects decisions.
