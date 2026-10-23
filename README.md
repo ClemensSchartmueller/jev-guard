@@ -161,6 +161,7 @@ Every setting, the project-config trust model, and the audit log format are desc
 | [CLI reference](docs/cli.md) | Every command, `eval` flags, JSON output, exit codes |
 | [Security model](docs/security-model.md) | Supported tools, fast path rules, TypeSafe evaluation, intent matrix, `.git/config` policy |
 | [Manual hook setup](docs/hooks.md) | Hook JSON for Claude Code, Codex CLI, and Antigravity |
+| [Policy benchmark](docs/policy-benchmark.md) | Offline labelled corpus, scoring convention, policy thresholds |
 
 ## Contributing
 
