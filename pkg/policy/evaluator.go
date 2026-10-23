@@ -31,6 +31,10 @@ type BoundaryEvidence struct {
 	// concrete filesystem target path (non-empty, not a URL, not a shell command)
 	// is inside the workspace. Contained alone can be true vacuously.
 	PathVerified bool
+	// Egress is true when the call can send data to another host (see
+	// IsEgressCall). Explicit intent never auto-allows a credential_leak that
+	// could leave the machine.
+	Egress bool
 }
 
 // Resolve translates Jev judgments, boundary containment, and errors into a final Decision.
@@ -60,10 +64,10 @@ func (p *Policy) ResolveWithEvidence(j *evaluator.JevJudgments, ev BoundaryEvide
 		}
 	}
 
-	return p.evaluateJudgments(j, ev.PathVerified)
+	return p.evaluateJudgments(j, ev)
 }
 
-func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool) *harness.EvaluationResult {
+func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, ev BoundaryEvidence) *harness.EvaluationResult {
 	minConfidence := p.MinIntentConfidence
 	if minConfidence <= 0 {
 		minConfidence = 0.70
@@ -90,14 +94,14 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool)
 		}
 	}
 
-	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested); violationResult != nil {
+	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested, ev.Egress); violationResult != nil {
 		return violationResult
 	}
 
 	// For pure file-path operations the deterministic local resolver is authoritative:
 	// the model's containment probability is a guess and must not override a proof.
 	// Only this check is skipped; a model-reported workspace_escape category still asks above.
-	if !pathVerified && j.IsWorkspaceContained < p.MinContainedThreshold {
+	if !ev.PathVerified && j.IsWorkspaceContained < p.MinContainedThreshold {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     fmt.Sprintf("Potential workspace escape (containment probability: %.2f)", j.IsWorkspaceContained),
@@ -131,7 +135,7 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool)
 	}
 }
 
-func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested bool) *harness.EvaluationResult {
+func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested, egress bool) *harness.EvaluationResult {
 	switch j.ViolationCategory {
 	case "catastrophic_deletion":
 		if isExplicitlyRequested {
@@ -164,6 +168,16 @@ func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyR
 			Confidence: j.ViolationConfidence,
 		}
 	case "credential_leak":
+		// Intent arrives through the prompt, which can carry pasted third-party
+		// text. Sending a secret off the machine is never unlocked by it.
+		if isExplicitlyRequested && egress {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionAsk,
+				Reason:     "Credential access over a network-capable tool requires confirmation even when requested",
+				Source:     "policy_intent_egress_cap",
+				Confidence: j.ViolationConfidence,
+			}
+		}
 		if isExplicitlyRequested {
 			return &harness.EvaluationResult{
 				Decision:   harness.DecisionAllow,
