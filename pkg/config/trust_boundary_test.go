@@ -526,3 +526,15 @@ func clearConfigEnvironment(t *testing.T) {
 		t.Setenv(name, "")
 	}
 }
+
+func TestInspectProjectConfigReportsMissingTrustRegistry(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".jevguard.json")
+	writeConfig(t, configPath, `{"sensitive_files":[".secret"]}`)
+	info, err := inspectProjectConfigIsolated(t, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Trusted || info.TrustIssue != "trust registry does not exist" {
+		t.Fatalf("expected an untrusted config with a missing-registry issue, got trusted=%t issue=%q", info.Trusted, info.TrustIssue)
+	}
+}

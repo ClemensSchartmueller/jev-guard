@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -516,7 +518,7 @@ func trustRecordExists(registryPath string, expected ProjectConfigTrust) (bool, 
 }
 
 func describeTrustRegistryError(err error) string {
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return "trust registry does not exist"
 	}
 	return fmt.Sprintf("trust registry unavailable or invalid: %v", err)
