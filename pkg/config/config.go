@@ -23,8 +23,11 @@ const MaxConfigFileSize = 1 << 20
 // Config encapsulates runtime parameters loaded from environment and configuration files.
 type Config struct {
 	Mode                    string             `json:"mode"`                       // "enforcing" or "audit"
-	APIKey                  string             `json:"api_key,omitempty"`          // from TYPESAFE_API_KEY or file
+	APIKey                  string             `json:"api_key,omitempty"`          // from the api_key_env variable or file
 	TypesafeAPIKey          string             `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
+	Provider                string             `json:"provider,omitempty"`         // decision model provider: "typesafe" (default), "openai", or "anthropic"
+	APIKeyEnv               string             `json:"api_key_env,omitempty"`      // environment variable holding the provider API key
+	ResponseFormat          string             `json:"response_format,omitempty"`  // openai provider: "json_schema" (default) or "json_object"
 	BaseURL                 string             `json:"base_url,omitempty"`         // API endpoint
 	Model                   string             `json:"model,omitempty"`            // e.g. "jev-latest"
 	Timeout                 time.Duration      `json:"-"`
@@ -50,6 +53,104 @@ const DefaultIntentTTLMinutes = 30
 // MaxIntentTTLMinutes is the largest accepted intent_ttl_minutes value.
 const MaxIntentTTLMinutes = 1440
 
+// Decision model providers accepted in the user config "provider" key.
+const (
+	ProviderTypeSafe  = "typesafe"
+	ProviderOpenAI    = "openai"
+	ProviderAnthropic = "anthropic"
+)
+
+// Provider defaults. TypeSafe's base URL is the full evaluation endpoint; the
+// OpenAI-compatible and Anthropic base URLs are API roots that the evaluator
+// extends with /chat/completions and /messages respectively.
+const (
+	DefaultTypeSafeBaseURL  = "https://api.typesafe.ai/v1/systemone"
+	DefaultTypeSafeModel    = "jev-latest"
+	DefaultOpenAIBaseURL    = "https://api.openai.com/v1"
+	DefaultAnthropicBaseURL = "https://api.anthropic.com/v1"
+)
+
+// Response formats for the openai provider. json_schema asks the server to
+// enforce the judgment schema; json_object is JSON mode for servers without
+// schema support. Output is validated locally in both cases.
+const (
+	ResponseFormatJSONSchema = "json_schema"
+	ResponseFormatJSONObject = "json_object"
+)
+
+// SupportedProviders lists the accepted provider names in display order.
+func SupportedProviders() []string {
+	return []string{ProviderTypeSafe, ProviderOpenAI, ProviderAnthropic}
+}
+
+// EffectiveProvider returns the normalized provider name. An empty value means
+// TypeSafe so that configs written before provider selection keep working.
+// Unknown names are returned as-is so evaluation fails safe instead of
+// silently sending the tool call and credentials to a different vendor.
+func (c *Config) EffectiveProvider() string {
+	if c.Provider == "" {
+		return ProviderTypeSafe
+	}
+	provider := strings.ToLower(strings.TrimSpace(c.Provider))
+	if provider == "" {
+		// A supplied whitespace-only name is invalid, not a legacy default.
+		return c.Provider
+	}
+	return provider
+}
+
+// EffectiveBaseURL returns the configured base URL or the provider default.
+func (c *Config) EffectiveBaseURL() string {
+	if c.BaseURL != "" {
+		return c.BaseURL
+	}
+	switch c.EffectiveProvider() {
+	case ProviderTypeSafe:
+		return DefaultTypeSafeBaseURL
+	case ProviderOpenAI:
+		return DefaultOpenAIBaseURL
+	case ProviderAnthropic:
+		return DefaultAnthropicBaseURL
+	}
+	return ""
+}
+
+// EffectiveModel returns the configured model, or jev-latest for TypeSafe.
+// Other providers have no default model because hosted model IDs change often.
+func (c *Config) EffectiveModel() string {
+	if c.Model != "" {
+		return c.Model
+	}
+	if c.EffectiveProvider() == ProviderTypeSafe {
+		return DefaultTypeSafeModel
+	}
+	return ""
+}
+
+// EffectiveAPIKeyEnv returns the environment variable consulted for the API key:
+// api_key_env when set, otherwise the provider's conventional variable. Each
+// provider has its own default so a TypeSafe key is never sent to another vendor.
+func (c *Config) EffectiveAPIKeyEnv() string {
+	if c.APIKeyEnv != "" {
+		return c.APIKeyEnv
+	}
+	return DefaultAPIKeyEnv(c.EffectiveProvider())
+}
+
+// DefaultAPIKeyEnv returns the conventional API key variable for a provider, or
+// "" for an unknown provider.
+func DefaultAPIKeyEnv(provider string) string {
+	switch provider {
+	case ProviderTypeSafe:
+		return "TYPESAFE_API_KEY"
+	case ProviderOpenAI:
+		return "OPENAI_API_KEY"
+	case ProviderAnthropic:
+		return "ANTHROPIC_API_KEY"
+	}
+	return ""
+}
+
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	enabled := true
@@ -65,7 +166,9 @@ func DefaultConfig() *Config {
 		SensitiveFiles:          DefaultSensitiveFiles(),
 		TrustedCommands:         DefaultTrustedCommands(),
 		Sources: map[string]string{
-			"mode": "built-in default", "base_url": "built-in default", "api_key": "environment or user config",
+			"mode": "built-in default", "provider": "built-in default", "api_key_env": "provider default",
+			"response_format": "built-in default",
+			"base_url":        "built-in default", "api_key": "environment or user config",
 			"model": "built-in default", "timeout_ms": "built-in default", "audit_log_path": "built-in default",
 			"fastpath_enabled": "built-in default", "context_awareness_enabled": "built-in default",
 			"intent_ttl_minutes": "built-in default",
@@ -599,12 +702,40 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			invalid = true
 		}
 	}
+	if fileCfg.Provider != "" {
+		cfg.Provider = fileCfg.EffectiveProvider()
+		cfg.Sources["provider"] = "user config"
+		if !isSupportedProvider(cfg.Provider) {
+			// Keep the unknown value: evaluation then fails safe instead of falling back
+			// to the TypeSafe endpoint with credentials meant for another provider.
+			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config provider %q is not supported (expected one of %s); semantic evaluation will fail safe", fileCfg.Provider, strings.Join(SupportedProviders(), ", ")))
+			invalid = true
+		}
+	}
 	if fileCfg.APIKey != "" {
 		cfg.APIKey = fileCfg.APIKey
 		cfg.Sources["api_key"] = "user config"
-	} else if fileCfg.TypesafeAPIKey != "" {
+	} else if fileCfg.TypesafeAPIKey != "" && cfg.EffectiveProvider() == ProviderTypeSafe {
 		cfg.APIKey = fileCfg.TypesafeAPIKey
 		cfg.Sources["api_key"] = "user config"
+	}
+	if fileCfg.APIKeyEnv != "" {
+		if name := strings.TrimSpace(fileCfg.APIKeyEnv); validEnvName(name) {
+			cfg.APIKeyEnv = name
+			cfg.Sources["api_key_env"] = "user config"
+		} else {
+			cfg.Diagnostics = append(cfg.Diagnostics, "user config api_key_env ignored: expected an environment variable name such as OPENAI_API_KEY")
+			invalid = true
+		}
+	}
+	if fileCfg.ResponseFormat != "" {
+		if format := strings.ToLower(strings.TrimSpace(fileCfg.ResponseFormat)); format == ResponseFormatJSONSchema || format == ResponseFormatJSONObject {
+			cfg.ResponseFormat = format
+			cfg.Sources["response_format"] = "user config"
+		} else {
+			cfg.Diagnostics = append(cfg.Diagnostics, "user config response_format ignored: expected json_schema or json_object")
+			invalid = true
+		}
 	}
 	if fileCfg.BaseURL != "" {
 		if ValidateBaseURL(fileCfg.BaseURL) == nil {
@@ -658,6 +789,32 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 	}
 }
 
+func isSupportedProvider(provider string) bool {
+	for _, supported := range SupportedProviders() {
+		if provider == supported {
+			return true
+		}
+	}
+	return false
+}
+
+// validEnvName accepts portable environment variable names: a letter or
+// underscore followed by letters, digits, or underscores.
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func anchorRelativePath(targetPath, baseDir string) string {
 	if filepath.IsAbs(targetPath) || baseDir == "" {
 		return targetPath
@@ -679,14 +836,25 @@ func ValidateBaseURL(value string) error {
 	if scheme == "https" {
 		return nil
 	}
-	if scheme == "http" {
-		host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-		ip := net.ParseIP(host)
-		if host == "localhost" || ip != nil && ip.IsLoopback() {
-			return nil
-		}
+	if scheme == "http" && isLoopbackHost(parsed.Hostname()) {
+		return nil
 	}
 	return fmt.Errorf("URL must use HTTPS, except for loopback HTTP endpoints")
+}
+
+// IsLoopbackBaseURL reports whether a valid base URL targets localhost or a loopback IP.
+func IsLoopbackBaseURL(value string) bool {
+	if ValidateBaseURL(value) != nil {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && isLoopbackHost(parsed.Hostname())
+}
+
+func isLoopbackHost(hostname string) bool {
+	host := strings.ToLower(strings.TrimSuffix(hostname, "."))
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
 
 func applyTrustedProjectConfig(cfg *Config, candidateDirs, workspaceRoots []string, registryPath string) {
@@ -846,10 +1014,17 @@ func mergeUniqueStrings(base []string, additional []string) []string {
 	return res
 }
 
+// loadEnvironment reads only the API key, from the variable chosen by the user
+// config (api_key_env) or the provider default. Policy settings never come from
+// the environment.
 func loadEnvironment(cfg *Config) {
-	if key := os.Getenv("TYPESAFE_API_KEY"); key != "" {
+	name := cfg.EffectiveAPIKeyEnv()
+	if name == "" {
+		return
+	}
+	if key := os.Getenv(name); key != "" {
 		cfg.APIKey = key
-		cfg.Sources["api_key"] = "TYPESAFE_API_KEY environment variable"
+		cfg.Sources["api_key"] = name + " environment variable"
 	}
 }
 

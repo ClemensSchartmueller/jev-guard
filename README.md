@@ -44,14 +44,14 @@ Coding agents are most useful when you let them run without approving every step
 Highlights:
 
 - **Fast.** Most calls are decided locally in under a millisecond: credential files, workspace escapes, and trusted read-only commands.
-- **Context-aware.** Ambiguous or destructive calls are judged by [TypeSafe AI](https://typesafe.ai)'s System One model, which also considers what you actually asked for. If you said *"delete the build folder"*, `rm -rf build` is not questioned again.
+- **Context-aware.** Ambiguous or destructive calls are judged by [TypeSafe AI](https://typesafe.ai)'s System One model by default, or by an OpenAI-compatible or Anthropic model you configure (see [Decision model providers](docs/configuration.md#decision-model-providers)). The judgment also considers what you actually asked for. If you said *"delete the build folder"*, `rm -rf build` is not questioned again.
 - **Fails safe.** If the API is unreachable, `jev-guard` asks instead of allowing.
 - **Catastrophic ceiling.** Catastrophic actions never run automatically, even when you requested them.
 - **Try before enforcing.** `audit` mode logs what *would* have been blocked without interrupting anything.
 
 ## Quick start
 
-**Requirements:** Node.js 18+ for the one-command installer (the hooks themselves run a native binary), and a [TypeSafe AI](https://typesafe.ai) API key for semantic evaluation.
+**Requirements:** Node.js 18+ for the one-command installer (the hooks themselves run a native binary), and a [TypeSafe AI](https://typesafe.ai) API key (or a key for another [decision model provider](docs/configuration.md#decision-model-providers)) for semantic evaluation.
 
 **1. Install and set up hooks.** From the project you want to protect:
 

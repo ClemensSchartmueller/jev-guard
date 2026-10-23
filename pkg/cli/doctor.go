@@ -87,16 +87,21 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 	}
 
 	// 2. API key (never printed beyond a short masked prefix).
-	if cfg.APIKey == "" {
-		report(doctorWarn, "API key: not configured (set TYPESAFE_API_KEY or api_key in user config)")
+	keyEnv := cfg.EffectiveAPIKeyEnv()
+	if cfg.APIKey == "" && keyEnv != "" {
+		report(doctorWarn, "API key: not configured (set %s or api_key in user config)", keyEnv)
+	} else if cfg.APIKey == "" {
+		report(doctorWarn, "API key: not configured (set api_key in user config)")
 	} else {
 		report(doctorOK, "API key: configured (%s) from %s", maskKey(cfg.APIKey), cfg.Sources["api_key"])
 	}
 
 	// 3. Network. The API key is deliberately never sent.
-	baseURL := effectiveBaseURL(cfg.BaseURL)
+	baseURL := cfg.EffectiveBaseURL()
 	if offline {
 		report(doctorOK, "Network: skipped (--offline)")
+	} else if baseURL == "" {
+		report(doctorFail, "Network: no endpoint for unsupported provider %q", cfg.EffectiveProvider())
 	} else {
 		timeout := time.Duration(effectiveTimeout(cfg.TimeoutMs)) * time.Millisecond
 		if cfg.Timeout > 0 {
@@ -119,8 +124,12 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		}
 	}
 
-	// 4. Model and feature flags.
-	report(doctorOK, "Model: %s; fastpath: %t; context awareness: %t", effectiveValue(cfg.Model, "jev-latest"), cfg.IsFastpathEnabled(), cfg.IsContextAwarenessEnabled())
+	// 4. Provider, model, and feature flags.
+	if model := cfg.EffectiveModel(); model == "" {
+		report(doctorFail, "Model: not configured for provider %s (set model in user config)", cfg.EffectiveProvider())
+	} else {
+		report(doctorOK, "Provider: %s; model: %s; fastpath: %t; context awareness: %t", cfg.EffectiveProvider(), model, cfg.IsFastpathEnabled(), cfg.IsContextAwarenessEnabled())
+	}
 
 	// 5. Workspace.
 	if root := doctorGitRoot(cwd); root != "" {

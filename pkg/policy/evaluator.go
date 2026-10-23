@@ -125,10 +125,19 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool)
 
 	return &harness.EvaluationResult{
 		Decision:   harness.DecisionAllow,
-		Reason:     "Operation verified safe and contained by TypeSafe AI",
+		Reason:     allowReason(j.Provider),
 		Source:     "policy_jev_allow",
 		Confidence: j.DestructiveConfidence,
 	}
+}
+
+// allowReason names the decision model that judged the call. TypeSafe
+// judgments carry no provider and keep the original wording.
+func allowReason(provider string) string {
+	if provider == "" || provider == "typesafe" {
+		return "Operation verified safe and contained by TypeSafe AI"
+	}
+	return fmt.Sprintf("Operation verified safe and contained by the %s decision model", provider)
 }
 
 func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested bool) *harness.EvaluationResult {
