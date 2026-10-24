@@ -263,6 +263,56 @@ func TestLoadConfigWithPaths_TrustDoesNotTransferToAnotherProjectRoot(t *testing
 	}
 }
 
+// A project reached through a symlinked parent (like macOS /var -> /private/var) must be trusted
+// when inspected and loaded through the same path, and must fail closed through any alias.
+func TestLoadConfigWithPaths_TrustThroughSymlinkedParentBindsTheProposedPath(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	linkParent := filepath.Join(root, "link")
+	realRepo := filepath.Join(realParent, "repo")
+	linkRepo := filepath.Join(linkParent, "repo")
+	if err := os.MkdirAll(realRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeConfig(t, filepath.Join(realRepo, ".jevguard.json"), `{"sensitive_files":[".symlinked-secret"]}`)
+
+	info, err := inspectProjectConfigIsolated(t, linkRepo)
+	if err != nil {
+		t.Fatalf("inspect project config through symlinked parent: %v", err)
+	}
+	if info.TrustRecord.ProjectRoot != linkRepo || info.TrustRecord.ConfigPath != filepath.Join(linkRepo, ".jevguard.json") {
+		t.Fatalf("expected the proposal to bind the inspected path %q, got %+v", linkRepo, info.TrustRecord)
+	}
+	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
+	registryBytes, err := json.Marshal(makeTrustRegistryFixture(t, info))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+	userConfigPath := filepath.Join(root, "user", "config.json")
+
+	again, err := inspectProjectConfigWithRegistry(linkRepo, registryPath)
+	if err != nil || !again.Trusted {
+		t.Fatalf("expected the approved record to be trusted through the same path, got info=%+v err=%v", again, err)
+	}
+	if cfg := LoadConfigWithPaths([]string{linkRepo}, userConfigPath, registryPath); !containsConfigValue(cfg.SensitiveFiles, ".symlinked-secret") {
+		t.Fatalf("expected the approved record to apply at runtime through the same path, diagnostics=%v", cfg.Diagnostics)
+	}
+
+	alias, err := inspectProjectConfigWithRegistry(realRepo, registryPath)
+	if err != nil || alias.Trusted {
+		t.Fatalf("expected the resolved alias not to be trusted, got info=%+v err=%v", alias, err)
+	}
+	if cfg := LoadConfigWithPaths([]string{realRepo}, userConfigPath, registryPath); containsConfigValue(cfg.SensitiveFiles, ".symlinked-secret") {
+		t.Fatal("trust approved through a symlinked path transferred to its resolved alias")
+	}
+}
+
 func TestLoadConfigWithPathsAndRoots_TrustedRootConfigAppliesFromNestedWorkingDirectory(t *testing.T) {
 	clearConfigEnvironment(t)
 
@@ -524,5 +574,17 @@ func clearConfigEnvironment(t *testing.T) {
 		"JEV_GUARD_CONTEXT_AWARENESS_ENABLED",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestInspectProjectConfigReportsMissingTrustRegistry(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".jevguard.json")
+	writeConfig(t, configPath, `{"sensitive_files":[".secret"]}`)
+	info, err := inspectProjectConfigIsolated(t, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Trusted || info.TrustIssue != "trust registry does not exist" {
+		t.Fatalf("expected an untrusted config with a missing-registry issue, got trusted=%t issue=%q", info.Trusted, info.TrustIssue)
 	}
 }
