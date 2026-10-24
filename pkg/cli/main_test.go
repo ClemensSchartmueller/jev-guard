@@ -11,8 +11,9 @@ import (
 
 // TestMain points config loading, the trust registry, project config inspection,
 // and the home directory at an empty temp profile so CLI tests never read the real
-// ~/.jevguard user config, trust registry, sessions, or agent hook settings. The
-// run fails if the real user config or trust registry changed.
+// ~/.jevguard user config, trust registry, sessions, or agent hook settings.
+// testprofile.Run makes config's account-backed loaders panic, and fails the run
+// if the real user config or trust registry changed.
 func TestMain(m *testing.M) {
 	os.Exit(testprofile.Run(m, func(home string) {
 		userConfig := filepath.Join(home, ".jevguard", ".jevguard.json")

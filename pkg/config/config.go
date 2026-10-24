@@ -11,12 +11,12 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"jev-guard/internal/accountprofile"
 	"jev-guard/pkg/harness"
 )
 
@@ -216,11 +216,11 @@ func LoadConfigWithPathsAndRoots(candidateDirs, workspaceRoots []string, userCon
 // system account profile rather than environment variables that a repository or hook process
 // can override.
 func UserConfigPath() string {
-	current, err := user.Current()
-	if err != nil || strings.TrimSpace(current.HomeDir) == "" {
+	home := accountprofile.HomeDir()
+	if home == "" {
 		return ""
 	}
-	return userConfigPathForHome(current.HomeDir)
+	return userConfigPathForHome(home)
 }
 
 func userConfigPathForHome(home string) string {
@@ -313,11 +313,11 @@ func validateExistingUserConfig(path string) error {
 
 // TrustRegistryPath returns the user-owned registry that approves exact project config contents.
 func TrustRegistryPath() string {
-	current, err := user.Current()
-	if err != nil || strings.TrimSpace(current.HomeDir) == "" {
+	home := accountprofile.HomeDir()
+	if home == "" {
 		return ""
 	}
-	return filepath.Join(current.HomeDir, ".jevguard", "trusted-project-configs.json")
+	return filepath.Join(home, ".jevguard", "trusted-project-configs.json")
 }
 
 // FindProjectConfigInDirectory searches a directory up to its bounded project root.

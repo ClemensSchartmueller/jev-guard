@@ -20,8 +20,9 @@ import (
 // TestMain makes the production config loader unusable in this package's tests: every test
 // that runs eval must go through newEvalEnv, which injects temp paths. Without this, a test
 // would read (and the trust-registry helpers would write) the real ~/.jevguard, because
-// config paths come from the OS account (user.Current), not from $HOME. The whole binary also
-// runs in a temp HOME/JEV_GUARD_HOME, and fails if the real user config or trust registry changed.
+// config paths come from the OS account (user.Current), not from $HOME. testprofile.Run also
+// makes config's account-backed loaders panic, runs the whole binary in a temp
+// HOME/JEV_GUARD_HOME, and fails if the real user config or trust registry changed.
 func TestMain(m *testing.M) {
 	os.Exit(testprofile.Run(m, func(string) {
 		evalLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
