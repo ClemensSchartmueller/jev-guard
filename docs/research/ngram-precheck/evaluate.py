@@ -7,6 +7,7 @@ Model (verbatim settings from e2_prompt_attacks_shortcuts.py):
 
 usage: python -I evaluate.py INDIRECT.jsonl BENIGN_DIR OUT_DIR
 """
+import hashlib
 import json
 import os
 import sys
@@ -70,13 +71,16 @@ def windows(t):
     return [t[i:i + WIN] for i in range(0, len(t) - WIN // 2, STRIDE)]
 
 
-benign = []
+benign, seen_b = [], set()   # deduplicated by content (whitespace-normalized sha256); first copy wins
 for cat in sorted(os.listdir(BENIGN)):
     for f in sorted(os.listdir(os.path.join(BENIGN, cat))):
         t = open(os.path.join(BENIGN, cat, f), encoding="utf-8", errors="replace").read()
-        if t.strip():
+        ch = hashlib.sha256(" ".join(t.split()).encode()).hexdigest()
+        if t.strip() and ch not in seen_b:
+            seen_b.add(ch)
             benign.append((cat, f, t))
 first = score([t[:WIN] for _, _, t in benign])
+whole = score([t for _, _, t in benign])   # each document scored as a single text, no windowing
 allw = [windows(t) for _, _, t in benign]
 flat = score([w for ws in allw for w in ws])
 mx, k = [], 0
@@ -94,6 +98,7 @@ for rate in (0.5, 0.6, 0.7, 0.8, 0.9, 0.95):
     row = {"catch": rate, "thr": round(t, 3),
            "test_fbr": round(float((ste[yte == 0] >= t).mean()), 3),
            "benign_fbr_first2k": round(float((first >= t).mean()), 3),
+           "benign_fbr_wholedoc": round(float((whole >= t).mean()), 3),
            "benign_fbr_maxwin": round(float((mx >= t).mean()), 3),
            "benign_fbr_window": round(float((flat >= t).mean()), 3),
            "by_cat_maxwin": {}}

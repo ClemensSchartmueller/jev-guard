@@ -1,4 +1,4 @@
-"""Sensitivity check: same model, but half of the benign tool-output corpus (split by file, stratified by category)
+"""Sensitivity check: same model, but half of the benign tool-output corpus (deduplicated and split by content hash)
 is added to the training negatives as 2000-char windows. False-block rate is measured on the other half only.
 This is the most favourable setup for the n-gram idea: the model has seen in-domain benign text.
 
@@ -27,13 +27,14 @@ def windows(t):
 rows = [json.loads(l) for l in open(ROWS)]
 tr = [r for r in rows if r["split"] == "train"]
 te = [r for r in rows if r["split"] == "test"]
-benign = []
+benign, seen_b = [], set()   # deduplicated by content
 for cat in sorted(os.listdir(BENIGN)):
     for f in sorted(os.listdir(os.path.join(BENIGN, cat))):
         t = open(os.path.join(BENIGN, cat, f), encoding="utf-8", errors="replace").read()
-        if t.strip():
-            half = int(hashlib.sha256(f.encode()).hexdigest(), 16) % 2
-            benign.append((cat, f, t, half))
+        ch = hashlib.sha256(" ".join(t.split()).encode()).hexdigest()   # split by content, not by file name
+        if t.strip() and ch not in seen_b:
+            seen_b.add(ch)
+            benign.append((cat, f, t, int(ch, 16) % 2))
 fit_b = [w for c, f, t, h in benign if h == 0 for w in windows(t)]
 held = [(c, f, t) for c, f, t, h in benign if h == 1]
 

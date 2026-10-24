@@ -8,9 +8,11 @@ without running that code:
   twin    = same carrier, same position, an ordinary paragraph from another carrier of the same kind
             (or, for ~10%, the payload quoted inside an authored security notice)
   clean   = unmodified carriers, length-matched
-Payload families and carriers are assigned to one split each (no reuse across splits).
+Payload families and carriers are assigned to one split each (no reuse across splits). Families are canonical:
+payloads whose normalized text contains another payload's text share its family, and the build fails if any
+held-out payload still overlaps a training payload.
 
-usage: python -I build_indirect.py DATA_DIR OUT.jsonl
+usage: python -I build_indirect.py DATA_DIR OUT.jsonl   (also writes OUT.jsonl.payloads.jsonl)
 """
 import hashlib
 import json
@@ -78,6 +80,36 @@ for line in open(f"{DATA}/llmail/raw_submissions_phase2.jsonl"):
     payloads.append({"src": "llmail", "family": f"llmail:{team}", "text": b})
 del labels
 
+
+# --- canonical families -----------------------------------------------------------------------------------------------
+# Some source IDs are variants of one instruction (e.g. SEP prefixes a base probe with a priority phrase under a new
+# appended_task_id). Any two payloads where one normalized text contains the other belong to one family, so that no
+# held-out payload is a substring of a training payload.
+def norm(t):
+    return re.sub(r"\W+", " ", t.lower()).strip()
+
+
+parent = {p["family"]: p["family"] for p in payloads}
+
+
+def find(f):
+    while parent[f] != f:
+        parent[f] = parent[parent[f]]
+        f = parent[f]
+    return f
+
+
+normed = sorted(((norm(p["text"]), p["family"]) for p in payloads), key=lambda x: len(x[0]))
+for i, (a, fa) in enumerate(normed):
+    for b, fb in normed[i + 1:]:
+        if a in b:
+            ra, rb = find(fa), find(fb)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+merged = sum(find(f) != f for f in parent)
+for p in payloads:
+    p["family"] = find(p["family"])
+
 # --- carriers ---------------------------------------------------------------------------------------------------------
 carriers, cseen = [], set()
 for x in sep:
@@ -113,6 +145,14 @@ for c in carriers:
     c["split"] = split_of(c["key"])
 for p in payloads:
     p["split"] = split_of(p["family"])
+
+# overlap audit: no test payload may contain, or be contained in, a training payload
+train_n = [norm(p["text"]) for p in payloads if p["split"] == "train"]
+leaks = [p["family"] for p in payloads if p["split"] == "test" and any(a in b or b in a for a, b in
+                                                                       ((norm(p["text"]), t) for t in train_n))]
+print(f"families merged={merged} cross-split containment leaks={len(leaks)}")
+if leaks:
+    sys.exit(f"payload family leak: {sorted(set(leaks))[:10]}")
 
 
 def sentences(t):
@@ -202,6 +242,10 @@ for c in rng.sample(carriers, min(n_clean, len(carriers))):
 with open(OUT, "w") as f:
     for r in rows:
         f.write(json.dumps(r) + "\n")
+# payloads with canonical family and split, for evaluate_injected.py
+with open(OUT + ".payloads.jsonl", "w") as f:
+    for p in payloads:
+        f.write(json.dumps(p) + "\n")
 cnt = Counter((r["split"], r["label"], r.get("payload_src"), r["carrier_src"]) for r in rows)
 print(f"payloads={len(payloads)} carriers={len(carriers)} rows={len(rows)}")
 for k, v in sorted(cnt.items()):

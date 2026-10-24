@@ -1,9 +1,9 @@
 """Fairest check for the go/no-go: the domain-adapted model (evaluate_adapted.py setup), but the 80% catch threshold
 is calibrated on attacks *inside tool outputs*: each held-out benign doc gets one held-out payload (SEP probe or BIPIA
-attack whose family hashes to the test split, same split function as build_indirect.py) inserted at a random
-paragraph boundary. False-block rate is measured on the same held-out docs without the payload (paired twins).
+attack whose canonical family is in the test split, read from build_indirect.py's payload file) inserted at a
+random line break. False-block rate is measured on the same held-out docs without the payload (paired twins).
 
-usage: python -I evaluate_injected.py INDIRECT.jsonl BENIGN_DIR DATA_DIR OUT_DIR
+usage: python -I evaluate_injected.py INDIRECT.jsonl BENIGN_DIR OUT_DIR   (reads INDIRECT.jsonl.payloads.jsonl)
 """
 import hashlib
 import json
@@ -18,43 +18,30 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 warnings.simplefilter("ignore")
-ROWS, BENIGN, DATA, OUT = sys.argv[1:5]
+ROWS, BENIGN, OUT = sys.argv[1:4]
 WIN, STRIDE = 2000, 1000
 rng = random.Random(62)
-
-
-def h(s):
-    return int(hashlib.sha256(s.encode()).hexdigest()[:8], 16)
-
-
-def is_test(key):
-    return (h("split:" + key) % 1000) < 300
 
 
 def windows(t):
     return [t] if len(t) <= WIN else [t[i:i + WIN] for i in range(0, len(t) - WIN // 2, STRIDE)]
 
 
-# held-out payloads
-pay = []
-for x in json.load(open(f"{DATA}/sep/SEP_dataset.json")):
-    c, i = x["prompt_clean"].strip(), x["prompt_instructed"].strip()
-    p = i[len(c):].strip() if i.startswith(c) else (i[:-len(c)].strip() if i.endswith(c) else None)
-    if p and is_test(f"sep:{x['info']['appended_task_id']}"):
-        pay.append(("sep", p))
-for part in ("test", "train"):
-    for cat, items in json.load(open(f"{DATA}/bipia/benchmark_text_attack_{part}.json")).items():
-        for t in items:
-            if t.strip() and len(t) <= 600 and is_test(f"bipia:{part}:{cat}"):
-                pay.append(("bipia", t.strip()))
-pay = list(dict.fromkeys(pay))
+# held-out payloads: SEP and BIPIA payloads whose canonical family is in the test split, taken from the builder's
+# payload file so setup C uses exactly the same family mapping and split as the rows
+payloads = [json.loads(line) for line in open(ROWS + ".payloads.jsonl")]
+pay = list(dict.fromkeys((p["src"], p["text"]) for p in payloads if p["split"] == "test" and p["src"] in ("sep", "bipia")))
+train_pay = [" ".join(p["text"].lower().split()) for p in payloads if p["split"] == "train"]
+assert not any(" ".join(t.lower().split()) in q for _, t in pay for q in train_pay), "held-out payload in training"
 
-benign = []
+benign, seen_b = [], set()   # deduplicated by content, same split as evaluate_adapted.py
 for cat in sorted(os.listdir(BENIGN)):
     for f in sorted(os.listdir(os.path.join(BENIGN, cat))):
         t = open(os.path.join(BENIGN, cat, f), encoding="utf-8", errors="replace").read()
-        if t.strip():
-            benign.append((cat, f, t, int(hashlib.sha256(f.encode()).hexdigest(), 16) % 2))
+        ch = hashlib.sha256(" ".join(t.split()).encode()).hexdigest()   # split by content, not by file name
+        if t.strip() and ch not in seen_b:
+            seen_b.add(ch)
+            benign.append((cat, f, t, int(ch, 16) % 2))
 fit_b = [w for c, f, t, s in benign if s == 0 for w in windows(t)]
 held = [(c, t) for c, f, t, s in benign if s == 1]
 
