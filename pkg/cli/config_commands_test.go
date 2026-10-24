@@ -20,14 +20,14 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	if err := os.WriteFile(configPath, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(projectDir)
+	// Trust records bind the absolute, lexically cleaned path, not a symlink-resolved one.
+	// On macOS t.TempDir() is under /var (a symlink to /private/var) and on Windows it may be
+	// an 8.3 short name, so EvalSymlinks would produce a path the product never proposes.
+	resolvedRoot, err := filepath.Abs(projectDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolvedConfigPath, err := filepath.EvalSymlinks(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resolvedConfigPath := filepath.Join(resolvedRoot, ".jevguard.json")
 	digest := sha256.Sum256(original)
 	sha := hex.EncodeToString(digest[:])
 	wantRecord := config.ProjectConfigTrust{
