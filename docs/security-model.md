@@ -90,6 +90,29 @@ This feature is optional. Disable it with `"context_awareness_enabled": false` i
 - **Fewer needless prompts.** When you explicitly ask for an action (for example *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms that the call matches your intent and allows it, so you are not asked again.
 - **Catastrophic ceiling.** Even with a matching intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) are capped at `force_ask`, never `ALLOW`.
 
+## Tool-output taint
+
+Instructions hidden in a fetched web page, a search result or an MCP tool response are the main prompt-injection path for coding agents. Claude Code's `PostToolUse` hook (matcher `WebFetch|WebSearch|mcp__.*`, installed by `init`) marks the session as **tainted** and records which tool did it and when. The taint is based on provenance alone: no tool output is sent to TypeSafe AI or anywhere else, and no classifier runs. It lasts until `end-turn` clears the session or the next ingested prompt replaces it. `jev-guard status` shows it.
+
+While a session is tainted, the gate checks every `ALLOW`, from both the fast path and the policy, for:
+
+- an `ALLOW` produced only by the `explicitly_requested` intent upgrade (source `policy_jev_intent_allow`),
+- network egress (`WebFetch`, `WebSearch`, URL targets, `curl`/`wget`/`ssh`/`scp`/`nc` and similar, `git push`, package `publish`),
+- sensitive file access (the `sensitive_files` patterns),
+- writes to execution-sensitive paths (the list above, such as `.claude/`, `.github/`, `CLAUDE.md`, `AGENTS.md` and `.husky/`). A shell command that names such a path counts too.
+
+`taint_mode` in the user config selects what happens:
+
+| `taint_mode` | Effect |
+| :--- | :--- |
+| `off` | No taint is recorded and the gate ignores existing taint. |
+| `audit` (default) | Verdicts are unchanged. Each matching decision gets a `taint` field in the audit log (`audit: enforce would ask (...)`), which measures how often enforce would apply. |
+| `enforce` | Matching decisions become `ASK` (source `session_tainted`), and the `PostToolUse` hook warns the model through `additionalContext`. |
+
+A project config cannot set `taint_mode`, even when trusted. An invalid value falls back to `enforce`. When `context_awareness_enabled` is false, taint is off. A recorded abort still takes precedence over a taint. Session writes (ingest, taint, end-turn) take a per-session lock file, so a taint written by parallel tool calls or subagents never clears an abort or overwrites a newer prompt.
+
+Limits: only Claude Code is covered (see [Manual hook setup](hooks.md)). The taint ends with the reply, even though the injected text can stay in the model's context for later turns. The egress check is a token heuristic over the command.
+
 ## Intent policy matrix
 
 When context awareness is enabled and an intent is ingested, TypeSafe AI classifies `intent_alignment` into three categories:
