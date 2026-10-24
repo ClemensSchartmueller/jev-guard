@@ -18,9 +18,13 @@ import (
 )
 
 func main() {
-	if err := config.EnsureUserConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
-		os.Exit(2)
+	initErr := config.EnsureUserConfig()
+	if initErr != nil {
+		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", initErr)
+		// The gate decides after reading stdin: a PostToolUse event must still exit 0.
+		if len(os.Args) > 1 {
+			os.Exit(2)
+		}
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	runner.Eval = runEval
@@ -30,15 +34,30 @@ func main() {
 		os.Exit(exitCode)
 	}
 
-	exitCode = runGate()
+	exitCode = runGate(initErr)
 	os.Exit(exitCode)
 }
 
 // runGate orchestrates ingestion, local fast-path, semantic evaluation, and response delivery.
-func runGate() int {
+// initErr is a user config initialization failure, which holds PreToolUse calls.
+func runGate(initErr error) int {
 	inputBytes, err := readStandardInput()
 	if err != nil {
 		return handleFatalError(nil, "Failed to read standard input", err)
+	}
+
+	// A PostToolUse payload reports a tool that already ran; it must never be
+	// gated or answered as a pending PreToolUse call. It is dispatched from
+	// its envelope, before the tool arguments are parsed.
+	if post := parsePostToolUseEnvelope(inputBytes); post != nil {
+		cfg := config.LoadConfigForCall(post)
+		for _, diagnostic := range cfg.Diagnostics {
+			fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+		}
+		return runPostToolUse(post, cfg, os.Stdout, os.Stderr)
+	}
+	if initErr != nil {
+		return 2
 	}
 
 	call, err := harness.ParsePayload(inputBytes)
@@ -59,6 +78,9 @@ func runGate() int {
 	}
 
 	result := executeGateEvaluation(call, cfg)
+	if result.TaintNote != "" {
+		fmt.Fprintf(os.Stderr, "jev-guard: taint %s\n", result.TaintNote)
+	}
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
@@ -78,7 +100,8 @@ const (
 // enabled. It returns a force_ask hold when the session recorded an abort or
 // when its state cannot be read or decoded (an unreadable session might be
 // an aborted one, so it fails closed). Otherwise it copies the active prompt
-// into call.UserIntent and returns nil. An absent or expired session is not
+// into call.UserIntent, and its taint (if any) into call.Taint, and returns
+// nil. An absent or expired session is not
 // an error. The hold is returned before audit-mode rewriting.
 func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
 	if !cfg.IsContextAwarenessEnabled() {
@@ -107,6 +130,13 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 	}
 	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
 		call.UserIntent = intent
+	}
+	if sessState.Tainted && cfg.EffectiveTaintMode() != config.TaintModeOff {
+		taint := session.TaintSource{ToolName: "unknown tool"}
+		if sessState.TaintSource != nil {
+			taint = *sessState.TaintSource
+		}
+		call.Taint = &taint
 	}
 	return nil
 }
@@ -185,7 +215,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		fastFilter := fastpath.NewFilter(checker, cfg)
 		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
 			trace.Fastpath = fastResult
-			trace.Final = applyAuditMode(fastResult, cfg.Mode)
+			trace.Final = applyAuditMode(applyTaint(call, fastResult, cfg, sensitiveChecker(cfg)), cfg.Mode)
 			return trace
 		}
 	}
@@ -203,7 +233,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		Contained:    trace.Contained,
 		PathVerified: isLocalPathVerified(call, trace.Contained),
 	}, trace.EvalErr)
-	trace.Final = applyAuditMode(resolved, cfg.Mode)
+	trace.Final = applyAuditMode(applyTaint(call, resolved, cfg, sensitiveChecker(cfg)), cfg.Mode)
 	return trace
 }
 
@@ -294,6 +324,7 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 			Reason:     fmt.Sprintf("[AUDIT-MODE: %s] %s", result.Decision, result.Reason),
 			Source:     result.Source,
 			Confidence: result.Confidence,
+			TaintNote:  result.TaintNote,
 		}
 	}
 

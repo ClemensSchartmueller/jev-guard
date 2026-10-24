@@ -36,6 +36,7 @@ Patterns are matched case-insensitively as globs and substrings against both the
 - Commands that reference the variable unexpanded (`$XDG_CONFIG_HOME`, `${XDG_CONFIG_HOME}`, `%XDG_CONFIG_HOME%`, `$env:XDG_CONFIG_HOME`) followed by `/git/config` or `/git/credentials` are flagged regardless of its value.
 - These environment-derived patterns are resolved from the hook process environment when the filter is built. They are not written to `.jevguard.json`, so the sensitive-file count reported by `eval` and `doctor` does not include them.
 - POSIX (`/`) and Windows (`\`) path separators are normalized, so matching is consistent across operating systems.
+- The target path, and each command argument that exists on disk, is also matched in resolved form: joined with the working directory and with symlinks followed. A `Read` of `notes.txt` that links to `.env`, or `cat credentials` run inside `~/.aws`, therefore asks.
 
 You can add patterns through `sensitive_files` in your [configuration](configuration.md).
 
@@ -89,6 +90,35 @@ This feature is optional. Disable it with `"context_awareness_enabled": false` i
 - **Fail closed on unreadable sessions.** If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate holds the call with `force_ask` (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out. `end-turn` keeps such a file too. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
 - **Fewer needless prompts.** When you explicitly ask for an action (for example *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms that the call matches your intent and allows it, so you are not asked again.
 - **Catastrophic ceiling.** Even with a matching intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) are capped at `force_ask`, never `ALLOW`.
+
+## Tool-output taint
+
+Instructions hidden in a fetched web page, a search result or an MCP tool response are the main prompt-injection path for coding agents. Claude Code's `PostToolUse` hook (matcher `WebFetch|WebSearch|mcp__.*`, installed by `init`) marks the session as **tainted** and records which tool did it and when. The taint is based on provenance alone: no tool output is sent to TypeSafe AI or anywhere else, and no classifier runs. It lasts until `end-turn` clears the session or the next ingested prompt replaces it. `jev-guard status` shows it.
+
+While a session is tainted, the gate checks every `ALLOW`, from both the fast path and the policy, for:
+
+- an `ALLOW` produced only by the `explicitly_requested` intent upgrade (source `policy_jev_intent_allow`),
+- network egress (`WebFetch`, `WebSearch`, URL targets, `curl`/`wget`/`ssh`/`scp`/`nc` and similar, `git push`, package `publish`),
+- sensitive file access (the `sensitive_files` patterns),
+- writes to execution-sensitive paths (the list above, such as `.claude/`, `.github/`, `CLAUDE.md`, `AGENTS.md` and `.husky/`). A shell command that names such a path counts too.
+
+These path checks look at each path as written and as resolved: relative paths are joined with the working directory and symlinks are followed. A symlink into `.claude/`, or `touch settings.json` run from inside `.claude/`, therefore counts. The whole resolved path is checked, so a workspace root inside `.claude/hooks/` or another sensitive directory hides nothing. The only exception is a Git worktree directly under `.claude/worktrees/` (a `.claude/worktrees/<name>` directory with a `.git` file, as Claude Code creates). Inside it, only the path within the worktree and the path above `.claude/` are checked, so the worktree is not treated as sensitive throughout.
+
+`taint_mode` in the user config selects what happens:
+
+| `taint_mode` | Effect |
+| :--- | :--- |
+| `off` | No taint is recorded and the gate ignores existing taint. |
+| `audit` (default) | Verdicts are unchanged. Each matching decision gets a `taint` field in the audit log (`audit: enforce would ask (...)`), which measures how often enforce would apply. |
+| `enforce` | Matching decisions become `ASK` (source `session_tainted`), and the `PostToolUse` hook warns the model through `additionalContext`. |
+
+A project config cannot set `taint_mode`, even when trusted. An invalid value falls back to `enforce`. When `context_awareness_enabled` is false, taint is off. A recorded abort still takes precedence over a taint.
+
+Session writes (ingest, taint, end-turn) take a per-session OS file lock (`flock` on macOS and Linux, `LockFileEx` on Windows), so a taint written by parallel tool calls or subagents never clears an abort or overwrites a newer prompt. The operating system releases the lock when its holder exits, so a crashed hook never leaves a session locked, and a slow live holder is never displaced. Lock acquisition gives up after two seconds.
+
+The taint fails closed. Before taking the lock, the `PostToolUse` hook creates its own marker file next to the session file (`<session>.json.taint.<event id>`). The gate treats the session as tainted while a fresh marker exists, even if the lock timed out or the session file could not be written. An abort prompt that cannot be saved writes an `<session>.json.abort.<event id>` marker in the same way, which holds the session until the next prompt. Only the writers that clear a signal (the next ingested prompt, `end-turn`, `clear-intent`) remove markers, and only the markers that existed when they took the lock. A taint or abort published while an older write is in progress therefore survives it. A delayed taint whose marker was already removed by the next prompt or `end-turn` is discarded instead of re-tainting the new turn. `status` applies markers the same way as the gate, so it also lists a session that exists only as a marker. In `audit` mode a marker-only taint behaves like any other taint: it adds audit notes and changes no verdict. If neither the marker nor the session file can be written (the sessions directory is unwritable), the hook reports the lost taint on stderr. In `enforce` mode it still warns the model.
+
+Limits: only Claude Code is covered (see [Manual hook setup](hooks.md)). The taint ends with the reply, even though the injected text can stay in the model's context for later turns. The egress check is a token heuristic over the command.
 
 ## Intent policy matrix
 

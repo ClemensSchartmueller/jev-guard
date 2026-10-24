@@ -185,12 +185,33 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		if !found {
 			report(doctorWarn, "Hooks (%s): no jev-guard PreToolUse entry in %s; run `jev-guard init --agent %s`", agent, strings.Join(checked, " or "), agent)
 		}
+		if agent == "claude" {
+			reportPostToolUse(report, cfg, checked)
+		}
 	}
 
 	if failed {
 		return 1
 	}
 	return 0
+}
+
+// reportPostToolUse checks the Claude Code PostToolUse hook that taints a
+// session after untrusted tool output. A missing hook only warns: the gate
+// still works, it just never sees a taint.
+func reportPostToolUse(report func(level, format string, a ...interface{}), cfg *config.Config, paths []string) {
+	mode := cfg.EffectiveTaintMode()
+	if mode == config.TaintModeOff {
+		report(doctorOK, "Taint (claude): off (taint_mode or context awareness disabled)")
+		return
+	}
+	for _, path := range paths {
+		if _, status := findHookCommand(path, "claude", "PostToolUse"); status == "found" {
+			report(doctorOK, "Taint (claude): PostToolUse registered in %s; taint_mode %s", path, mode)
+			return
+		}
+	}
+	report(doctorWarn, "Taint (claude): no jev-guard PostToolUse entry in %s, so untrusted tool output never taints the session (taint_mode %s); run `jev-guard init --agent claude`", strings.Join(paths, " or "), mode)
 }
 
 func maskKey(key string) string {
@@ -261,6 +282,11 @@ func nearestExistingDir(dir string) string {
 // findPreToolUseCommand returns the jev-guard PreToolUse command and a status of
 // "found", "missing" (no file), "invalid" (bad JSON), "disabled" or "none" (no jev-guard entry).
 func findPreToolUseCommand(path, agent string) (string, string) {
+	return findHookCommand(path, agent, "PreToolUse")
+}
+
+// findHookCommand is findPreToolUseCommand for any hook event.
+func findHookCommand(path, agent, event string) (string, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", "missing"
@@ -277,7 +303,7 @@ func findPreToolUseCommand(path, agent string) (string, string) {
 	if agent == "antigravity" && section["enabled"] == false {
 		return "", "disabled"
 	}
-	entries, _ := section["PreToolUse"].([]interface{})
+	entries, _ := section[event].([]interface{})
 	for _, entry := range entries {
 		item, ok := entry.(map[string]interface{})
 		if !ok {

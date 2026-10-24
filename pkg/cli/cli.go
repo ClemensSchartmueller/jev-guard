@@ -163,6 +163,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])
 	fmt.Fprintf(r.Stdout, "  Context awareness:    %t (%s)\n", cfg.IsContextAwarenessEnabled(), cfg.Sources["context_awareness_enabled"])
 	fmt.Fprintf(r.Stdout, "  Intent TTL:           %d minutes (%s)\n", int(cfg.IntentTTL()/time.Minute), cfg.Sources["intent_ttl_minutes"])
+	fmt.Fprintf(r.Stdout, "  Taint mode:           %s (%s)\n", cfg.EffectiveTaintMode(), cfg.Sources["taint_mode"])
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
@@ -487,19 +488,15 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 	// A recorded "stop" must keep holding background work after the reply ends;
 	// it expires via the TTL or is replaced by the next ingested prompt.
 	// If the state cannot be read, the abort status is unknown, so the file
-	// is kept rather than risk deleting a recorded stop.
-	state, err := session.LoadSession(sessionID)
+	// is kept rather than risk deleting a recorded stop. EndTurn checks and
+	// clears under the session lock, so a concurrent abort is never lost.
+	aborted, err := session.EndTurn(sessionID)
 	if err != nil {
-		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept session '%s' because its state could not be read: %v\n", sessionID, err)
+		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept session '%s': %v\n", sessionID, err)
 		return ActionHandled, 0
 	}
-	if state != nil && state.Aborted {
+	if aborted {
 		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept abort flag for session '%s'\n", sessionID)
-		return ActionHandled, 0
-	}
-
-	if err := session.ClearSession(sessionID); err != nil {
-		fmt.Fprintf(r.Stderr, "jev-guard: end-turn failed to clear session '%s': %v\n", sessionID, err)
 		return ActionHandled, 0
 	}
 	fmt.Fprintf(r.Stderr, "Session intent ended for session '%s'\n", sessionID)
@@ -540,6 +537,11 @@ func (r *Runner) handleStatus() (Action, int) {
 			s.SessionID, status, s.TurnID, s.UpdatedAt.Format("15:04:05"))
 		if promptPreview != "" {
 			fmt.Fprintf(r.Stdout, "    Prompt: %q\n", promptPreview)
+		}
+		if s.Tainted && s.TaintSource != nil {
+			fmt.Fprintf(r.Stdout, "    Tainted: by %s at %s\n", s.TaintSource.ToolName, s.TaintSource.At.Format("15:04:05"))
+		} else if s.Tainted {
+			fmt.Fprintln(r.Stdout, "    Tainted: yes")
 		}
 	}
 	for _, u := range scan.Unreadable {
