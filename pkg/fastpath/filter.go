@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -142,15 +143,8 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 		lowerPattern := strings.ToLower(normalizePathSeparators(s))
 
 		// 1. Glob matching on target path / basename
-		if baseName != "" && baseName != "." {
-			if matched, _ := path.Match(lowerPattern, baseName); matched {
-				return "Access to sensitive file or credential pattern: " + s
-			}
-		}
-		if target != "" {
-			if matched, _ := path.Match(lowerPattern, target); matched {
-				return "Access to sensitive file or credential pattern: " + s
-			}
+		if targetGlobMatches(lowerPattern, target) {
+			return "Access to sensitive file or credential pattern: " + s
 		}
 
 		// 2. Glob matching on command arguments
@@ -171,17 +165,104 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 				return "Access to sensitive file or credential pattern: " + s
 			}
 			if strings.HasSuffix(cleanPattern, "/") {
-				cleanPatternTrimmed := strings.TrimSuffix(cleanPattern, "/")
-				if strings.HasSuffix(target, "/"+cleanPatternTrimmed) || target == cleanPatternTrimmed || strings.Contains(target, "/"+cleanPatternTrimmed+"/") {
+				if targetInPatternDir(cleanPattern, target) {
 					return "Access to sensitive file or credential pattern: " + s
 				}
+				cleanPatternTrimmed := strings.TrimSuffix(cleanPattern, "/")
 				if strings.Contains(cmd, "/"+cleanPatternTrimmed+"/") || strings.Contains(cmd, " "+cleanPatternTrimmed) {
 					return "Access to sensitive file or credential pattern: " + s
 				}
 			}
 		}
 	}
-	return checkRepoGitConfig(targetRaw, call.Command, call.Cwd)
+	if reason := checkRepoGitConfig(targetRaw, call.Command, call.Cwd); reason != "" {
+		return reason
+	}
+	return f.checkResolvedSensitive(targetRaw, call.Command, call.Cwd)
+}
+
+// targetGlobMatches reports whether a lower-case, slash-separated target or
+// its basename matches a glob pattern.
+func targetGlobMatches(lowerPattern, target string) bool {
+	if target == "" {
+		return false
+	}
+	if baseName := path.Base(target); baseName != "." {
+		if matched, _ := path.Match(lowerPattern, baseName); matched {
+			return true
+		}
+	}
+	matched, _ := path.Match(lowerPattern, target)
+	return matched
+}
+
+// targetInPatternDir reports whether target names a directory pattern such as
+// ".ssh/" or lies inside it.
+func targetInPatternDir(cleanPattern, target string) bool {
+	dir := strings.TrimSuffix(cleanPattern, "/")
+	return strings.HasSuffix(target, "/"+dir) || target == dir || strings.Contains(target, "/"+dir+"/")
+}
+
+// checkResolvedSensitive applies the sensitive patterns to the resolved form
+// of the target and of command arguments: relative paths joined with cwd and
+// symlinks evaluated. The lexical checks cannot see a link such as
+// notes.txt -> .env, or "credentials" named from inside ~/.aws. Command
+// arguments are resolved only when they exist, so flags and words never pick
+// up the working directory's own path. A resolved path that is spelled the
+// same as the original adds nothing and is skipped.
+func (f *Filter) checkResolvedSensitive(target, command, cwd string) string {
+	var candidates []string
+	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
+		candidates = append(candidates, t)
+	}
+	for i, arg := range sensitiveCommandArguments(command) {
+		if i == 0 {
+			continue
+		}
+		values := []string{arg}
+		if idx := strings.Index(arg, "="); idx >= 0 {
+			values = append(values, arg[idx+1:])
+		}
+		for _, v := range values {
+			if v = strings.TrimSpace(v); v == "" || isCustomURI(v) {
+				continue
+			}
+			if _, err := os.Lstat(joinCwd(v, cwd)); err == nil {
+				candidates = append(candidates, v)
+			}
+		}
+	}
+	for _, c := range candidates {
+		resolved, err := boundary.CanonicalizePath(joinCwd(c, cwd))
+		if err != nil || resolved == "" {
+			continue
+		}
+		lower := strings.ToLower(normalizePathSeparators(resolved))
+		if lower == strings.ToLower(normalizePathSeparators(c)) {
+			continue
+		}
+		for _, s := range f.sensitiveFiles {
+			lowerPattern := strings.ToLower(normalizePathSeparators(s))
+			cleanPattern := strings.TrimPrefix(lowerPattern, "*")
+			if targetGlobMatches(lowerPattern, lower) ||
+				(cleanPattern != "" && (strings.Contains(lower, cleanPattern) || strings.HasSuffix(cleanPattern, "/") && targetInPatternDir(cleanPattern, lower))) {
+				return "Access to sensitive file or credential pattern: " + s
+			}
+		}
+		if isRepoGitConfigPath(lower) {
+			return repoGitConfigReason
+		}
+	}
+	return ""
+}
+
+// joinCwd makes a relative path absolute against cwd (or the process
+// directory when cwd is empty).
+func joinCwd(p, cwd string) string {
+	if filepath.IsAbs(p) || strings.TrimSpace(cwd) == "" {
+		return p
+	}
+	return filepath.Join(cwd, p)
 }
 
 // repoGitConfigReason is reported for Git config files inside a repository's Git directory

@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
@@ -37,12 +42,43 @@ func isUntrustedTool(toolName string) bool {
 	return strings.HasPrefix(toolName, "mcp__")
 }
 
+// parsePostToolUseEnvelope returns a minimal call for a PostToolUse payload,
+// or nil for any other payload. It reads only the envelope fields, each
+// independently, so a malformed tool_input (or any other field) cannot turn
+// a PostToolUse event into a PreToolUse verdict. A missing or non-string
+// tool_name leaves ToolName empty, which records no taint.
+func parsePostToolUseEnvelope(raw []byte) *harness.NormalizedToolCall {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")), &envelope) != nil {
+		return nil
+	}
+	field := func(key string) string {
+		var v string
+		_ = json.Unmarshal(envelope[key], &v)
+		return v
+	}
+	if field("hook_event_name") != hookEventPostToolUse {
+		return nil
+	}
+	return &harness.NormalizedToolCall{
+		Harness:   harness.HarnessClaudeCode,
+		HookEvent: hookEventPostToolUse,
+		ToolName:  field("tool_name"),
+		SessionID: field("session_id"),
+		Cwd:       field("cwd"),
+	}
+}
+
 // runPostToolUse handles a PostToolUse payload. It never evaluates the call
 // as a pending tool use, because the tool has already run. When taint is on
 // and the tool is untrusted it marks the session tainted. In enforce mode it
-// also returns additionalContext warning the model. It always exits 0: a
-// PostToolUse hook cannot hold anything, and a non-zero exit would only show
-// stderr to the model.
+// also returns additionalContext warning the model, even when the taint could
+// not be persisted. It always exits 0: a PostToolUse hook cannot hold
+// anything, and a non-zero exit would only show stderr to the model.
+//
+// session.MarkTainted writes a taint marker before the locked state merge, so
+// a lock timeout or failed state write still taints the gate's next decision.
+// Only when both writes fail is the taint lost; that is reported on stderr.
 func runPostToolUse(call *harness.NormalizedToolCall, cfg *config.Config, stdout, stderr io.Writer) int {
 	mode := cfg.EffectiveTaintMode()
 	if mode == config.TaintModeOff || !isUntrustedTool(call.ToolName) {
@@ -54,8 +90,11 @@ func runPostToolUse(call *harness.NormalizedToolCall, cfg *config.Config, stdout
 		sessionID = "default"
 	}
 	if err := session.MarkTainted(sessionID, call.ToolName, time.Now()); err != nil {
-		fmt.Fprintf(stderr, "jev-guard: failed to record taint from %s for session '%s': %v\n", call.ToolName, sessionID, err)
-		return 0
+		if errors.Is(err, session.ErrTaintNotRecorded) {
+			fmt.Fprintf(stderr, "jev-guard: failed to record taint from %s for session '%s'; later calls are not tainted: %v\n", call.ToolName, sessionID, err)
+		} else {
+			fmt.Fprintf(stderr, "jev-guard: taint from %s for session '%s' kept in its marker file: %v\n", call.ToolName, sessionID, err)
+		}
 	}
 	if mode != config.TaintModeEnforce {
 		return 0
@@ -174,22 +213,95 @@ var writeTools = map[string]bool{
 // touchesExecutionSensitivePath reports whether a call writes to agent
 // configuration, hooks or CI (see isExecutionSensitivePath). A command cannot
 // be classified as read or write, so any command naming such a path counts.
+// Paths are checked as spelled and as resolved (see pathScope), so a symlink
+// into .claude or a relative name used from inside .claude also counts.
 func touchesExecutionSensitivePath(call *harness.NormalizedToolCall) bool {
-	if writeTools[call.ToolName] && isExecutionSensitivePath(call.TargetPath) {
+	scope := newPathScope(call)
+	if writeTools[call.ToolName] && scope.isExecutionSensitive(call.TargetPath) {
 		return true
 	}
-	for _, tok := range commandTokens(call.Command) {
-		if isExecutionSensitivePath(tok) {
+	for _, tok := range splitCommand(call.Command) {
+		if scope.isExecutionSensitive(tok) {
 			return true
 		}
 	}
 	return false
 }
 
-// commandTokens splits a shell command on whitespace, quotes and shell
-// operators and lowercases the result.
+// pathScope resolves paths for the execution-sensitive check: relative paths
+// against the call's cwd, then symlinks. A resolved path inside the workspace
+// (declared roots, else the enclosing Git root) is checked relative to that
+// root, so a workspace that itself lives under such a directory (Claude Code
+// worktrees under .claude/worktrees) does not make every path sensitive.
+// Outside a workspace, or when the root is itself such a directory, the whole
+// resolved path is checked.
+type pathScope struct {
+	cwd   string
+	roots []string
+}
+
+func newPathScope(call *harness.NormalizedToolCall) pathScope {
+	cwd := strings.TrimSpace(call.Cwd)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	scope := pathScope{cwd: cwd}
+	for _, root := range call.WorkspaceRoots {
+		if canon, err := boundary.CanonicalizePath(root); err == nil && canon != "" {
+			scope.roots = append(scope.roots, canon)
+		}
+	}
+	if len(scope.roots) == 0 && cwd != "" {
+		if canonCwd, err := boundary.CanonicalizePath(cwd); err == nil {
+			if root := boundary.FindGitRoot(canonCwd); root != "" {
+				scope.roots = append(scope.roots, root)
+			}
+		}
+	}
+	return scope
+}
+
+func (s pathScope) isExecutionSensitive(p string) bool {
+	if isExecutionSensitivePath(p) {
+		return true
+	}
+	p = strings.TrimSpace(p)
+	if p == "" || strings.Contains(p, "://") {
+		return false
+	}
+	if !filepath.IsAbs(p) {
+		if s.cwd == "" {
+			return false
+		}
+		p = filepath.Join(s.cwd, p)
+	}
+	resolved, err := boundary.CanonicalizePath(p)
+	if err != nil || resolved == "" {
+		return false
+	}
+	for _, root := range s.roots {
+		if !boundary.IsSubPath(root, resolved) {
+			continue
+		}
+		if executionSensitiveDirs[strings.ToLower(filepath.Base(root))] {
+			return true
+		}
+		if rel, err := filepath.Rel(root, resolved); err == nil {
+			return isExecutionSensitivePath(rel)
+		}
+	}
+	return isExecutionSensitivePath(resolved)
+}
+
+// commandTokens splits a shell command like splitCommand and lowercases the result.
 func commandTokens(command string) []string {
-	return strings.FieldsFunc(strings.ToLower(command), func(r rune) bool {
+	return splitCommand(strings.ToLower(command))
+}
+
+// splitCommand splits a shell command on whitespace, quotes and shell
+// operators, keeping the original case for path resolution.
+func splitCommand(command string) []string {
+	return strings.FieldsFunc(command, func(r rune) bool {
 		switch r {
 		case ' ', '\t', '\n', '\r', '"', '\'', '`', ';', '&', '|', '(', ')', '{', '}', '<', '>', '=':
 			return true

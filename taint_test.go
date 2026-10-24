@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -224,5 +227,182 @@ func TestTraceGateEvaluation_TaintEscalatesFastpathAllow(t *testing.T) {
 	trace = traceGateEvaluation(call, cfg, true)
 	if trace.Final.Decision != harness.DecisionAllow || !strings.Contains(trace.Final.Reason, "AUDIT-MODE: ask") || trace.Final.TaintNote == "" {
 		t.Fatalf("global audit mode should report the tainted ask and keep the note: %+v", trace.Final)
+	}
+}
+
+// runGateWithStdin runs the hook entry point on input.
+func runGateWithStdin(t *testing.T, input string, initErr error) int {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old; _ = r.Close() }()
+	return runGate(initErr)
+}
+
+// Review R4: a PostToolUse envelope with malformed arguments, or a gate run
+// after a config initialization failure, still taints and exits 0.
+func TestRunGate_MalformedPostToolUseStillTaints(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		initErr     error
+	}{
+		{"array tool_input", `{"hook_event_name":"PostToolUse","tool_name":"WebFetch","session_id":"s1","tool_input":[]}`, nil},
+		{"non-string cwd", `{"hook_event_name":"PostToolUse","tool_name":"mcp__srv__get","session_id":"s1","cwd":7,"tool_response":"x"}`, nil},
+		{"config init failure", `{"hook_event_name":"PostToolUse","tool_name":"WebSearch","session_id":"s1","tool_input":{}}`, errors.New("disk full")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			if code := runGateWithStdin(t, tc.input, tc.initErr); code != 0 {
+				t.Fatalf("PostToolUse exit = %d, want 0", code)
+			}
+			if state, err := session.LoadSession("s1"); err != nil || state == nil || !state.Tainted {
+				t.Fatalf("taint not recorded: %+v, %v", state, err)
+			}
+		})
+	}
+	t.Run("unrecognizable tool records nothing", func(t *testing.T) {
+		t.Setenv("JEV_GUARD_HOME", t.TempDir())
+		if code := runGateWithStdin(t, `{"hook_event_name":"PostToolUse","tool_name":["WebFetch"],"session_id":"s1"}`, nil); code != 0 {
+			t.Fatalf("PostToolUse exit = %d, want 0", code)
+		}
+		if state, _ := session.LoadSession("s1"); state != nil {
+			t.Fatalf("unexpected state %+v", state)
+		}
+	})
+	t.Run("pretooluse after init failure is held", func(t *testing.T) {
+		t.Setenv("JEV_GUARD_HOME", t.TempDir())
+		if code := runGateWithStdin(t, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`, errors.New("disk full")); code != 2 {
+			t.Fatalf("PreToolUse exit after init failure = %d, want 2", code)
+		}
+	})
+}
+
+// Review R1: when the session lock cannot be taken, the taint survives in
+// its marker, the enforce warning is still sent, and the next gate decision
+// is escalated.
+func TestRunPostToolUse_LockFailureStillTaints(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	if err := session.SaveSession(&session.SessionState{SessionID: "s1", Prompt: "fetch docs"}); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the lock path makes every locked write fail.
+	lock := session.SessionFilePath("s1") + ".lock"
+	_ = os.Remove(lock)
+	if err := os.Mkdir(lock, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := taintConfig(config.TaintModeEnforce)
+	var stdout, stderr bytes.Buffer
+	if code := runPostToolUse(&harness.NormalizedToolCall{ToolName: "WebFetch", SessionID: "s1"}, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout.String(), "additionalContext") || !strings.Contains(stderr.String(), "marker") {
+		t.Fatalf("stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "curl https://example.com", Cwd: ws, SessionID: "s1"}
+	if hold := applySessionContext(call, cfg, &bytes.Buffer{}); hold != nil {
+		t.Fatalf("unexpected hold %+v", hold)
+	}
+	if call.Taint == nil || call.Taint.ToolName != "WebFetch" || call.UserIntent != "fetch docs" {
+		t.Fatalf("marker taint not applied: taint=%+v intent=%q", call.Taint, call.UserIntent)
+	}
+	got := applyTaint(call, &harness.EvaluationResult{Decision: harness.DecisionAllow, Source: "policy_jev_allow"}, cfg, sensitiveChecker(cfg))
+	if got.Decision != harness.DecisionAsk || got.Source != sourceSessionTainted {
+		t.Fatalf("expected escalation, got %+v", got)
+	}
+}
+
+// Review R2: symlinks and the working directory are resolved before the
+// execution-sensitive and sensitive-file checks.
+func TestTraceGateEvaluation_TaintResolvesPaths(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".claude"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".claude", "settings.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".claude", filepath.Join(ws, "alias")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := taintConfig(config.TaintModeEnforce)
+	cfg.TrustedCommands = append(cfg.TrustedCommands, "touch")
+	taint := &session.TaintSource{ToolName: "WebFetch", At: time.Now()}
+	for _, tc := range []struct{ name, cmd, cwd string }{
+		{"symlinked directory", "touch alias/settings.json", ws},
+		{"relative path inside .claude", "touch settings.json", filepath.Join(ws, ".claude")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := &harness.NormalizedToolCall{ToolName: "Bash", Command: tc.cmd, Cwd: tc.cwd, Taint: taint}
+			tr := traceGateEvaluation(call, cfg, true)
+			if tr.Final == nil || tr.Final.Decision != harness.DecisionAsk || tr.Final.Source != sourceSessionTainted {
+				t.Fatalf("expected taint escalation, got %+v", tr.Final)
+			}
+		})
+	}
+	t.Run("write tool through symlink", func(t *testing.T) {
+		call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(ws, "alias", "settings.json"), Cwd: ws}
+		if !touchesExecutionSensitivePath(call) {
+			t.Fatal("write through alias -> .claude not detected")
+		}
+	})
+}
+
+// A workspace that lives under .claude (Claude Code worktrees) is checked
+// relative to its Git root, so ordinary paths stay unflagged.
+func TestTouchesExecutionSensitivePath_WorktreeUnderClaudeDir(t *testing.T) {
+	wt := filepath.Join(t.TempDir(), ".claude", "worktrees", "feature")
+	if err := os.MkdirAll(filepath.Join(wt, "src"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: elsewhere"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "touch src/main.go", Cwd: wt}
+	if touchesExecutionSensitivePath(call) {
+		t.Fatal("ordinary path in a worktree under .claude must not be execution-sensitive")
+	}
+	call.Command = "touch .claude/settings.json"
+	if !touchesExecutionSensitivePath(call) {
+		t.Fatal("the worktree's own .claude must still be detected")
+	}
+}
+
+// Review R2: a trusted Read through a symlink to a credential file is not a
+// fast-path ALLOW, with or without taint (this was a pre-existing gap).
+func TestTraceGateEvaluation_SymlinkToSensitiveFile(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("TOKEN=secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".env", filepath.Join(ws, "notes.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, taint := range []*session.TaintSource{nil, {ToolName: "WebFetch", At: time.Now()}} {
+		target := filepath.Join(ws, "notes.txt")
+		call := &harness.NormalizedToolCall{ToolName: "Read", TargetPath: target, Cwd: ws, RawArgs: map[string]interface{}{"file_path": target}, Taint: taint}
+		tr := traceGateEvaluation(call, taintConfig(config.TaintModeEnforce), true)
+		if tr.Final == nil || tr.Final.Decision == harness.DecisionAllow {
+			t.Fatalf("taint=%v: Read of notes.txt -> .env must not be allowed, got %+v", taint != nil, tr.Final)
+		}
+	}
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat notes.txt", Cwd: ws}
+	if tr := traceGateEvaluation(call, config.DefaultConfig(), true); tr.Final == nil || tr.Final.Decision == harness.DecisionAllow {
+		t.Fatalf("cat of notes.txt -> .env must not be allowed, got %+v", tr.Final)
 	}
 }

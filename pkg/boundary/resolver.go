@@ -179,6 +179,12 @@ func isSubPathForOS(parent, child, goos string) bool {
 	return strings.HasPrefix(normChild, normParent)
 }
 
+// FindGitRoot returns the nearest directory at or above startDir that
+// contains a .git entry, or "" if there is none.
+func FindGitRoot(startDir string) string {
+	return findGitRoot(startDir)
+}
+
 func findGitRoot(startDir string) string {
 	curr := filepath.Clean(startDir)
 	for {

@@ -36,6 +36,7 @@ Patterns are matched case-insensitively as globs and substrings against both the
 - Commands that reference the variable unexpanded (`$XDG_CONFIG_HOME`, `${XDG_CONFIG_HOME}`, `%XDG_CONFIG_HOME%`, `$env:XDG_CONFIG_HOME`) followed by `/git/config` or `/git/credentials` are flagged regardless of its value.
 - These environment-derived patterns are resolved from the hook process environment when the filter is built. They are not written to `.jevguard.json`, so the sensitive-file count reported by `eval` and `doctor` does not include them.
 - POSIX (`/`) and Windows (`\`) path separators are normalized, so matching is consistent across operating systems.
+- The target path, and each command argument that exists on disk, is also matched in resolved form: joined with the working directory and with symlinks followed. A `Read` of `notes.txt` that links to `.env`, or `cat credentials` run inside `~/.aws`, therefore asks.
 
 You can add patterns through `sensitive_files` in your [configuration](configuration.md).
 
@@ -101,6 +102,8 @@ While a session is tainted, the gate checks every `ALLOW`, from both the fast pa
 - sensitive file access (the `sensitive_files` patterns),
 - writes to execution-sensitive paths (the list above, such as `.claude/`, `.github/`, `CLAUDE.md`, `AGENTS.md` and `.husky/`). A shell command that names such a path counts too.
 
+These path checks look at each path as written and as resolved: relative paths are joined with the working directory and symlinks are followed. A symlink into `.claude/`, or `touch settings.json` run from inside `.claude/`, therefore counts. Inside a workspace (its Git root), the resolved path is checked relative to that root, so a worktree that itself lives under `.claude/worktrees/` is not treated as sensitive throughout.
+
 `taint_mode` in the user config selects what happens:
 
 | `taint_mode` | Effect |
@@ -109,7 +112,11 @@ While a session is tainted, the gate checks every `ALLOW`, from both the fast pa
 | `audit` (default) | Verdicts are unchanged. Each matching decision gets a `taint` field in the audit log (`audit: enforce would ask (...)`), which measures how often enforce would apply. |
 | `enforce` | Matching decisions become `ASK` (source `session_tainted`), and the `PostToolUse` hook warns the model through `additionalContext`. |
 
-A project config cannot set `taint_mode`, even when trusted. An invalid value falls back to `enforce`. When `context_awareness_enabled` is false, taint is off. A recorded abort still takes precedence over a taint. Session writes (ingest, taint, end-turn) take a per-session lock file, so a taint written by parallel tool calls or subagents never clears an abort or overwrites a newer prompt.
+A project config cannot set `taint_mode`, even when trusted. An invalid value falls back to `enforce`. When `context_awareness_enabled` is false, taint is off. A recorded abort still takes precedence over a taint.
+
+Session writes (ingest, taint, end-turn) take a per-session OS file lock (`flock` on macOS and Linux, `LockFileEx` on Windows), so a taint written by parallel tool calls or subagents never clears an abort or overwrites a newer prompt. The operating system releases the lock when its holder exits, so a crashed hook never leaves a session locked, and a slow live holder is never displaced. Lock acquisition gives up after two seconds.
+
+The taint fails closed. Before taking the lock, the `PostToolUse` hook creates a marker file next to the session file (`<session>.json.taint`). The gate treats the session as tainted while a fresh marker exists, even if the lock timed out or the session file could not be written. Only the writers that clear the taint (the next ingested prompt, `end-turn`, `clear-intent`) remove the marker. An abort prompt that cannot be saved writes an `<session>.json.abort` marker in the same way, which holds the session until the next prompt. In `audit` mode a marker-only taint behaves like any other taint: it adds audit notes and changes no verdict. If neither the marker nor the session file can be written (the sessions directory is unwritable), the hook reports the lost taint on stderr. In `enforce` mode it still warns the model.
 
 Limits: only Claude Code is covered (see [Manual hook setup](hooks.md)). The taint ends with the reply, even though the injected text can stay in the model's context for later turns. The egress check is a token heuristic over the command.
 

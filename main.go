@@ -18,9 +18,13 @@ import (
 )
 
 func main() {
-	if err := config.EnsureUserConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
-		os.Exit(2)
+	initErr := config.EnsureUserConfig()
+	if initErr != nil {
+		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", initErr)
+		// The gate decides after reading stdin: a PostToolUse event must still exit 0.
+		if len(os.Args) > 1 {
+			os.Exit(2)
+		}
 	}
 	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	runner.Eval = runEval
@@ -30,15 +34,30 @@ func main() {
 		os.Exit(exitCode)
 	}
 
-	exitCode = runGate()
+	exitCode = runGate(initErr)
 	os.Exit(exitCode)
 }
 
 // runGate orchestrates ingestion, local fast-path, semantic evaluation, and response delivery.
-func runGate() int {
+// initErr is a user config initialization failure, which holds PreToolUse calls.
+func runGate(initErr error) int {
 	inputBytes, err := readStandardInput()
 	if err != nil {
 		return handleFatalError(nil, "Failed to read standard input", err)
+	}
+
+	// A PostToolUse payload reports a tool that already ran; it must never be
+	// gated or answered as a pending PreToolUse call. It is dispatched from
+	// its envelope, before the tool arguments are parsed.
+	if post := parsePostToolUseEnvelope(inputBytes); post != nil {
+		cfg := config.LoadConfigForCall(post)
+		for _, diagnostic := range cfg.Diagnostics {
+			fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+		}
+		return runPostToolUse(post, cfg, os.Stdout, os.Stderr)
+	}
+	if initErr != nil {
+		return 2
 	}
 
 	call, err := harness.ParsePayload(inputBytes)
@@ -49,12 +68,6 @@ func runGate() int {
 	cfg := config.LoadConfigForCall(call)
 	for _, diagnostic := range cfg.Diagnostics {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
-	}
-
-	// A PostToolUse payload reports a tool that already ran; it must never be
-	// gated or answered as a pending PreToolUse call.
-	if call.HookEvent == hookEventPostToolUse {
-		return runPostToolUse(call, cfg, os.Stdout, os.Stderr)
 	}
 
 	if hold := applySessionContext(call, cfg, os.Stderr); hold != nil {

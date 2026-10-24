@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,12 +142,29 @@ func IsNegativeIntent(prompt string) bool {
 }
 
 // SaveSession atomically replaces the session state on disk. It holds the
-// session lock so it cannot interleave with MarkTainted or EndTurn.
+// session lock so it cannot interleave with MarkTainted or EndTurn, and it
+// removes taint and abort markers the new state no longer carries. If an
+// abort prompt cannot be saved (for example on a lock timeout), it writes an
+// abort marker so the gate still holds, and returns the error.
 func SaveSession(state *SessionState) error {
 	if state == nil {
 		return fmt.Errorf("session state cannot be nil")
 	}
-	return withSessionLock(state.SessionID, func() error { return saveSessionLocked(state) })
+	abort := state.Aborted || IsNegativeIntent(state.Prompt)
+	err := withSessionLock(state.SessionID, func() error {
+		if err := saveSessionLocked(state); err != nil {
+			return err
+		}
+		return clearResolvedMarkers(state)
+	})
+	if err != nil && abort {
+		path := abortMarkerPath(state.SessionID)
+		if markerErr := writeMarkerFunc(path, struct{}{}); markerErr != nil {
+			return fmt.Errorf("%w; abort marker also failed: %v", err, markerErr)
+		}
+		return fmt.Errorf("%w; abort recorded in marker %s", err, path)
+	}
+	return err
 }
 
 func saveSessionLocked(state *SessionState) error {
@@ -238,10 +256,19 @@ func readFileWithRetry(path string) ([]byte, error) {
 	return data, err
 }
 
-// LoadSession reads the session state from disk. Returns nil, nil if session does not exist.
+// LoadSession reads the session state from disk, folding in fresh taint and
+// abort markers. Returns nil, nil if neither the session nor a marker exists.
 // An expired session is removed, under the session lock and only if it is
 // still expired, so a concurrent ingest is never deleted.
 func LoadSession(sessionID string) (*SessionState, error) {
+	state, err := loadSessionFile(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return applyMarkers(sessionID, state)
+}
+
+func loadSessionFile(sessionID string) (*SessionState, error) {
 	state, expired, err := readSession(sessionID)
 	if err != nil || !expired {
 		return state, err
@@ -277,15 +304,37 @@ func readSession(sessionID string) (*SessionState, bool, error) {
 	return &state, false, nil
 }
 
-// MarkTainted records under the session lock that toolName returned untrusted
-// content into the session. It re-reads the current state and only adds the
-// taint, so it never clears an abort flag or replaces a newer prompt. A
-// missing or expired session is created with an empty prompt. An unreadable
-// session file is left untouched and reported as an error.
+// ErrTaintNotRecorded marks a MarkTainted failure in which neither the taint
+// marker nor the session state could be written.
+var ErrTaintNotRecorded = errors.New("taint not recorded")
+
+// MarkTainted records that toolName returned untrusted content into the
+// session. It first writes the taint marker without the lock, so a lock
+// timeout or a failed state write still leaves the session tainted for the
+// gate. It then merges the taint into the state under the session lock: it
+// re-reads the current state and only adds the taint, so it never clears an
+// abort flag or replaces a newer prompt. A missing or expired session is
+// created with an empty prompt. An unreadable session file is left untouched
+// and reported as an error. The error wraps ErrTaintNotRecorded only when
+// both writes failed.
 func MarkTainted(sessionID, toolName string, at time.Time) error {
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = "default"
 	}
+	src := TaintSource{ToolName: toolName, At: at.UTC()}
+	markerErr := writeMarkerFunc(taintMarkerPath(sessionID), src)
+	err := mergeTaint(sessionID, src)
+	switch {
+	case err == nil:
+		return nil
+	case markerErr == nil:
+		return fmt.Errorf("session state not updated, taint kept in marker %s: %w", taintMarkerPath(sessionID), err)
+	default:
+		return fmt.Errorf("%w: marker: %v; session state: %v", ErrTaintNotRecorded, markerErr, err)
+	}
+}
+
+func mergeTaint(sessionID string, src TaintSource) error {
 	return withSessionLock(sessionID, func() error {
 		state, _, err := readSession(sessionID)
 		if err != nil {
@@ -295,7 +344,7 @@ func MarkTainted(sessionID, toolName string, at time.Time) error {
 			state = &SessionState{SessionID: sessionID}
 		}
 		state.Tainted = true
-		state.TaintSource = &TaintSource{ToolName: toolName, At: at.UTC()}
+		state.TaintSource = &src
 		return saveSessionLocked(state)
 	})
 }
@@ -310,7 +359,11 @@ func EndTurn(sessionID string) (aborted bool, err error) {
 		if err != nil {
 			return err
 		}
-		if state != nil && state.Aborted {
+		markerAbort, err := hasAbortMarker(sessionID)
+		if err != nil {
+			return err
+		}
+		if (state != nil && state.Aborted) || markerAbort {
 			aborted = true
 			return nil
 		}
@@ -319,17 +372,19 @@ func EndTurn(sessionID string) (aborted bool, err error) {
 	return aborted, err
 }
 
-// ClearSession deletes the session cache file for a specific session ID.
+// ClearSession deletes the session cache file and markers for a specific session ID.
 func ClearSession(sessionID string) error {
 	return withSessionLock(sessionID, func() error { return removeSessionFile(sessionID) })
 }
 
+// removeSessionFile deletes the session file and its taint and abort markers.
+// The lock file is kept (see withSessionLock).
 func removeSessionFile(sessionID string) error {
 	err := os.Remove(SessionFilePath(sessionID))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove session file: %w", err)
 	}
-	return nil
+	return errors.Join(removeMarker(taintMarkerPath(sessionID)), removeMarker(abortMarkerPath(sessionID)))
 }
 
 // ClearAllSessions deletes all cached session files.
@@ -344,7 +399,8 @@ func ClearAllSessions() error {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".json") || strings.Contains(entry.Name(), ".tmp.")) {
+		name := entry.Name()
+		if !entry.IsDir() && (strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".json.taint") || strings.HasSuffix(name, ".json.abort") || strings.Contains(name, ".tmp.")) {
 			_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
 		}
 	}
