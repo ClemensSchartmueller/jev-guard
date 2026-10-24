@@ -155,17 +155,18 @@ func shortLockTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { lockTimeout = old })
 }
 
-// holdLock acquires the session lock in a goroutine and keeps it until the
-// returned release function is called.
+// holdLock acquires the session lock in a goroutine, runs during under it,
+// and keeps the lock until the returned release function is called. It
+// returns after during has finished.
 func holdLock(t *testing.T, sessionID string, during func()) (release func()) {
 	t.Helper()
 	held, done, finished := make(chan struct{}), make(chan struct{}), make(chan error)
 	go func() {
 		finished <- withSessionLock(sessionID, func() error {
-			close(held)
 			if during != nil {
 				during()
 			}
+			close(held)
 			<-done
 			return nil
 		})
@@ -188,12 +189,12 @@ func TestSessionLock_LiveHolderIsNeverStolen(t *testing.T) {
 	if err := os.Chtimes(sessionLockPath("s1"), past, past); err != nil {
 		t.Fatal(err)
 	}
-	err := mergeTaint("s1", TaintSource{ToolName: "WebFetch"})
+	err := mergeTaint("s1", TaintSource{ToolName: "WebFetch"}, "")
 	if !errors.Is(err, ErrLockTimeout) {
 		t.Fatalf("expected a lock timeout while the holder is alive, got %v", err)
 	}
 	release()
-	if err := mergeTaint("s1", TaintSource{ToolName: "WebFetch"}); err != nil {
+	if err := mergeTaint("s1", TaintSource{ToolName: "WebFetch"}, ""); err != nil {
 		t.Fatalf("lock should be free after release: %v", err)
 	}
 }
@@ -266,7 +267,7 @@ func TestSessionLock_UnusableLockPathReturnsPromptly(t *testing.T) {
 	}
 	shortLockTimeout(t, 20*time.Millisecond)
 	done := make(chan error, 1)
-	go func() { done <- mergeTaint("s1", TaintSource{ToolName: "WebFetch"}) }()
+	go func() { done <- mergeTaint("s1", TaintSource{ToolName: "WebFetch"}, "") }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -356,19 +357,216 @@ func TestLoadSession_ExpiredMarkersAreIgnored(t *testing.T) {
 	if err := ClearSession("s1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeMarker(taintMarkerPath("s1"), TaintSource{ToolName: "WebFetch"}); err != nil {
+	taintPath, abortPath := taintMarkerPath("s1"), abortMarkerPath("s1")
+	if err := writeMarker(taintPath, markerRecord{ToolName: "WebFetch"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeMarker(abortMarkerPath("s1"), struct{}{}); err != nil {
+	if err := writeMarker(abortPath, markerRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-2 * SessionTTL())
-	for _, p := range []string{taintMarkerPath("s1"), abortMarkerPath("s1")} {
+	for _, p := range []string{taintPath, abortPath} {
 		if err := os.Chtimes(p, past, past); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got, err := LoadSession("s1"); err != nil || got != nil {
 		t.Fatalf("expired markers must be ignored: %+v, %v", got, err)
+	}
+}
+
+// pauseAfterRename runs during once, right after the next session file rename
+// commits, before the writer that renamed continues.
+func pauseAfterRename(t *testing.T, during func()) {
+	t.Helper()
+	oldRename := renameFunc
+	t.Cleanup(func() { renameFunc = oldRename })
+	done := false
+	renameFunc = func(src, dst string) error {
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
+		if !done {
+			done = true
+			during()
+		}
+		return nil
+	}
+}
+
+// Review S1: a taint or abort published while an older ingest holds the lock
+// (and times out into its marker) survives that ingest's marker clearing.
+func TestSaveSession_OlderIngestKeepsNewerMarker(t *testing.T) {
+	for _, signal := range []string{"taint", "abort"} {
+		t.Run(signal, func(t *testing.T) {
+			setupTestJevguardDir(t)
+			shortLockTimeout(t, 20*time.Millisecond)
+			if err := SaveSession(&SessionState{SessionID: "s", Prompt: "old"}); err != nil {
+				t.Fatal(err)
+			}
+			var fallbackErr error
+			pauseAfterRename(t, func() {
+				if signal == "abort" {
+					fallbackErr = SaveSession(&SessionState{SessionID: "s", Prompt: "stop"})
+				} else {
+					fallbackErr = MarkTainted("s", "WebFetch", time.Now())
+				}
+			})
+			if err := SaveSession(&SessionState{SessionID: "s", Prompt: "new positive prompt"}); err != nil {
+				t.Fatal(err)
+			}
+			if !errors.Is(fallbackErr, ErrLockTimeout) {
+				t.Fatalf("expected the competing writer to time out into its marker: %v", fallbackErr)
+			}
+			got, err := LoadSession("s")
+			if err != nil || got == nil {
+				t.Fatalf("LoadSession = %+v, %v", got, err)
+			}
+			if signal == "taint" && (!got.Tainted || got.Prompt != "new positive prompt") {
+				t.Fatalf("newer taint lost: %+v", got)
+			}
+			if signal == "abort" && (!got.Aborted || got.Prompt != "") {
+				t.Fatalf("newer abort lost: %+v", got)
+			}
+			// The next ingest retires the marker it observes.
+			if err := SaveSession(&SessionState{SessionID: "s", Prompt: "after"}); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := LoadSession("s"); got == nil || got.Tainted || got.Aborted || got.Prompt != "after" {
+				t.Fatalf("a later prompt must retire the marker: %+v", got)
+			}
+		})
+	}
+}
+
+// Review S1: end-turn removes only the markers it listed, so a taint
+// published after its listing survives.
+func TestEndTurn_KeepsMarkerPublishedAfterListing(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := SaveSession(&SessionState{SessionID: "s", Prompt: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	markers, err := markersFor("s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(taintMarkerPath("s"), markerRecord{SessionID: "s", ToolName: "WebSearch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := withSessionLock("s", func() error { return removeSessionFile("s", markers) }); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := LoadSession("s"); got == nil || !got.Tainted || got.TaintSource.ToolName != "WebSearch" {
+		t.Fatalf("taint published after the listing was removed: %+v", got)
+	}
+}
+
+// Review S3: a taint merge delayed past the next prompt does not re-taint it,
+// and one delayed past end-turn does not recreate the session.
+func TestMarkTainted_RetiredEventDoesNotMergeLater(t *testing.T) {
+	for _, transition := range []string{"next prompt", "end-turn"} {
+		t.Run(transition, func(t *testing.T) {
+			setupTestJevguardDir(t)
+			if err := SaveSession(&SessionState{SessionID: "s", Prompt: "first"}); err != nil {
+				t.Fatal(err)
+			}
+			orig := writeMarkerFunc
+			t.Cleanup(func() { writeMarkerFunc = orig })
+			writeMarkerFunc = func(p string, v interface{}) error {
+				if err := orig(p, v); err != nil {
+					return err
+				}
+				if transition == "end-turn" {
+					_, err := EndTurn("s")
+					return err
+				}
+				return SaveSession(&SessionState{SessionID: "s", Prompt: "next prompt"})
+			}
+			if err := MarkTainted("s", "WebFetch", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadSession("s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if transition == "end-turn" && got != nil {
+				t.Fatalf("a retired taint recreated the ended session: %+v", got)
+			}
+			if transition == "next prompt" && (got == nil || got.Tainted || got.Prompt != "next prompt") {
+				t.Fatalf("a retired taint re-tainted the next prompt: %+v", got)
+			}
+		})
+	}
+}
+
+// A successful merge moves the taint into the session file and removes its
+// marker; an unwritable marker still merges (fail closed).
+func TestMarkTainted_MergeConsumesOwnMarker(t *testing.T) {
+	setupTestJevguardDir(t)
+	if err := MarkTainted("s", "WebFetch", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := markersFor("s"); err != nil || len(m.Paths) != 0 {
+		t.Fatalf("merged marker left behind: %+v, %v", m, err)
+	}
+	if got, _ := LoadSession("s"); got == nil || !got.Tainted {
+		t.Fatalf("taint not merged: %+v", got)
+	}
+
+	orig := writeMarkerFunc
+	t.Cleanup(func() { writeMarkerFunc = orig })
+	writeMarkerFunc = func(string, interface{}) error { return os.ErrPermission }
+	if err := MarkTainted("s2", "WebFetch", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := LoadSession("s2"); got == nil || !got.Tainted {
+		t.Fatalf("merge without a marker must still taint: %+v", got)
+	}
+}
+
+// Review S4: status folds markers like the gate, for marker-only sessions
+// (including hashed session IDs) and for markers over an existing session.
+func TestScanSessions_FoldsMarkers(t *testing.T) {
+	setupTestJevguardDir(t)
+	shortLockTimeout(t, 20*time.Millisecond)
+	hashed := "session with spaces"
+	for _, id := range []string{"marker-only", hashed} {
+		release := holdLock(t, id, nil)
+		err := MarkTainted(id, "WebFetch", time.Now())
+		release()
+		if !errors.Is(err, ErrLockTimeout) {
+			t.Fatalf("expected a lock timeout: %v", err)
+		}
+	}
+	if err := SaveSession(&SessionState{SessionID: "positive", Prompt: "do work"}); err != nil {
+		t.Fatal(err)
+	}
+	release := holdLock(t, "positive", nil)
+	err := SaveSession(&SessionState{SessionID: "positive", Prompt: "stop"})
+	release()
+	if !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("expected a lock timeout: %v", err)
+	}
+
+	listed, err := ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]*SessionState{}
+	for _, s := range listed {
+		byID[s.SessionID] = s
+	}
+	for _, id := range []string{"marker-only", hashed, "positive"} {
+		loaded, err := LoadSession(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := byID[id]
+		if got == nil || got.Tainted != loaded.Tainted || got.Aborted != loaded.Aborted || got.Prompt != loaded.Prompt {
+			t.Fatalf("%s: status %+v differs from gate %+v", id, got, loaded)
+		}
+	}
+	if !byID["marker-only"].Tainted || !byID["positive"].Aborted {
+		t.Fatalf("marker state missing from status: %+v", byID)
 	}
 }

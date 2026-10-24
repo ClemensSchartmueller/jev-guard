@@ -406,3 +406,81 @@ func TestTraceGateEvaluation_SymlinkToSensitiveFile(t *testing.T) {
 		t.Fatalf("cat of notes.txt -> .env must not be allowed, got %+v", tr.Final)
 	}
 }
+
+// Review S2: a workspace root inside .claude/hooks, declared or discovered
+// through a .git entry, does not hide the sensitive ancestor.
+func TestTraceGateEvaluation_NestedRootUnderClaudeHooks(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws := t.TempDir()
+	hooks := filepath.Join(ws, ".claude", "hooks")
+	if err := os.MkdirAll(hooks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".git"), []byte("gitdir: elsewhere"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(".claude", "hooks"), filepath.Join(ws, "alias")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := taintConfig(config.TaintModeEnforce)
+	cfg.TrustedCommands = append(cfg.TrustedCommands, "touch")
+	for _, mode := range []string{"declared root", "nested git root"} {
+		t.Run(mode, func(t *testing.T) {
+			call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "touch payload.sh", Cwd: filepath.Join(ws, "alias"), Taint: &session.TaintSource{ToolName: "WebFetch", At: time.Now()}}
+			if mode == "declared root" {
+				call.WorkspaceRoots = []string{hooks}
+			} else if err := os.WriteFile(filepath.Join(hooks, ".git"), []byte("invalid"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			tr := traceGateEvaluation(call, cfg, true)
+			if tr.Final == nil || tr.Final.Decision != harness.DecisionAsk || tr.Final.Source != sourceSessionTainted {
+				t.Fatalf("expected taint escalation, got %+v", tr.Final)
+			}
+		})
+	}
+}
+
+// Review S2: only a real Git worktree directly under .claude/worktrees is
+// exempt, and only for paths inside it.
+func TestTouchesExecutionSensitivePath_WorktreeExceptionIsNarrow(t *testing.T) {
+	repo := t.TempDir()
+	worktrees := filepath.Join(repo, ".claude", "worktrees")
+	mk := func(dir, gitContent string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, "src"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if gitContent != "" {
+			if err := os.WriteFile(filepath.Join(dir, ".git"), []byte(gitContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	real := mk(filepath.Join(worktrees, "feature"), "gitdir: "+filepath.Join(repo, ".git", "worktrees", "feature"))
+	invalid := mk(filepath.Join(worktrees, "fake"), "invalid")
+	nested := mk(filepath.Join(worktrees, "feature2", "sub"), "gitdir: elsewhere")
+	commands := mk(filepath.Join(repo, ".claude", "commands", "wt"), "gitdir: elsewhere")
+	for _, tc := range []struct {
+		name  string
+		cwd   string
+		roots []string
+		cmd   string
+		want  bool
+	}{
+		{"real worktree, discovered", real, nil, "touch src/main.go", false},
+		{"real worktree, declared with its repo", real, []string{repo, real}, "touch src/main.go", false},
+		{"real worktree's own .claude", real, nil, "touch .claude/settings.json", true},
+		{"invalid .git under worktrees", invalid, nil, "touch src/main.go", true},
+		{"root not directly under worktrees", nested, nil, "touch src/main.go", true},
+		{"worktree-like root under .claude/commands", commands, nil, "touch src/main.go", true},
+		{"declared root under .claude/commands", commands, []string{commands}, "touch src/main.go", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := &harness.NormalizedToolCall{ToolName: "Bash", Command: tc.cmd, Cwd: tc.cwd, WorkspaceRoots: tc.roots}
+			if got := touchesExecutionSensitivePath(call); got != tc.want {
+				t.Fatalf("touchesExecutionSensitivePath = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}

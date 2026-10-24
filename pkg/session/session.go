@@ -143,23 +143,28 @@ func IsNegativeIntent(prompt string) bool {
 
 // SaveSession atomically replaces the session state on disk. It holds the
 // session lock so it cannot interleave with MarkTainted or EndTurn, and it
-// removes taint and abort markers the new state no longer carries. If an
-// abort prompt cannot be saved (for example on a lock timeout), it writes an
-// abort marker so the gate still holds, and returns the error.
+// retires the taint and abort markers published before it, as far as the new
+// state no longer carries them (see the invariants in marker.go). If an abort
+// prompt cannot be saved (for example on a lock timeout), it writes an abort
+// marker so the gate still holds, and returns the error.
 func SaveSession(state *SessionState) error {
 	if state == nil {
 		return fmt.Errorf("session state cannot be nil")
 	}
 	abort := state.Aborted || IsNegativeIntent(state.Prompt)
 	err := withSessionLock(state.SessionID, func() error {
+		markers, err := markersFor(state.SessionID)
+		if err != nil {
+			return err
+		}
 		if err := saveSessionLocked(state); err != nil {
 			return err
 		}
-		return clearResolvedMarkers(state)
+		return markers.retire(state)
 	})
 	if err != nil && abort {
 		path := abortMarkerPath(state.SessionID)
-		if markerErr := writeMarkerFunc(path, struct{}{}); markerErr != nil {
+		if markerErr := writeMarkerFunc(path, markerRecord{SessionID: state.SessionID}); markerErr != nil {
 			return fmt.Errorf("%w; abort marker also failed: %v", err, markerErr)
 		}
 		return fmt.Errorf("%w; abort recorded in marker %s", err, path)
@@ -265,7 +270,11 @@ func LoadSession(sessionID string) (*SessionState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return applyMarkers(sessionID, state)
+	markers, err := markersFor(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return markers.fold(state, sessionID)
 }
 
 func loadSessionFile(sessionID string) (*SessionState, error) {
@@ -309,33 +318,50 @@ func readSession(sessionID string) (*SessionState, bool, error) {
 var ErrTaintNotRecorded = errors.New("taint not recorded")
 
 // MarkTainted records that toolName returned untrusted content into the
-// session. It first writes the taint marker without the lock, so a lock
+// session. It first writes its own taint marker without the lock, so a lock
 // timeout or a failed state write still leaves the session tainted for the
 // gate. It then merges the taint into the state under the session lock: it
 // re-reads the current state and only adds the taint, so it never clears an
-// abort flag or replaces a newer prompt. A missing or expired session is
-// created with an empty prompt. An unreadable session file is left untouched
-// and reported as an error. The error wraps ErrTaintNotRecorded only when
-// both writes failed.
+// abort flag or replaces a newer prompt. The merge is skipped when a later
+// prompt or end-turn already retired the marker (invariant 3 in marker.go). A
+// missing or expired session is created with an empty prompt. An unreadable
+// session file is left untouched and reported as an error. The error wraps
+// ErrTaintNotRecorded only when both writes failed.
 func MarkTainted(sessionID, toolName string, at time.Time) error {
 	if strings.TrimSpace(sessionID) == "" {
 		sessionID = "default"
 	}
 	src := TaintSource{ToolName: toolName, At: at.UTC()}
-	markerErr := writeMarkerFunc(taintMarkerPath(sessionID), src)
-	err := mergeTaint(sessionID, src)
+	marker := taintMarkerPath(sessionID)
+	markerErr := writeMarkerFunc(marker, markerRecord{SessionID: sessionID, ToolName: src.ToolName, At: src.At})
+	requiredMarker := marker
+	if markerErr != nil {
+		requiredMarker = ""
+	}
+	err := mergeTaint(sessionID, src, requiredMarker)
 	switch {
 	case err == nil:
 		return nil
 	case markerErr == nil:
-		return fmt.Errorf("session state not updated, taint kept in marker %s: %w", taintMarkerPath(sessionID), err)
+		return fmt.Errorf("session state not updated, taint kept in marker %s: %w", marker, err)
 	default:
 		return fmt.Errorf("%w: marker: %v; session state: %v", ErrTaintNotRecorded, markerErr, err)
 	}
 }
 
-func mergeTaint(sessionID string, src TaintSource) error {
+// mergeTaint adds the taint to the session file. With a non-empty marker it
+// merges only while that marker exists, then removes it, since the session
+// file now carries the taint.
+func mergeTaint(sessionID string, src TaintSource, marker string) error {
 	return withSessionLock(sessionID, func() error {
+		if marker != "" {
+			if _, err := os.Stat(marker); err != nil {
+				if os.IsNotExist(err) {
+					return nil // retired by a later prompt or end-turn
+				}
+				return fmt.Errorf("failed to check marker %s: %w", marker, err)
+			}
+		}
 		state, _, err := readSession(sessionID)
 		if err != nil {
 			return err
@@ -345,7 +371,13 @@ func mergeTaint(sessionID string, src TaintSource) error {
 		}
 		state.Tainted = true
 		state.TaintSource = &src
-		return saveSessionLocked(state)
+		if err := saveSessionLocked(state); err != nil {
+			return err
+		}
+		if marker != "" {
+			_ = removeMarker(marker)
+		}
+		return nil
 	})
 }
 
@@ -359,7 +391,11 @@ func EndTurn(sessionID string) (aborted bool, err error) {
 		if err != nil {
 			return err
 		}
-		markerAbort, err := hasAbortMarker(sessionID)
+		markers, err := markersFor(sessionID)
+		if err != nil {
+			return err
+		}
+		markerAbort, err := markers.hasFreshAbort()
 		if err != nil {
 			return err
 		}
@@ -367,24 +403,31 @@ func EndTurn(sessionID string) (aborted bool, err error) {
 			aborted = true
 			return nil
 		}
-		return removeSessionFile(sessionID)
+		return removeSessionFile(sessionID, markers)
 	})
 	return aborted, err
 }
 
 // ClearSession deletes the session cache file and markers for a specific session ID.
 func ClearSession(sessionID string) error {
-	return withSessionLock(sessionID, func() error { return removeSessionFile(sessionID) })
+	return withSessionLock(sessionID, func() error {
+		markers, err := markersFor(sessionID)
+		if err != nil {
+			return err
+		}
+		return removeSessionFile(sessionID, markers)
+	})
 }
 
-// removeSessionFile deletes the session file and its taint and abort markers.
-// The lock file is kept (see withSessionLock).
-func removeSessionFile(sessionID string) error {
+// removeSessionFile deletes the session file and the listed markers; markers
+// published after the listing survive (see marker.go). The lock file is kept
+// (see withSessionLock).
+func removeSessionFile(sessionID string, markers *sessionMarkers) error {
 	err := os.Remove(SessionFilePath(sessionID))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove session file: %w", err)
 	}
-	return errors.Join(removeMarker(taintMarkerPath(sessionID)), removeMarker(abortMarkerPath(sessionID)))
+	return removeMarkers(markers.Paths)
 }
 
 // ClearAllSessions deletes all cached session files.
@@ -400,7 +443,8 @@ func ClearAllSessions() error {
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() && (strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".json.taint") || strings.HasSuffix(name, ".json.abort") || strings.Contains(name, ".tmp.")) {
+		_, _, isMarker := parseMarkerName(name)
+		if !entry.IsDir() && (strings.HasSuffix(name, ".json") || isMarker || strings.Contains(name, ".tmp.")) {
 			_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
 		}
 	}
@@ -432,9 +476,11 @@ func ListSessions() ([]*SessionState, error) {
 	return scan.Active, nil
 }
 
-// ScanSessions reads every session file. Valid, non-expired sessions are
-// returned in Active; expired sessions and stale temp files are removed; files
-// that cannot be read or decoded are returned in Unreadable and left in place.
+// ScanSessions reads every session file and folds in its taint and abort
+// markers with the same semantics as LoadSession, so a session that exists
+// only as a marker is listed too. Valid, non-expired sessions are returned in
+// Active; expired sessions and stale temp files are removed; files that
+// cannot be read or decoded are returned in Unreadable and left in place.
 func ScanSessions() (*SessionScan, error) {
 	scan := &SessionScan{}
 	sessionsDir := GetSessionsDir()
@@ -444,6 +490,21 @@ func ScanSessions() (*SessionScan, error) {
 			return scan, nil
 		}
 		return nil, fmt.Errorf("failed to read sessions directory: %w", err)
+	}
+	markers := groupMarkers(entries)
+	addFolded := func(name string, state *SessionState) {
+		m := markers[name]
+		delete(markers, name)
+		if m != nil {
+			var err error
+			if state, err = m.fold(state, strings.TrimSuffix(name, ".json")); err != nil {
+				scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})
+				return
+			}
+		}
+		if state != nil {
+			scan.Active = append(scan.Active, state)
+		}
 	}
 
 	for _, entry := range entries {
@@ -466,26 +527,34 @@ func ScanSessions() (*SessionScan, error) {
 		data, err := readFileWithRetry(fullPath)
 		if err != nil {
 			if os.IsNotExist(err) {
+				addFolded(entry.Name(), nil)
 				continue
 			}
+			delete(markers, entry.Name())
 			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to read session file: %w", err)})
 			continue
 		}
 
 		var state SessionState
 		if err := json.Unmarshal(data, &state); err != nil {
+			delete(markers, entry.Name())
 			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to parse session file: %w", err)})
 			continue
 		}
 
 		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 			_ = os.Remove(fullPath)
+			addFolded(entry.Name(), nil)
 			continue
 		}
 
-		scan.Active = append(scan.Active, &state)
+		addFolded(entry.Name(), &state)
 	}
 
+	// Sessions recorded only by markers.
+	for _, name := range sortedBases(markers) {
+		addFolded(name, nil)
+	}
 	return scan, nil
 }
 

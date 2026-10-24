@@ -229,12 +229,13 @@ func touchesExecutionSensitivePath(call *harness.NormalizedToolCall) bool {
 }
 
 // pathScope resolves paths for the execution-sensitive check: relative paths
-// against the call's cwd, then symlinks. A resolved path inside the workspace
-// (declared roots, else the enclosing Git root) is checked relative to that
-// root, so a workspace that itself lives under such a directory (Claude Code
-// worktrees under .claude/worktrees) does not make every path sensitive.
-// Outside a workspace, or when the root is itself such a directory, the whole
-// resolved path is checked.
+// against the call's cwd, then symlinks. The whole resolved path is checked,
+// so every sensitive ancestor counts, including one above a declared or
+// discovered workspace root (a root inside .claude/hooks hides nothing). The
+// one exception is a Git worktree directly under .claude/worktrees (Claude
+// Code's isolated worktrees): when that is the innermost workspace root
+// containing the path, its .claude/worktrees/<name> container is skipped and
+// only the path inside the worktree and the path above .claude are checked.
 type pathScope struct {
 	cwd   string
 	roots []string
@@ -279,18 +280,37 @@ func (s pathScope) isExecutionSensitive(p string) bool {
 	if err != nil || resolved == "" {
 		return false
 	}
-	for _, root := range s.roots {
-		if !boundary.IsSubPath(root, resolved) {
-			continue
-		}
-		if executionSensitiveDirs[strings.ToLower(filepath.Base(root))] {
-			return true
-		}
-		if rel, err := filepath.Rel(root, resolved); err == nil {
-			return isExecutionSensitivePath(rel)
+	root := ""
+	for _, r := range s.roots {
+		if boundary.IsSubPath(r, resolved) && len(r) > len(root) {
+			root = r
 		}
 	}
+	if root != "" && isClaudeWorktree(root) {
+		rel, err := filepath.Rel(root, resolved)
+		if err != nil {
+			return true
+		}
+		container := filepath.Dir(filepath.Dir(filepath.Dir(root)))
+		return isExecutionSensitivePath(container) || isExecutionSensitivePath(rel)
+	}
 	return isExecutionSensitivePath(resolved)
+}
+
+// isClaudeWorktree reports whether root is a Git worktree directly under a
+// .claude/worktrees directory: <repo>/.claude/worktrees/<name>, with a .git
+// file pointing at its gitdir, as `git worktree add` creates it.
+func isClaudeWorktree(root string) bool {
+	parent := filepath.Dir(root)
+	if !strings.EqualFold(filepath.Base(parent), "worktrees") || !strings.EqualFold(filepath.Base(filepath.Dir(parent)), ".claude") {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(root, ".git"))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".git"))
+	return err == nil && strings.HasPrefix(string(data), "gitdir:")
 }
 
 // commandTokens splits a shell command like splitCommand and lowercases the result.
