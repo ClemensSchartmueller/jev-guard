@@ -570,3 +570,99 @@ func TestScanSessions_FoldsMarkers(t *testing.T) {
 		t.Fatalf("marker state missing from status: %+v", byID)
 	}
 }
+
+// publishTaintMarker writes a taint marker for sessionID as MarkTainted does
+// before its merge, and returns it with its source.
+func publishTaintMarker(t *testing.T, sessionID string) (string, TaintSource) {
+	t.Helper()
+	marker := taintMarkerPath(sessionID)
+	src := TaintSource{ToolName: "WebFetch", At: time.Now().UTC()}
+	if err := writeMarker(marker, markerRecord{SessionID: sessionID, ToolName: src.ToolName, At: src.At}); err != nil {
+		t.Fatal(err)
+	}
+	return marker, src
+}
+
+// T1 (review round 3): a merge that commits the taint to the session file and
+// removes its marker while a reader is in progress must not hide the taint
+// from that reader, whichever read it falls between.
+func TestLoadSession_TaintHandoffDuringRead(t *testing.T) {
+	t.Run("merge right after the session file read", func(t *testing.T) {
+		setupTestJevguardDir(t)
+		if err := SaveSession(&SessionState{SessionID: "s", Prompt: "active prompt"}); err != nil {
+			t.Fatal(err)
+		}
+		marker, src := publishTaintMarker(t, "s")
+		orig := readFileFunc
+		defer func() { readFileFunc = orig }()
+		readFileFunc = func(p string) ([]byte, error) {
+			data, err := os.ReadFile(p)
+			if p == SessionFilePath("s") {
+				readFileFunc = orig
+				if mergeErr := mergeTaint("s", src, marker); mergeErr != nil {
+					t.Fatal(mergeErr)
+				}
+			}
+			return data, err
+		}
+		got, err := LoadSession("s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || !got.Tainted || got.Prompt != "active prompt" {
+			t.Fatalf("gate missed the taint handed off during its read: %+v", got)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("merge did not consume its marker: %v", err)
+		}
+	})
+
+	t.Run("merge between marker listing and marker read", func(t *testing.T) {
+		setupTestJevguardDir(t)
+		if err := SaveSession(&SessionState{SessionID: "s", Prompt: "active prompt"}); err != nil {
+			t.Fatal(err)
+		}
+		marker, src := publishTaintMarker(t, "s")
+		orig := statMarkerFunc
+		defer func() { statMarkerFunc = orig }()
+		statMarkerFunc = func(p string) (os.FileInfo, error) {
+			if p == marker {
+				statMarkerFunc = orig
+				if err := mergeTaint("s", src, marker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return orig(p)
+		}
+		got, err := LoadSession("s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil || !got.Tainted || got.TaintSource == nil || got.TaintSource.ToolName != "WebFetch" {
+			t.Fatalf("gate missed the taint handed off during its read: %+v", got)
+		}
+	})
+
+	t.Run("status of a marker-only session merged during the scan", func(t *testing.T) {
+		setupTestJevguardDir(t)
+		marker, src := publishTaintMarker(t, "s")
+		orig := statMarkerFunc
+		defer func() { statMarkerFunc = orig }()
+		statMarkerFunc = func(p string) (os.FileInfo, error) {
+			if p == marker {
+				statMarkerFunc = orig
+				if err := mergeTaint("s", src, marker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return orig(p)
+		}
+		scan, err := ScanSessions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(scan.Active) != 1 || !scan.Active[0].Tainted || scan.Active[0].SessionID != "s" {
+			t.Fatalf("status missed the taint handed off during its scan: %+v", scan.Active)
+		}
+	})
+}

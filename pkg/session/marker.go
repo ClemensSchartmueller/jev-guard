@@ -39,6 +39,17 @@ import (
 //     the merge runs unconditionally (fail closed).
 //  4. Abort is never cleared by a taint merge, and a session is reported
 //     aborted while any fresh abort marker exists, whatever its JSON says.
+//  5. Readers (LoadSession, ScanSessions) take no lock. They list and read the
+//     markers first and read the session file second. Every writer that
+//     removes a marker first commits a session file that carries the signal
+//     (the taint merge) or that no longer should (a clear), by an atomic
+//     rename or a deletion that completes before the marker removal starts. A reader that missed a
+//     marker therefore reads a session file at least as new as the removal: a
+//     signal that is active throughout a read, moving from marker to file, is
+//     never lost. Reading the file first would let a merge commit and remove
+//     the marker in between, so the reader would see neither. A failed removal
+//     keeps the marker, and a marker that vanishes between its stat and its
+//     read still counts, so both failures are conservative.
 //
 // A signal published concurrently with a clear can therefore survive it,
 // which is the conservative outcome; no interleaving loses a signal that was
@@ -68,8 +79,12 @@ type markerRecord struct {
 	At        time.Time `json:"at,omitempty"`
 }
 
-// writeMarkerFunc writes a marker file. A variable so tests can make it fail.
-var writeMarkerFunc = writeMarker
+// writeMarkerFunc writes a marker file and statMarkerFunc checks one.
+// Variables so tests can make them fail or interleave a competing writer.
+var (
+	writeMarkerFunc = writeMarker
+	statMarkerFunc  = os.Stat
+)
 
 func writeMarker(path string, v interface{}) error {
 	if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
@@ -166,7 +181,7 @@ func markersFor(sessionID string) (*sessionMarkers, error) {
 // statMarker reports whether a fresh marker exists at path. A stat failure
 // other than a missing file is returned so the gate fails closed.
 func statMarker(path string) (os.FileInfo, error) {
-	info, err := os.Stat(path)
+	info, err := statMarkerFunc(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -193,63 +208,78 @@ func readMarker(path string) (*markerRecord, os.FileInfo, error) {
 	return &rec, info, nil
 }
 
-// fold applies the fresh markers to state and returns the result. This is the
-// single definition of marker semantics, shared by LoadSession (the gate) and
-// ScanSessions (status). state may be nil; a state is created when only a
-// marker exists, with fallbackID unless a marker records the session ID. The
-// newest fresh taint marker supplies the taint source.
-func (m *sessionMarkers) fold(state *SessionState, fallbackID string) (*SessionState, error) {
-	var taint *TaintSource
+// markerSignals is what a session's fresh markers say, read at one moment.
+type markerSignals struct {
+	taint      *TaintSource
+	aborted    bool
+	recordedID string
+}
+
+// read reads the listed fresh markers. This and apply are the single
+// definition of marker semantics, shared by LoadSession (the gate) and
+// ScanSessions (status). The newest fresh taint marker supplies the taint
+// source. A nil m has no markers.
+func (m *sessionMarkers) read() (*markerSignals, error) {
+	sig := &markerSignals{}
+	if m == nil {
+		return sig, nil
+	}
 	var newest time.Time
-	recordedID := ""
 	for _, path := range m.taint {
 		rec, info, err := readMarker(path)
 		if err != nil {
 			return nil, err
 		}
-		if rec == nil || (taint != nil && !info.ModTime().After(newest)) {
+		if rec == nil || (sig.taint != nil && !info.ModTime().After(newest)) {
 			continue
 		}
 		newest = info.ModTime()
-		taint = &TaintSource{ToolName: rec.ToolName, At: rec.At}
-		if taint.ToolName == "" {
-			taint = &TaintSource{ToolName: "unknown tool", At: info.ModTime().UTC()}
+		sig.taint = &TaintSource{ToolName: rec.ToolName, At: rec.At}
+		if sig.taint.ToolName == "" {
+			sig.taint = &TaintSource{ToolName: "unknown tool", At: info.ModTime().UTC()}
 		}
 		if rec.SessionID != "" {
-			recordedID = rec.SessionID
+			sig.recordedID = rec.SessionID
 		}
 	}
-	aborted := false
 	for _, path := range m.abort {
 		rec, _, err := readMarker(path)
 		if err != nil {
 			return nil, err
 		}
 		if rec != nil {
-			aborted = true
+			sig.aborted = true
 			if rec.SessionID != "" {
-				recordedID = rec.SessionID
+				sig.recordedID = rec.SessionID
 			}
 		}
 	}
-	if taint == nil && !aborted {
-		return state, nil
+	return sig, nil
+}
+
+// apply folds the signals into state, which must have been read after the
+// signals (invariant 5). state may be nil; a state is created when only a
+// marker exists, with fallbackID unless a marker records the session ID.
+func (sig *markerSignals) apply(state *SessionState, fallbackID string) *SessionState {
+	if sig.taint == nil && !sig.aborted {
+		return state
 	}
 	if state == nil {
-		if recordedID == "" {
-			recordedID = fallbackID
+		id := sig.recordedID
+		if id == "" {
+			id = fallbackID
 		}
-		state = &SessionState{SessionID: recordedID}
+		state = &SessionState{SessionID: id}
 	}
-	if taint != nil && !state.Tainted {
+	if sig.taint != nil && !state.Tainted {
 		state.Tainted = true
-		state.TaintSource = taint
+		state.TaintSource = sig.taint
 	}
-	if aborted {
+	if sig.aborted {
 		state.Aborted = true
 		state.Prompt = ""
 	}
-	return state, nil
+	return state
 }
 
 // hasFreshAbort reports whether any listed abort marker is fresh.

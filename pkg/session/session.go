@@ -263,18 +263,23 @@ func readFileWithRetry(path string) ([]byte, error) {
 
 // LoadSession reads the session state from disk, folding in fresh taint and
 // abort markers. Returns nil, nil if neither the session nor a marker exists.
+// The markers are read before the session file (invariant 5 in marker.go).
 // An expired session is removed, under the session lock and only if it is
 // still expired, so a concurrent ingest is never deleted.
 func LoadSession(sessionID string) (*SessionState, error) {
-	state, err := loadSessionFile(sessionID)
-	if err != nil {
-		return nil, err
-	}
 	markers, err := markersFor(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	return markers.fold(state, sessionID)
+	signals, err := markers.read()
+	if err != nil {
+		return nil, err
+	}
+	state, err := loadSessionFile(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return signals.apply(state, sessionID), nil
 }
 
 func loadSessionFile(sessionID string) (*SessionState, error) {
@@ -294,7 +299,12 @@ func loadSessionFile(sessionID string) (*SessionState, error) {
 // readSession reads and decodes a session file without taking the lock. It
 // returns nil state for an absent or expired session; expired reports the latter.
 func readSession(sessionID string) (*SessionState, bool, error) {
-	data, err := readFileWithRetry(SessionFilePath(sessionID))
+	return readSessionFile(SessionFilePath(sessionID))
+}
+
+// readSessionFile reads and decodes the session file at path, like readSession.
+func readSessionFile(path string) (*SessionState, bool, error) {
+	data, err := readFileWithRetry(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -478,9 +488,12 @@ func ListSessions() ([]*SessionState, error) {
 
 // ScanSessions reads every session file and folds in its taint and abort
 // markers with the same semantics as LoadSession, so a session that exists
-// only as a marker is listed too. Valid, non-expired sessions are returned in
-// Active; expired sessions and stale temp files are removed; files that
-// cannot be read or decoded are returned in Unreadable and left in place.
+// only as a marker is listed too. As in LoadSession, all markers are read
+// before any session file (invariant 5 in marker.go), and a marker-only
+// session's file is read too, since a merge may have created it meanwhile.
+// Valid, non-expired sessions are returned in Active, ordered by file name;
+// expired sessions and stale temp files are removed; files that cannot be
+// read or decoded are returned in Unreadable and left in place.
 func ScanSessions() (*SessionScan, error) {
 	scan := &SessionScan{}
 	sessionsDir := GetSessionsDir()
@@ -492,68 +505,52 @@ func ScanSessions() (*SessionScan, error) {
 		return nil, fmt.Errorf("failed to read sessions directory: %w", err)
 	}
 	markers := groupMarkers(entries)
-	addFolded := func(name string, state *SessionState) {
-		m := markers[name]
-		delete(markers, name)
-		if m != nil {
-			var err error
-			if state, err = m.fold(state, strings.TrimSuffix(name, ".json")); err != nil {
-				scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})
-				return
-			}
-		}
-		if state != nil {
-			scan.Active = append(scan.Active, state)
+	signals := map[string]*markerSignals{}
+	signalErrs := map[string]error{}
+	for name, m := range markers {
+		if signals[name], err = m.read(); err != nil {
+			signalErrs[name] = err
 		}
 	}
 
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".tmp.") {
+		name := entry.Name()
+		if strings.Contains(name, ".tmp.") {
 			if entry.IsDir() {
 				continue
 			}
 			if info, err := entry.Info(); err == nil {
 				if time.Since(info.ModTime()) > 5*time.Minute {
-					_ = os.Remove(filepath.Join(sessionsDir, entry.Name()))
+					_ = os.Remove(filepath.Join(sessionsDir, name))
 				}
 			}
 			continue
 		}
-		if !strings.HasSuffix(entry.Name(), ".json") {
-			continue
+		if strings.HasSuffix(name, ".json") && markers[name] == nil {
+			markers[name] = &sessionMarkers{}
 		}
-
-		fullPath := filepath.Join(sessionsDir, entry.Name())
-		data, err := readFileWithRetry(fullPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				addFolded(entry.Name(), nil)
-				continue
-			}
-			delete(markers, entry.Name())
-			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to read session file: %w", err)})
-			continue
-		}
-
-		var state SessionState
-		if err := json.Unmarshal(data, &state); err != nil {
-			delete(markers, entry.Name())
-			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: entry.Name(), Err: fmt.Errorf("failed to parse session file: %w", err)})
-			continue
-		}
-
-		if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
-			_ = os.Remove(fullPath)
-			addFolded(entry.Name(), nil)
-			continue
-		}
-
-		addFolded(entry.Name(), &state)
 	}
 
-	// Sessions recorded only by markers.
 	for _, name := range sortedBases(markers) {
-		addFolded(name, nil)
+		fullPath := filepath.Join(sessionsDir, name)
+		state, expired, err := readSessionFile(fullPath)
+		if err != nil {
+			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})
+			continue
+		}
+		if expired {
+			_ = os.Remove(fullPath)
+		}
+		if err := signalErrs[name]; err != nil {
+			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})
+			continue
+		}
+		if sig := signals[name]; sig != nil {
+			state = sig.apply(state, strings.TrimSuffix(name, ".json"))
+		}
+		if state != nil {
+			scan.Active = append(scan.Active, state)
+		}
 	}
 	return scan, nil
 }
