@@ -202,6 +202,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	resolved := pol.ResolveWithEvidence(trace.Judgments, policy.BoundaryEvidence{
 		Contained:    trace.Contained,
 		PathVerified: isLocalPathVerified(call, trace.Contained),
+		Egress:       policy.IsEgressCall(call),
 	}, trace.EvalErr)
 	trace.Final = applyAuditMode(resolved, cfg.Mode)
 	return trace
