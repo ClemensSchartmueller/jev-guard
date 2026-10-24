@@ -82,6 +82,17 @@ type SessionState struct {
 	Prompt    string    `json:"prompt"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Aborted   bool      `json:"aborted,omitempty"`
+	// Tainted is set by a PostToolUse hook after an untrusted tool (WebFetch,
+	// WebSearch, MCP) returned content into the agent's context. It lasts until
+	// end-turn clears the session or ingest records the next prompt.
+	Tainted     bool         `json:"tainted,omitempty"`
+	TaintSource *TaintSource `json:"taint_source,omitempty"`
+}
+
+// TaintSource records which untrusted tool tainted a session and when.
+type TaintSource struct {
+	ToolName string    `json:"tool_name"`
+	At       time.Time `json:"at"`
 }
 
 // GetJevguardDir returns the unified ~/.jevguard home directory.
@@ -129,12 +140,16 @@ func IsNegativeIntent(prompt string) bool {
 	return abortPattern.MatchString(prompt)
 }
 
-// SaveSession atomically writes the session state to disk.
+// SaveSession atomically replaces the session state on disk. It holds the
+// session lock so it cannot interleave with MarkTainted or EndTurn.
 func SaveSession(state *SessionState) error {
 	if state == nil {
 		return fmt.Errorf("session state cannot be nil")
 	}
+	return withSessionLock(state.SessionID, func() error { return saveSessionLocked(state) })
+}
 
+func saveSessionLocked(state *SessionState) error {
 	sessionsDir := GetSessionsDir()
 	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create sessions directory: %w", err)
@@ -224,34 +239,93 @@ func readFileWithRetry(path string) ([]byte, error) {
 }
 
 // LoadSession reads the session state from disk. Returns nil, nil if session does not exist.
+// An expired session is removed, under the session lock and only if it is
+// still expired, so a concurrent ingest is never deleted.
 func LoadSession(sessionID string) (*SessionState, error) {
-	targetPath := SessionFilePath(sessionID)
-	data, err := readFileWithRetry(targetPath)
+	state, expired, err := readSession(sessionID)
+	if err != nil || !expired {
+		return state, err
+	}
+	_ = withSessionLock(sessionID, func() error {
+		if _, stillExpired, err := readSession(sessionID); err == nil && stillExpired {
+			_ = os.Remove(SessionFilePath(sessionID))
+		}
+		return nil
+	})
+	return nil, nil
+}
+
+// readSession reads and decodes a session file without taking the lock. It
+// returns nil state for an absent or expired session; expired reports the latter.
+func readSession(sessionID string) (*SessionState, bool, error) {
+	data, err := readFileWithRetry(SessionFilePath(sessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("failed to read session file: %w", err)
+		return nil, false, fmt.Errorf("failed to read session file: %w", err)
 	}
 
 	var state SessionState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to parse session file: %w", err)
+		return nil, false, fmt.Errorf("failed to parse session file: %w", err)
 	}
 
-	// Verify TTL
 	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
-		_ = os.Remove(targetPath)
-		return nil, nil
+		return nil, true, nil
 	}
+	return &state, false, nil
+}
 
-	return &state, nil
+// MarkTainted records under the session lock that toolName returned untrusted
+// content into the session. It re-reads the current state and only adds the
+// taint, so it never clears an abort flag or replaces a newer prompt. A
+// missing or expired session is created with an empty prompt. An unreadable
+// session file is left untouched and reported as an error.
+func MarkTainted(sessionID, toolName string, at time.Time) error {
+	if strings.TrimSpace(sessionID) == "" {
+		sessionID = "default"
+	}
+	return withSessionLock(sessionID, func() error {
+		state, _, err := readSession(sessionID)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			state = &SessionState{SessionID: sessionID}
+		}
+		state.Tainted = true
+		state.TaintSource = &TaintSource{ToolName: toolName, At: at.UTC()}
+		return saveSessionLocked(state)
+	})
+}
+
+// EndTurn clears a session's prompt and taint at the end of a reply. An
+// aborted session is kept (aborted is true) so background work stays held.
+// The check and the removal happen under the session lock, so an abort
+// recorded concurrently by ingest is never deleted.
+func EndTurn(sessionID string) (aborted bool, err error) {
+	err = withSessionLock(sessionID, func() error {
+		state, _, err := readSession(sessionID)
+		if err != nil {
+			return err
+		}
+		if state != nil && state.Aborted {
+			aborted = true
+			return nil
+		}
+		return removeSessionFile(sessionID)
+	})
+	return aborted, err
 }
 
 // ClearSession deletes the session cache file for a specific session ID.
 func ClearSession(sessionID string) error {
-	targetPath := SessionFilePath(sessionID)
-	err := os.Remove(targetPath)
+	return withSessionLock(sessionID, func() error { return removeSessionFile(sessionID) })
+}
+
+func removeSessionFile(sessionID string) error {
+	err := os.Remove(SessionFilePath(sessionID))
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove session file: %w", err)
 	}

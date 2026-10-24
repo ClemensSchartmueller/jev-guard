@@ -118,6 +118,12 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 	return ""
 }
 
+// SensitiveReason reports why a call touches a sensitive file or credential
+// pattern, or "" if it does not. The gate reuses it for tainted sessions.
+func (f *Filter) SensitiveReason(call *harness.NormalizedToolCall) string {
+	return f.checkSensitive(call)
+}
+
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 	if reason := f.checkResolvedXDGConfig(call); reason != "" {
 		return reason

@@ -51,6 +51,12 @@ func runGate() int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
+	// A PostToolUse payload reports a tool that already ran; it must never be
+	// gated or answered as a pending PreToolUse call.
+	if call.HookEvent == hookEventPostToolUse {
+		return runPostToolUse(call, cfg, os.Stdout, os.Stderr)
+	}
+
 	if hold := applySessionContext(call, cfg, os.Stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
@@ -59,6 +65,9 @@ func runGate() int {
 	}
 
 	result := executeGateEvaluation(call, cfg)
+	if result.TaintNote != "" {
+		fmt.Fprintf(os.Stderr, "jev-guard: taint %s\n", result.TaintNote)
+	}
 
 	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
@@ -78,7 +87,8 @@ const (
 // enabled. It returns a force_ask hold when the session recorded an abort or
 // when its state cannot be read or decoded (an unreadable session might be
 // an aborted one, so it fails closed). Otherwise it copies the active prompt
-// into call.UserIntent and returns nil. An absent or expired session is not
+// into call.UserIntent, and its taint (if any) into call.Taint, and returns
+// nil. An absent or expired session is not
 // an error. The hold is returned before audit-mode rewriting.
 func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
 	if !cfg.IsContextAwarenessEnabled() {
@@ -107,6 +117,13 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 	}
 	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
 		call.UserIntent = intent
+	}
+	if sessState.Tainted && cfg.EffectiveTaintMode() != config.TaintModeOff {
+		taint := session.TaintSource{ToolName: "unknown tool"}
+		if sessState.TaintSource != nil {
+			taint = *sessState.TaintSource
+		}
+		call.Taint = &taint
 	}
 	return nil
 }
@@ -185,7 +202,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		fastFilter := fastpath.NewFilter(checker, cfg)
 		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
 			trace.Fastpath = fastResult
-			trace.Final = applyAuditMode(fastResult, cfg.Mode)
+			trace.Final = applyAuditMode(applyTaint(call, fastResult, cfg, sensitiveChecker(cfg)), cfg.Mode)
 			return trace
 		}
 	}
@@ -203,7 +220,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		Contained:    trace.Contained,
 		PathVerified: isLocalPathVerified(call, trace.Contained),
 	}, trace.EvalErr)
-	trace.Final = applyAuditMode(resolved, cfg.Mode)
+	trace.Final = applyAuditMode(applyTaint(call, resolved, cfg, sensitiveChecker(cfg)), cfg.Mode)
 	return trace
 }
 
@@ -294,6 +311,7 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 			Reason:     fmt.Sprintf("[AUDIT-MODE: %s] %s", result.Decision, result.Reason),
 			Source:     result.Source,
 			Confidence: result.Confidence,
+			TaintNote:  result.TaintNote,
 		}
 	}
 
