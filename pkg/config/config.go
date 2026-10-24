@@ -863,10 +863,19 @@ type AuditEntry struct {
 	Reason     string           `json:"reason"`
 	Source     string           `json:"source"`
 	Confidence float64          `json:"confidence"`
+	// Model is the semantic model that answered, as reported by the provider.
+	// Empty when no semantic evaluation produced a response.
+	Model string `json:"model,omitempty"`
 }
 
 // LogAudit writes evaluation results to the configured audit file when active.
 func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.EvaluationResult) error {
+	return c.LogAuditWithModel(call, res, "")
+}
+
+// LogAuditWithModel is LogAudit that also records the semantic model that
+// answered; an empty model is omitted from the entry.
+func (c *Config) LogAuditWithModel(call *harness.NormalizedToolCall, res *harness.EvaluationResult, model string) error {
 	if c == nil || c.AuditLogPath == "" {
 		return nil
 	}
@@ -876,6 +885,7 @@ func (c *Config) LogAudit(call *harness.NormalizedToolCall, res *harness.Evaluat
 
 	entry := AuditEntry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Model:     model,
 	}
 	if call != nil {
 		entry.ToolName = call.ToolName

@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -627,5 +630,33 @@ func TestEvalIgnoresAndPreservesSessionState(t *testing.T) {
 
 	if after := snapshotTree(t, e.jevHome); !equalSnapshots(before, after) || len(after) == 0 {
 		t.Errorf("session files changed:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func TestEvalReportsAnsweringTypeSafeModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"jev-1.14.0","answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.99},
+			"destructive_potential":{"type":"score","score":0.2,"confidence":0.9},
+			"violation_category":{"type":"choice","choice":"none","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	e := newEvalEnv(t, `{"api_key":"test-key","base_url":`+jsonString(server.URL)+`}`)
+	ws := e.workspace()
+
+	rep := e.rawReport("--cmd", "make build", "--cwd", ws)
+	if rep["typesafe_model"] != "jev-1.14.0" {
+		t.Fatalf("typesafe_model = %v, want jev-1.14.0: %v", rep["typesafe_model"], rep)
+	}
+	explain := e.mustRun("--cmd", "make build", "--cwd", ws, "--explain")
+	if !strings.Contains(explain, "model:     jev-1.14.0") {
+		t.Errorf("explain output missing answering model:\n%s", explain)
+	}
+
+	offline := e.rawReport("--cmd", "make build", "--cwd", ws, "--offline")
+	if _, ok := offline["typesafe_model"]; ok {
+		t.Errorf("offline report must not claim a TypeSafe model: %v", offline)
 	}
 }

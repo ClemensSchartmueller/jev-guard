@@ -35,6 +35,10 @@ type JevJudgments struct {
 	ViolationConfidence   float64
 	IntentAlignment       string // "explicitly_requested", "incidental_or_unclear", "unprompted_or_contrary"
 	IntentConfidence      float64
+	// Model is the model id the provider reported as having answered, which can
+	// differ from the requested alias (e.g. "jev-latest"). Empty when the
+	// response did not report one.
+	Model string
 }
 
 // Client conducts semantic safety evaluations via TypeSafe System One.
@@ -208,5 +212,6 @@ func (c *Client) parseResponseBody(reader io.Reader) (*JevJudgments, error) {
 		ViolationConfidence:   violationAns.Confidence,
 		IntentAlignment:       intentAlign,
 		IntentConfidence:      intentConf,
+		Model:                 resp.Model,
 	}, nil
 }

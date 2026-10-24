@@ -51,6 +51,7 @@ type evalReport struct {
 	FastpathReason        string   `json:"fastpath_reason,omitempty"`
 	TypeSafeRan           bool     `json:"typesafe_ran"`
 	Judgments             any      `json:"typesafe_judgments,omitempty"`
+	TypeSafeModel         string   `json:"typesafe_model,omitempty"`
 	TypeSafeError         string   `json:"typesafe_error,omitempty"`
 	HarnessOutput         string   `json:"harness_output,omitempty"`
 	HookExitCode          *int     `json:"hook_exit_code,omitempty"`
@@ -327,6 +328,7 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 	}
 	if t.Judgments != nil {
 		rep.Judgments = t.Judgments
+		rep.TypeSafeModel = t.JudgedModel()
 	}
 	if t.Fastpath != nil {
 		rep.FastpathDecision = string(t.Fastpath.Decision)
@@ -419,6 +421,11 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	case t.SemanticRan && t.EvalErr != nil:
 		fmt.Fprintf(w, "    error: %v\n", t.EvalErr)
 	case t.SemanticRan && t.Judgments != nil:
+		model := rep.TypeSafeModel
+		if model == "" {
+			model = "not reported"
+		}
+		fmt.Fprintf(w, "    model:     %s\n", model)
 		b, _ := json.MarshalIndent(t.Judgments, "    ", "  ")
 		fmt.Fprintf(w, "    judgments: %s\n", b)
 	case t.WouldSendToJudge:

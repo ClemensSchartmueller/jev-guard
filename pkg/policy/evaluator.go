@@ -7,19 +7,38 @@ import (
 	"jev-guard/pkg/harness"
 )
 
+// Default policy thresholds. They are hand-set, not yet calibrated against a
+// labelled corpus; change them only with evidence (see docs/policy-benchmark.md).
+const (
+	// DefaultMaxAllowScore is the highest destructive_potential score allowed
+	// without confirmation or explicit intent.
+	DefaultMaxAllowScore = 1.2
+	// DefaultCatastrophicScore is the destructive_potential score above which an
+	// operation is catastrophic: denied, or force_ask when explicitly requested.
+	DefaultCatastrophicScore = 2.5
+	// DefaultMinContainedThreshold is the lowest model containment probability
+	// accepted when the local resolver did not verify the path.
+	DefaultMinContainedThreshold = 0.85
+	// DefaultMinIntentConfidence is the lowest intent_alignment confidence that
+	// counts as an explicit user request.
+	DefaultMinIntentConfidence = 0.70
+)
+
 // Policy evaluates combined local boundary facts and semantic judgments.
 type Policy struct {
 	MaxAllowScore         float64
+	CatastrophicScore     float64 // <= 0 means DefaultCatastrophicScore
 	MinContainedThreshold float64
-	MinIntentConfidence   float64
+	MinIntentConfidence   float64 // <= 0 means DefaultMinIntentConfidence
 }
 
-// NewDefaultPolicy creates a standard policy with calibrated thresholds.
+// NewDefaultPolicy creates a standard policy with the default thresholds.
 func NewDefaultPolicy() *Policy {
 	return &Policy{
-		MaxAllowScore:         1.2,
-		MinContainedThreshold: 0.85,
-		MinIntentConfidence:   0.70,
+		MaxAllowScore:         DefaultMaxAllowScore,
+		CatastrophicScore:     DefaultCatastrophicScore,
+		MinContainedThreshold: DefaultMinContainedThreshold,
+		MinIntentConfidence:   DefaultMinIntentConfidence,
 	}
 }
 
@@ -66,14 +85,18 @@ func (p *Policy) ResolveWithEvidence(j *evaluator.JevJudgments, ev BoundaryEvide
 func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, pathVerified bool) *harness.EvaluationResult {
 	minConfidence := p.MinIntentConfidence
 	if minConfidence <= 0 {
-		minConfidence = 0.70
+		minConfidence = DefaultMinIntentConfidence
+	}
+	catastrophicScore := p.CatastrophicScore
+	if catastrophicScore <= 0 {
+		catastrophicScore = DefaultCatastrophicScore
 	}
 	isExplicitlyRequested := j.IntentAlignment == "explicitly_requested" && j.IntentConfidence >= minConfidence
 
-	// Strict Catastrophic Ceiling: Operations with catastrophic blast radius (score > 2.5)
+	// Strict Catastrophic Ceiling: Operations with catastrophic blast radius (score > CatastrophicScore)
 	// strictly cap at force_ask even if explicitly commanded by the user, and are blocked (deny) otherwise.
 	// This invariant takes precedence over all violation categories, including credential allowances.
-	if j.DestructivePotential > 2.5 {
+	if j.DestructivePotential > catastrophicScore {
 		if isExplicitlyRequested {
 			return &harness.EvaluationResult{
 				Decision:   harness.DecisionForceAsk,

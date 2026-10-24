@@ -226,3 +226,45 @@ func TestPolicy_PathVerified(t *testing.T) {
 		t.Errorf("eval error must still fail safe, got %v", res.Decision)
 	}
 }
+
+// TestPolicy_ThresholdBoundaries pins the default thresholds' values and their
+// strict/inclusive comparisons so that naming them cannot change behaviour.
+func TestPolicy_ThresholdBoundaries(t *testing.T) {
+	if DefaultMaxAllowScore != 1.2 || DefaultCatastrophicScore != 2.5 || DefaultMinContainedThreshold != 0.85 || DefaultMinIntentConfidence != 0.70 {
+		t.Fatalf("default thresholds changed: %v %v %v %v", DefaultMaxAllowScore, DefaultCatastrophicScore, DefaultMinContainedThreshold, DefaultMinIntentConfidence)
+	}
+	mk := func(contained, destructive float64, intent string, intentConf float64) *evaluator.JevJudgments {
+		return &evaluator.JevJudgments{
+			IsWorkspaceContained: contained, DestructivePotential: destructive, ViolationCategory: "none",
+			DestructiveConfidence: 0.9, IntentAlignment: intent, IntentConfidence: intentConf,
+		}
+	}
+	tests := []struct {
+		name string
+		j    *evaluator.JevJudgments
+		want harness.Decision
+	}{
+		{"score at max allow allows", mk(0.99, 1.2, "", 0), harness.DecisionAllow},
+		{"score above max allow asks", mk(0.99, 1.21, "", 0), harness.DecisionAsk},
+		{"score at catastrophic asks", mk(0.99, 2.5, "", 0), harness.DecisionAsk},
+		{"score above catastrophic denies", mk(0.99, 2.51, "", 0), harness.DecisionDeny},
+		{"explicit intent at catastrophic allows", mk(0.99, 2.5, "explicitly_requested", 0.9), harness.DecisionAllow},
+		{"explicit intent above catastrophic force_asks", mk(0.99, 2.51, "explicitly_requested", 0.9), harness.DecisionForceAsk},
+		{"containment at threshold allows", mk(0.85, 0.3, "", 0), harness.DecisionAllow},
+		{"containment below threshold asks", mk(0.84, 0.3, "", 0), harness.DecisionAsk},
+		{"intent confidence at threshold is explicit", mk(0.99, 1.9, "explicitly_requested", 0.70), harness.DecisionAllow},
+		{"intent confidence below threshold is not explicit", mk(0.99, 1.9, "explicitly_requested", 0.69), harness.DecisionAsk},
+	}
+	// A zero-valued CatastrophicScore/MinIntentConfidence falls back to the defaults.
+	partial := &Policy{MaxAllowScore: DefaultMaxAllowScore, MinContainedThreshold: DefaultMinContainedThreshold}
+	for name, p := range map[string]*Policy{"default": NewDefaultPolicy(), "zero fallbacks": partial} {
+		for _, tt := range tests {
+			t.Run(name+"/"+tt.name, func(t *testing.T) {
+				res := p.Resolve(tt.j, true, nil)
+				if res.Decision != tt.want {
+					t.Errorf("expected %v, got %v (%s)", tt.want, res.Decision, res.Reason)
+				}
+			})
+		}
+	}
+}
