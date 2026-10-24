@@ -1,16 +1,29 @@
 // Package testprofile keeps package tests away from the real user profile.
 //
 // Production config paths come from the OS account (user.Current), so changing HOME
-// alone does not isolate them. Run points HOME, USERPROFILE and JEV_GUARD_HOME at a
-// temp profile for the whole test binary, and fails the run if the real user config
-// or trust registry changed while the tests ran.
+// alone does not isolate them. Run therefore forbids the account lookup in-process
+// (accountprofile.ForbidForTesting): any test that reaches config.UserConfigPath or
+// config.TrustRegistryPath, directly or through LoadConfig, LoadConfigForCall,
+// InspectProjectConfig or EnsureUserConfig, panics before touching the real profile.
+// Tests must pass explicit temp paths instead. Run also points HOME, USERPROFILE and
+// JEV_GUARD_HOME at a temp profile for the whole test binary, and, as extra
+// detection, fails the run if the real user config or trust registry changed.
 //
-// Set JEV_GUARD_TEST_USER_CONFIG to a fixture file (for example testdata/audit.json)
-// to seed the temp profile's user config, so the suite can be run once with an
-// enforcing and once with an audit user config.
+// The in-process guard does not reach subprocesses. A test that runs a production
+// jev-guard binary would resolve the real account profile, because main calls
+// EnsureUserConfig. No test does this today. Such a test must run in a sandbox or a
+// disposable OS account, never under the real account.
+//
+// Set JEV_GUARD_TEST_USER_CONFIG to a fixture file to seed the temp profile's user
+// config, so the suite can be run once with an enforcing and once with an audit user
+// config. A relative path is resolved against the module root, so the same value
+// works for every package:
+//
+//	JEV_GUARD_TEST_USER_CONFIG=internal/testprofile/testdata/enforcing.json go test -count=1 ./...
 package testprofile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -18,15 +31,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"jev-guard/internal/accountprofile"
 )
 
-// Run isolates the process environment in a temp profile, calls setup with the temp
-// home directory so the package can point its seams there, and runs the tests. It
-// returns the exit code for os.Exit: non-zero if the tests failed or any watched real
-// profile file changed.
+// Run forbids account-backed profile lookups, isolates the process environment in a
+// temp profile, calls setup with the temp home directory so the package can point its
+// seams there, and runs the tests. It returns the exit code for os.Exit: non-zero if
+// the tests failed or any watched real profile file changed.
 func Run(m *testing.M, setup func(home string)) int {
 	watched := realProfileFiles()
 	before := snapshot(watched)
+	accountprofile.ForbidForTesting()
 
 	home, err := os.MkdirTemp("", "jevguard-test-home-")
 	if err != nil {
@@ -63,8 +79,17 @@ func Run(m *testing.M, setup func(home string)) int {
 	return code
 }
 
-// seedUserConfig copies a user config fixture into the temp profile.
+// seedUserConfig copies a user config fixture into the temp profile. A relative
+// fixture path is resolved against the module root, because each test binary runs
+// in its own package directory.
 func seedUserConfig(home, fixture string) error {
+	if !filepath.IsAbs(fixture) {
+		root, err := moduleRoot()
+		if err != nil {
+			return fmt.Errorf("resolve user config fixture %s: %w", fixture, err)
+		}
+		fixture = filepath.Join(root, fixture)
+	}
 	data, err := os.ReadFile(fixture)
 	if err != nil {
 		return fmt.Errorf("read user config fixture: %w", err)
@@ -74,6 +99,24 @@ func seedUserConfig(home, fixture string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, ".jevguard.json"), data, 0o600)
+}
+
+// moduleRoot returns the nearest ancestor of the working directory that holds go.mod.
+func moduleRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", errors.New("go.mod not found above the working directory")
+		}
+		dir = parent
+	}
 }
 
 // realProfileFiles returns the user-owned files the production code resolves through

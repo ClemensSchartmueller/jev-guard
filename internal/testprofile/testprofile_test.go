@@ -38,3 +38,23 @@ func TestDiffDetectsProfileChanges(t *testing.T) {
 		t.Fatalf("expected a rewritten user config to be reported, got %v", changed)
 	}
 }
+
+func TestSeedUserConfigResolvesRelativeFixtureFromModuleRoot(t *testing.T) {
+	// The test binary runs in internal/testprofile, so a working-directory-relative
+	// lookup of this repository-relative path would fail.
+	home := t.TempDir()
+	if err := seedUserConfig(home, filepath.Join("internal", "testprofile", "testdata", "audit.json")); err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := os.ReadFile(filepath.Join(home, ".jevguard", ".jevguard.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(filepath.Join("testdata", "audit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(seeded) != string(fixture) {
+		t.Fatalf("seeded %q, want the audit fixture %q", seeded, fixture)
+	}
+}
