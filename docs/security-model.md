@@ -120,7 +120,7 @@ Instead, intent's power is kept narrow by deterministic limits that hold whateve
 
 - **Confidence threshold.** Intent counts only when `intent_alignment` is `explicitly_requested` with `intent_confidence >= 0.70`. Anything lower is treated as no intent.
 - **Catastrophic ceiling.** `destructive_potential > 2.5` or `catastrophic_deletion` is `force_ask` at best. Privilege or persistence changes are `force_ask` at best.
-- **Boundaries.** A local boundary escape, a model-reported `workspace_escape`, or a containment probability below 0.85 always asks. Intent never unlocks them.
+- **Boundaries.** A local boundary escape or a model-reported `workspace_escape` always asks. A model containment probability below 0.85 also asks, including for a `credential_leak` with explicit intent. The only exception is the deterministic local path proof for file-path tools described above, which overrides the model's probability with or without intent. Intent never unlocks a boundary.
 - **Anti-tampering.** Access to jev-guard's own files and `~/.jevguard/` is denied with or without intent.
 - **No auto-allowed egress of secrets.** A `credential_leak` with explicit intent is capped at confirmation (source `policy_intent_egress_cap`) when the call can send data to another host. Local access with intent (`Read`, `Edit`, `cat .env`, `sed -i ... .env`) is allowed as before.
 

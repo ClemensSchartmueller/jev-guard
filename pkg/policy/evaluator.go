@@ -94,7 +94,7 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, ev BoundaryEvidenc
 		}
 	}
 
-	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested, ev.Egress); violationResult != nil {
+	if violationResult := p.checkViolationCategory(j, isExplicitlyRequested, ev); violationResult != nil {
 		return violationResult
 	}
 
@@ -135,7 +135,7 @@ func (p *Policy) evaluateJudgments(j *evaluator.JevJudgments, ev BoundaryEvidenc
 	}
 }
 
-func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested, egress bool) *harness.EvaluationResult {
+func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyRequested bool, ev BoundaryEvidence) *harness.EvaluationResult {
 	switch j.ViolationCategory {
 	case "catastrophic_deletion":
 		if isExplicitlyRequested {
@@ -170,12 +170,22 @@ func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyR
 	case "credential_leak":
 		// Intent arrives through the prompt, which can carry pasted third-party
 		// text. Sending a secret off the machine is never unlocked by it.
-		if isExplicitlyRequested && egress {
+		if isExplicitlyRequested && ev.Egress {
 			return &harness.EvaluationResult{
 				Decision:   harness.DecisionAsk,
 				Reason:     "Credential access over a network-capable tool requires confirmation even when requested",
 				Source:     "policy_intent_egress_cap",
 				Confidence: j.ViolationConfidence,
+			}
+		}
+		// Intent does not override a low model containment probability either;
+		// only a local path proof does, as in the general containment check.
+		if isExplicitlyRequested && !ev.PathVerified && j.IsWorkspaceContained < p.MinContainedThreshold {
+			return &harness.EvaluationResult{
+				Decision:   harness.DecisionAsk,
+				Reason:     fmt.Sprintf("Potential workspace escape (containment probability: %.2f)", j.IsWorkspaceContained),
+				Source:     "policy_jev_containment",
+				Confidence: 1.0 - j.IsWorkspaceContained,
 			}
 		}
 		if isExplicitlyRequested {
