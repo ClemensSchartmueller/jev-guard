@@ -108,7 +108,9 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 		if sessState.Aborted {
 			return abortedSessionResult()
 		}
-		if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
+		if call.TurnUnusable || sessState.TurnUnusable {
+			// Neither side can prove which turn the prompt belongs to.
+		} else if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
 			call.UserIntent = intent
 		}
 	}

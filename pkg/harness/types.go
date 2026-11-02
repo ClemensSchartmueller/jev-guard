@@ -1,6 +1,10 @@
 package harness
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 // HarnessType represents the calling agent platform.
 type HarnessType string
@@ -34,7 +38,9 @@ type NormalizedToolCall struct {
 	SessionID      string
 	TurnID         int
 	// TurnKey is an opaque string turn identifier (Codex turn_id). Empty for Claude/Antigravity.
-	TurnKey        string
+	TurnKey string
+	// TurnUnusable means the payload had a turn_id that names no turn, such as "". The call gets no session intent.
+	TurnUnusable   bool
 	UserIntent     string
 	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
 	ModelName      string // Antigravity only
@@ -74,24 +80,36 @@ type IngestPayload struct {
 }
 
 // TurnValue accepts a JSON turn_id that is either a number (integer turn) or a
-// string (opaque Codex turn key) without failing to unmarshal.
+// string (opaque Codex turn key) without failing to unmarshal. Unusable records a value
+// that was supplied but names no turn: a blank string or another JSON type. It must not
+// look like a missing turn_id, which numeric matching accepts for any turn.
 type TurnValue struct {
-	Num int
-	Key string
+	Num      int
+	Key      string
+	Unusable bool
 }
 
-// UnmarshalJSON implements json.Unmarshaler. Unsupported shapes are ignored.
+// UnmarshalJSON implements json.Unmarshaler. JSON null means no turn_id.
 func (t *TurnValue) UnmarshalJSON(data []byte) error {
 	*t = TurnValue{}
+	if string(bytes.TrimSpace(data)) == "null" {
+		return nil
+	}
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
+		if strings.TrimSpace(s) == "" {
+			t.Unusable = true
+			return nil
+		}
 		t.Key = s
 		return nil
 	}
 	var n float64
 	if err := json.Unmarshal(data, &n); err == nil {
 		t.Num = int(n)
+		return nil
 	}
+	t.Unusable = true
 	return nil
 }
 

@@ -113,3 +113,17 @@ func TestStatusShowsCodexTurnKey(t *testing.T) {
 		t.Fatalf("turn key missing:\n%s", stdout.String())
 	}
 }
+
+func TestIngestBlankTurnKeyFlagIsUnusable(t *testing.T) {
+	for _, args := range [][]string{{"--turn-key=", "--prompt", "build it"}, {"--turn-key=  ", "--prompt", "build it"}} {
+		t.Setenv("JEV_GUARD_HOME", t.TempDir())
+		runner, _, stderr := newStdinRunner("")
+		if _, code := runner.EvaluateArgs(append([]string{"ingest", "--session", "s"}, args...)); code != 0 {
+			t.Fatalf("exit %d: %s", code, stderr.String())
+		}
+		state, err := session.LoadSession("s")
+		if err != nil || state == nil || !state.TurnUnusable {
+			t.Fatalf("state=%+v err=%v", state, err)
+		}
+	}
+}

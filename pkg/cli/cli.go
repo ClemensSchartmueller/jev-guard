@@ -302,6 +302,7 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	var sessionID string
 	var turnID int
 	var turnKey string
+	var turnUnusable bool
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
@@ -311,6 +312,7 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 		}
 		if val, ok := parseFlagValue(args, &i, "--turn-key", "--turn_key"); ok {
 			turnKey = val
+			turnUnusable = strings.TrimSpace(val) == ""
 			continue
 		}
 		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
@@ -343,8 +345,9 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 				if turnID == 0 {
 					turnID = parsedState.TurnID
 				}
-				if turnKey == "" {
+				if turnKey == "" && !turnUnusable {
 					turnKey = parsedState.TurnKey
+					turnUnusable = parsedState.TurnUnusable
 				}
 				if prompt == "" {
 					prompt = parsedState.Prompt
@@ -363,10 +366,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	}
 
 	state := &session.SessionState{
-		SessionID: sessionID,
-		TurnID:    turnID,
-		TurnKey:   turnKey,
-		Prompt:    prompt,
+		SessionID:    sessionID,
+		TurnID:       turnID,
+		TurnKey:      turnKey,
+		TurnUnusable: turnUnusable,
+		Prompt:       prompt,
 	}
 
 	if err := session.SaveSession(state); err != nil {

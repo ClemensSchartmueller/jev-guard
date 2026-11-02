@@ -103,6 +103,7 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		Harness:        harnessType,
 		TurnID:         payload.TurnID.Num,
 		TurnKey:        payload.TurnID.Key,
+		TurnUnusable:   payload.TurnID.Unusable,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
@@ -150,10 +151,11 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	}
 
 	return &session.SessionState{
-		SessionID: sid,
-		TurnID:    turn,
-		TurnKey:   payload.TurnID.Key,
-		Prompt:    prompt,
+		SessionID:    sid,
+		TurnID:       turn,
+		TurnKey:      payload.TurnID.Key,
+		TurnUnusable: payload.TurnID.Unusable,
+		Prompt:       prompt,
 	}, nil
 }
 
