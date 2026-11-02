@@ -102,7 +102,7 @@ This feature is optional. Disable it with `"context_awareness_enabled": false` i
 | **Stop/abort prompt** | Holds until the TTL expires or the next prompt | Holds until the TTL expires or the next prompt | Holds while it is the latest user message |
 | **Turn off** | `context_awareness_enabled` | `context_awareness_enabled` | `context_awareness_enabled` or `antigravity_transcript_intent` |
 
-**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. A payload with a string `turn_id` is reported as harness `codex`. Other Codex payloads are handled the same way but are reported as `claude_code`, and they get no exact turn matching.
+**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. A payload with a string `turn_id` is reported as harness `codex`. Other Codex payloads are handled the same way but are reported as `claude-code`, and they get no exact turn matching.
 
 **Antigravity.** The transcript is `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`, and the intent is its last `USER_INPUT` / `USER_EXPLICIT` record. The payload's `transcriptPath` is used only if it resolves to exactly that location for the payload's conversation ID and is a regular file. At most the last 8 MB are scanned, and text over 8 KB is unusable.
 
