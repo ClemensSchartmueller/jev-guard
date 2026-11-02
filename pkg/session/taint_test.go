@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -665,4 +666,64 @@ func TestLoadSession_TaintHandoffDuringRead(t *testing.T) {
 			t.Fatalf("status missed the taint handed off during its scan: %+v", scan.Active)
 		}
 	})
+}
+
+// A reader that saw an expired session must not delete, or miss, a fresh
+// abort saved between its read and its cleanup.
+func TestExpiredCleanup_KeepsSessionSavedDuringRead(t *testing.T) {
+	for name, read := range map[string]func(t *testing.T) *SessionState{
+		"LoadSession": func(t *testing.T) *SessionState {
+			got, err := LoadSession("s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return got
+		},
+		"ScanSessions": func(t *testing.T) *SessionState {
+			scan, err := ScanSessions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scan.Active) != 1 {
+				t.Fatalf("scan active = %+v, unreadable = %+v", scan.Active, scan.Unreadable)
+			}
+			return scan.Active[0]
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setupTestJevguardDir(t)
+			if err := SaveSession(&SessionState{SessionID: "s", Prompt: "do work"}); err != nil {
+				t.Fatal(err)
+			}
+			expired, err := json.Marshal(&SessionState{SessionID: "s", Prompt: "do work", UpdatedAt: time.Now().Add(-2 * SessionTTL())})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(SessionFilePath("s"), expired, 0600); err != nil {
+				t.Fatal(err)
+			}
+			orig := readFileFunc
+			defer func() { readFileFunc = orig }()
+			readFileFunc = func(p string) ([]byte, error) {
+				data, err := os.ReadFile(p)
+				if p == SessionFilePath("s") {
+					readFileFunc = orig
+					if saveErr := SaveSession(&SessionState{SessionID: "s", Prompt: "stop"}); saveErr != nil {
+						t.Fatal(saveErr)
+					}
+				}
+				return data, err
+			}
+			if got := read(t); got == nil || !got.Aborted {
+				t.Fatalf("reader missed the fresh abort: %+v", got)
+			}
+			got, err := LoadSession("s")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || !got.Aborted {
+				t.Fatalf("cleanup deleted the fresh abort: %+v", got)
+			}
+		})
+	}
 }

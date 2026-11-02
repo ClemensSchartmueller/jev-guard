@@ -287,13 +287,23 @@ func loadSessionFile(sessionID string) (*SessionState, error) {
 	if err != nil || !expired {
 		return state, err
 	}
-	_ = withSessionLock(sessionID, func() error {
-		if _, stillExpired, err := readSession(sessionID); err == nil && stillExpired {
-			_ = os.Remove(SessionFilePath(sessionID))
+	return reapExpiredSession(SessionFilePath(sessionID))
+}
+
+// reapExpiredSession handles a session file that a lock-free read found
+// expired. A writer may have replaced it since, so it removes the file only if
+// it is still expired under the session lock, and then returns whatever is
+// there now. That way a fresh abort saved after the first read is neither
+// deleted nor missed. If the lock is unavailable, the file stays in place.
+func reapExpiredSession(path string) (*SessionState, error) {
+	_ = withLockFile(path+".lock", func() error {
+		if _, stillExpired, err := readSessionFile(path); err == nil && stillExpired {
+			_ = os.Remove(path)
 		}
 		return nil
 	})
-	return nil, nil
+	state, _, err := readSessionFile(path)
+	return state, err
 }
 
 // readSession reads and decodes a session file without taking the lock. It
@@ -539,7 +549,10 @@ func ScanSessions() (*SessionScan, error) {
 			continue
 		}
 		if expired {
-			_ = os.Remove(fullPath)
+			if state, err = reapExpiredSession(fullPath); err != nil {
+				scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})
+				continue
+			}
 		}
 		if err := signalErrs[name]; err != nil {
 			scan.Unreadable = append(scan.Unreadable, UnreadableSession{FileName: name, Err: err})

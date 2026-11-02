@@ -32,10 +32,15 @@ func sessionLockPath(sessionID string) string {
 // because unlinking a locked file would let a second process lock a new file
 // at the same path. Acquisition gives up after lockTimeout.
 func withSessionLock(sessionID string, fn func() error) error {
+	return withLockFile(sessionLockPath(sessionID), fn)
+}
+
+// withLockFile is withSessionLock for a caller that knows the session's file
+// name but not its ID, as a directory scan does.
+func withLockFile(path string, fn func() error) error {
 	if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
 		return fmt.Errorf("failed to create sessions directory: %w", err)
 	}
-	path := sessionLockPath(sessionID)
 	deadline := time.Now().Add(lockTimeout)
 	var f *os.File
 	for {
