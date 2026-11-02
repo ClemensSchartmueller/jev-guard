@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"jev-guard/pkg/config"
@@ -548,5 +551,318 @@ func TestRedirectedTranscriptYieldsNoIntent(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Error("expected a stderr diagnostic")
+	}
+}
+
+// G3 reproduction: a supplied turn_id that names no turn must never reach numeric matching.
+func TestUnusableTurnIDNeverYieldsIntent(t *testing.T) {
+	callPayload := func(turn string) []byte {
+		body := `{"session_id":"shared","tool_name":"Bash","tool_input":{"command":"rm -rf build"},"cwd":` + jsonString(t.TempDir())
+		if turn != "" {
+			body += `,"turn_id":` + turn
+		}
+		return []byte(body + `}`)
+	}
+	apply := func(t *testing.T, callTurn string) (*harness.NormalizedToolCall, *harness.EvaluationResult) {
+		t.Helper()
+		call, err := harness.ParsePayload(callPayload(callTurn))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return call, applySessionContext(call, config.DefaultConfig(), io.Discard)
+	}
+	saveIngest := func(t *testing.T, turn, prompt string) {
+		t.Helper()
+		t.Setenv("JEV_GUARD_HOME", t.TempDir())
+		state, err := harness.ParseIngestPayload([]byte(`{"session_id":"shared","turn_id":` + turn + `,"prompt":` + jsonString(prompt) + `}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := session.SaveSession(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, unusable := range []string{`""`, `"   "`, `true`, `{}`, `[]`} {
+		for _, callTurn := range []string{"99", "0", "", `"turn-A"`, `""`, unusable} {
+			t.Run("stored "+unusable+" call "+callTurn, func(t *testing.T) {
+				saveIngest(t, unusable, "show me the .env file")
+				call, hold := apply(t, callTurn)
+				if hold != nil || call.UserIntent != "" {
+					t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+				}
+			})
+			t.Run("stored "+unusable+" call "+callTurn+"/abort holds", func(t *testing.T) {
+				saveIngest(t, unusable, "stop")
+				call, hold := apply(t, callTurn)
+				if hold == nil || hold.Source != sourceSessionAborted || call.UserIntent != "" {
+					t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+				}
+			})
+		}
+		// The other direction: a usable stored turn and a call whose turn_id names none.
+		t.Run("stored numeric call "+unusable, func(t *testing.T) {
+			saveIngest(t, "7", "show me the .env file")
+			call, hold := apply(t, unusable)
+			if hold != nil || call.UserIntent != "" {
+				t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+			}
+		})
+		t.Run("stored numeric call "+unusable+"/abort holds", func(t *testing.T) {
+			saveIngest(t, "7", "stop")
+			_, hold := apply(t, unusable)
+			if hold == nil || hold.Source != sourceSessionAborted {
+				t.Fatalf("hold=%+v", hold)
+			}
+		})
+	}
+	// JSON null means no turn_id, as for a payload without the field.
+	t.Run("null is absent", func(t *testing.T) {
+		saveIngest(t, "null", "list files")
+		call, hold := apply(t, "null")
+		if hold != nil || call.UserIntent != "list files" {
+			t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+		}
+	})
+	// The same record through the real ingest command.
+	t.Run("ingest command", func(t *testing.T) {
+		t.Setenv("JEV_GUARD_HOME", t.TempDir())
+		ingest(t, `{"session_id":"shared","turn_id":"","prompt":"show me the .env file"}`)
+		call, hold := apply(t, "99")
+		if hold != nil || call.UserIntent != "" {
+			t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+		}
+	})
+}
+
+// aliasFixture links work/data to the canonical transcript, plus a directory alias.
+func aliasFixture(t *testing.T) (home, canonical, work string) {
+	t.Helper()
+	home, canonical = agHome(t, "c1", userRecord("harmless"))
+	work = t.TempDir()
+	symlinkOrSkip(t, canonical, filepath.Join(work, "data"))
+	symlinkOrSkip(t, filepath.Dir(canonical), filepath.Join(work, "logdir"))
+	return home, canonical, work
+}
+
+// G1 reproduction: the exact bytes of a name are resolved, not a trimmed copy.
+func TestTranscriptAliasWithWhitespaceInName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not keep trailing spaces in file names")
+	}
+	// No plain "data" here: the trimmed name must not happen to be an alias too.
+	_, canonical := agHome(t, "c1", userRecord("harmless"))
+	work := t.TempDir()
+	symlinkOrSkip(t, canonical, filepath.Join(work, "data "))
+	symlinkOrSkip(t, canonical, filepath.Join(work, " lead"))
+	symlinkOrSkip(t, filepath.Dir(canonical), filepath.Join(work, "dir "))
+	abs := filepath.Join(work, "data ")
+
+	raw, err := json.Marshal(map[string]any{
+		"toolCall":       map[string]any{"name": "write_file", "args": map[string]any{"TargetFile": abs}},
+		"conversationId": "c1",
+		"workspacePaths": []string{work},
+		"cwd":            work,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := harness.ParsePayload(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]*harness.NormalizedToolCall{
+		"parsed write_file payload": parsed,
+		"relative trailing space":   {TargetPath: "data ", Cwd: work},
+		"relative leading space":    {TargetPath: " lead", Cwd: work},
+		"other argument":            {TargetPath: "ok.txt", Cwd: work, RawArgs: map[string]any{"source": "data "}},
+		"working directory":         {Command: "ls", RawArgs: map[string]any{"workdir": filepath.Join(work, "dir ")}},
+		"normalized cwd":            {Command: "ls", Cwd: filepath.Join(work, "dir ")},
+		"relative to spaced cwd":    {TargetPath: "transcript-new", Cwd: filepath.Join(work, "dir ")},
+		"double quoted word":        {Command: `cat "data "`, Cwd: work},
+		"single quoted word":        {Command: `cat 'data '`, Cwd: work},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(call); res == nil || res.Decision != harness.DecisionDeny {
+				t.Fatalf("expected DENY, got %+v", res)
+			}
+		})
+	}
+	// Trimmed forms are checked as well as exact ones.
+	symlinkOrSkip(t, canonical, filepath.Join(work, "plain"))
+	if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{TargetPath: "  plain  ", Cwd: work}); res == nil {
+		t.Error("trimmed form not checked")
+	}
+}
+
+// shellSpellings are words that a shell turns into the name "data" or the alias path.
+func shellSpellings(work string) map[string]string {
+	abs := filepath.Join(work, "d")
+	return map[string]string{
+		"backslash":           `d\ata`,
+		"absolute backslash":  abs + `\ata`,
+		"every backslash":     `\d\a\t\a`,
+		"line continuation":   "d\\\nata",
+		"adjacent quotes":     `d"a"t'a'`,
+		"empty quotes":        `d""a''ta`,
+		"double quoted start": `"d"ata`,
+		"escaped in double":   `"d"\a"ta"`,
+		"ansi hex":            `$'d\x61ta'`,
+		"ansi octal":          `$'d\141ta'`,
+		"ansi unicode":        `$'\u0064ata'`,
+		"ansi mixed":          `d$'a'ta`,
+		"locale quotes":       `$"data"`,
+	}
+}
+
+// G2 reproduction, then the rest of the class: spellings a shell resolves to the alias.
+func TestTranscriptAliasThroughShellSpelling(t *testing.T) {
+	_, _, work := aliasFixture(t)
+	if runtime.GOOS != "windows" {
+		symlinkOrSkip(t, filepath.Join(work, "data"), filepath.Join(work, "data "))
+	}
+	for name, word := range shellSpellings(work) {
+		t.Run("posix/"+name, func(t *testing.T) {
+			for _, command := range []string{"printf 'x\\n' > " + word, "cat " + word, "cp a " + word, "ls;cat " + word, "x>>" + word} {
+				if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: command, Cwd: work}); res == nil {
+					t.Errorf("%q not denied", command)
+				}
+			}
+		})
+	}
+	other := t.TempDir()
+	for name, call := range map[string]*harness.NormalizedToolCall{
+		"reproduction":            {Command: `printf 'forged\n' > ` + filepath.Join(work, "d") + `\ata`, Cwd: other},
+		"powershell backtick":     {Command: "Get-Content d`a`t`a", Cwd: work},
+		"powershell first":        {Command: "Set-Content `data x", Cwd: work},
+		"powershell in quotes":    {Command: "Get-Content \"d`at`a\"", Cwd: work},
+		"powershell doubled":      {Command: `Get-Content 'd''ata'`, Cwd: work},
+		"cmd caret":               {Command: "type d^a^t^a", Cwd: work},
+		"flag value":              {Command: `tool --file=d\ata`, Cwd: work},
+		"attached short flag":     {Command: `curl -od\ata x`, Cwd: work},
+		"attached absolute flag":  {Command: "curl -o" + filepath.Join(work, "data") + " x", Cwd: other},
+		"at file":                 {Command: `curl -d @d\ata x`, Cwd: work},
+		"comma list":              {Command: `tool --files=a,d\ata`, Cwd: work},
+		"nested sh -c":            {Command: `sh -c 'cat d\ata'`, Cwd: work},
+		"nested twice":            {Command: `bash -c "sh -c 'cat d\\ata'"`, Cwd: work},
+		"nested python":           {Command: `python3 -c "open('data','w')"`, Cwd: work},
+		"substitution argument":   {Command: `echo $(cat d\ata)`, Cwd: work},
+		"backtick substitution":   {Command: "echo `cat data`", Cwd: work},
+		"pwd variable":            {Command: "cat $PWD/data", Cwd: work},
+		"braced pwd":              {Command: `cat "${PWD}"/d\ata`, Cwd: work},
+		"argv list":               {RawArgs: map[string]any{"command": []any{"bash", "-lc", `cat d\ata`}}, Cwd: work},
+		"literal text quoted":     {Command: `cat ~/.gemini/anti"gravity"/brain/x`, Cwd: other},
+		"literal text escaped":    {Command: `cat logs/transcript.json\l`, Cwd: other},
+		"literal text sys":        {Command: `cat .system_gen'er'ated/x`, Cwd: other},
+		"literal text powershell": {Command: "cat anti`gravity/brain/x", Cwd: other},
+		"literal text in argv":    {RawArgs: map[string]any{"command": []any{"cat", "x/.system_generated/y"}}, Cwd: other},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(call); res == nil {
+				t.Fatalf("not denied: %q", call.Command)
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		t.Run("escaped trailing space", func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: `cat data\ `, Cwd: work}); res == nil {
+				t.Fatal("not denied")
+			}
+		})
+	}
+}
+
+// Prove the spellings are real: a real shell writes through each one, and the guard denies it.
+func TestShellSpellingsReachTheAliasInARealShell(t *testing.T) {
+	shell, err := exec.LookPath("bash")
+	if err != nil || runtime.GOOS == "windows" {
+		t.Skip("bash unavailable")
+	}
+	for name, word := range shellSpellings("/placeholder") {
+		if strings.HasPrefix(word, "/placeholder") {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			_, canonical, work := aliasFixture(t)
+			command := "printf forged >> " + word
+			if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: command, Cwd: work}); res == nil {
+				t.Errorf("guard did not deny %q", command)
+			}
+			run := exec.Command(shell, "--noprofile", "--norc", "-c", command)
+			run.Dir = work
+			run.Env = []string{"PATH=" + os.Getenv("PATH")}
+			if out, err := run.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			data, err := os.ReadFile(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "forged") {
+				t.Fatalf("spelling %q does not reach the alias, so it proves nothing", word)
+			}
+		})
+	}
+}
+
+// Paths outside the known argument names: nested, in a patch header, and URI spellings.
+func TestTranscriptAliasThroughOtherArguments(t *testing.T) {
+	_, _, work := aliasFixture(t)
+	symlinkOrSkip(t, filepath.Join(work, "data"), filepath.Join(work, "d%61ta"))
+	if err := os.Mkdir(filepath.Join(work, "x:"), 0o755); err != nil {
+		t.Skipf("cannot create name with a colon: %v", err)
+	}
+	abs := filepath.ToSlash(filepath.Join(work, "data"))
+	for name, call := range map[string]*harness.NormalizedToolCall{
+		"unknown argument":    {RawArgs: map[string]any{"output": "data"}, Cwd: work},
+		"nested argument":     {RawArgs: map[string]any{"edits": []any{map[string]any{"where": "data"}}}, Cwd: work},
+		"patch update":        {RawArgs: map[string]any{"input": "*** Begin Patch\n*** Update File: data\n@@\n+x\n*** End Patch\n"}, Cwd: work},
+		"patch add":           {RawArgs: map[string]any{"patch": "*** Add File: logdir/new\n+x\n"}, Cwd: work},
+		"patch move":          {RawArgs: map[string]any{"input": "*** Update File: a\n*** Move to: data\n"}, Cwd: work},
+		"patch in argv":       {RawArgs: map[string]any{"command": []any{"apply_patch", "*** Begin Patch\n*** Delete File: data\n"}}, Cwd: work},
+		"file uri one slash":  {TargetPath: "file:" + abs},
+		"file uri localhost":  {TargetPath: "file://localhost" + abs},
+		"encoded uri":         {TargetPath: "file://" + filepath.ToSlash(filepath.Join(work, "%64ata"))},
+		"literal percent uri": {TargetPath: "file://" + filepath.ToSlash(filepath.Join(work, "d%61ta"))},
+		"looks like a url":    {TargetPath: "x://../data", Cwd: work},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(call); res == nil {
+				t.Fatal("not denied")
+			}
+		})
+	}
+	// File content that merely mentions the path is not an access.
+	for name, call := range map[string]*harness.NormalizedToolCall{
+		"multi-line content": {TargetPath: "docs.md", Cwd: work, RawArgs: map[string]any{"TargetFile": "docs.md", "CodeContent": "see\n~/.gemini/antigravity/brain/c1/.system_generated/logs/transcript.jsonl\n"}},
+		"one-line edit":      {TargetPath: "docs.md", Cwd: work, RawArgs: map[string]any{"file_path": "docs.md", "old_string": "read ~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl first"}},
+		"word in content":    {TargetPath: "docs.md", Cwd: work, RawArgs: map[string]any{"file_path": "docs.md", "new_string": "the data"}},
+	} {
+		t.Run("allowed/"+name, func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(call); res != nil {
+				t.Fatalf("unexpected denial: %+v", res)
+			}
+		})
+	}
+}
+
+// Documented limits, pinned so docs/security-model.md stays honest: if one starts being
+// denied, update the docs' list.
+func TestTranscriptGuardDocumentedLimits(t *testing.T) {
+	_, _, work := aliasFixture(t)
+	// Cwd is the parent of work, so "data" alone resolves to nothing until the cd runs.
+	parent, base := filepath.Dir(work), filepath.Base(work)
+	for name, command := range map[string]string{
+		"variable set in the command": `f=da; printf x > "` + base + `/${f}ta"`,
+		"glob":                        `printf x > ` + base + `/d*`,
+		"brace expansion":             `printf x > ` + base + `/{d,}ata`,
+		"cd in the same command":      `cd ` + base + ` && printf x > data`,
+		"decoded at run time":         `printf x > "$(printf 'ZGF0YQ==' | base64 -d)"`,
+		"link made in the command":    `ln -s "$(printf dat)a" q; printf x > q`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: command, Cwd: parent}); res != nil {
+				t.Fatalf("now denied, so update the documented limits: %+v", res)
+			}
+		})
 	}
 }

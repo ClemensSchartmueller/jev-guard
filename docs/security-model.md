@@ -56,14 +56,24 @@ Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguar
 
 The Antigravity transcript gets the same `DENY`, because an agent that could write it could forge your authorization. This covers any path into `.gemini/antigravity/brain/<id>/.system_generated/` in the target, another path argument, or a working directory, in every agent. Each path is checked as written and as the filesystem resolves it, so a symlink to the transcript or to a parent directory is denied too, including when the final file does not exist yet. Other files under `brain/<id>/`, such as `task.md`, are not affected for file tools. This check also runs when `fastpath_enabled` is false.
 
-Shell commands get two checks. Any command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl` is denied; this is broad on purpose, so an unrelated `cat transcript.jsonl` is denied too. Each word of the command is also resolved, with `~` and `$HOME` expanded, and is denied if it leads anywhere under `.gemini/antigravity/brain`. A command run from a working directory under there is denied as well.
+Shell commands get two checks, in every agent:
 
-**This does not make shell commands safe.** `jev-guard` reads a command's text and does not run a shell, so it cannot see these, and such a command goes on to the remaining checks:
+- **Text.** Any command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl` is denied. This is broad on purpose, so an unrelated `cat transcript.jsonl` is denied too.
+- **Words.** Each word is read the way a shell would read it, then checked against the same text and resolved, and is denied if it leads anywhere under `.gemini/antigravity/brain`. The shell that will run the command is unknown, so the command is read under POSIX rules (backslashes, single and double quotes, adjacent segments, `$'...'`, `$"..."`), PowerShell rules (backtick), and cmd.exe rules (caret), and every reading is checked. `~`, `$HOME`, `$PWD`, and variables set in the hook's environment are expanded. Words are also split at operators, `=`, `,`, and `:`, and values attached to a short flag (`-ofile`) or an `@` are checked. Quoted strings are read as commands too, for `sh -c '...'`, up to 3 levels deep. A command list such as `["bash", "-lc", "..."]` is treated the same way.
+- **Other arguments.** File names in `apply_patch` headers count as paths. Any other one-line argument counts if it resolves into the transcript directory and its parent directory exists, so file content that only mentions the path is not denied.
 
-- A path computed when the command runs, such as a variable other than `$HOME`, a substitution, a decoded string, or a script file.
-- A glob that matches a symlink, such as `cat work/d*`.
-- A symlink created earlier in the same command, or relative paths after a `cd` in the same command.
+A command run from a working directory under the brain directory is denied as well.
+
+**This does not make shell commands safe.** `jev-guard` reads a command's text and does not run a shell. These are not seen, and such a command goes on to the remaining checks:
+
+- A path computed when the command runs: a variable set in the command or differing from the hook's environment, a substitution's output, a decoded string, or a path built inside a script or interpreter (`f=da; cat "${f}ta"`).
+- Globs and brace expansion (`cat d*`, `cat {d,}ata`).
+- A symlink made earlier in the same command.
+- Relative paths after a `cd` in the same command (`cd work && cat data`), when the directory itself does not lead under the brain directory.
 - A hard link to the transcript, which looks like an ordinary file.
+- A multi-line path in an argument other than the known path arguments.
+- PowerShell control escapes such as `` `n ``, which are read as the plain letter, and other shells' own quoting rules, such as `fish`.
+- Windows name rewriting: trailing dots and spaces, 8.3 short names, and `::$DATA` streams. These depend on the file system and are not modeled.
 
 So an agent with shell access can still forge a transcript this way if the command gets through the remaining checks, and transcript intent is only as strong as those checks. If this matters for your setup, set `antigravity_transcript_intent` to `false`.
 
@@ -113,7 +123,7 @@ This feature is optional. Disable it with `"context_awareness_enabled": false` i
 | **Stop/abort prompt** | Holds until the TTL expires or the next prompt | Holds until the TTL expires or the next prompt | Holds while it is the latest user message |
 | **Turn off** | `context_awareness_enabled` | `context_awareness_enabled` | `context_awareness_enabled` or `antigravity_transcript_intent` |
 
-**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. If either the stored session or the call has a string `turn_id`, both must have the same one, or the call gets no intent. A call without one therefore cannot pick up a keyed session's prompt, whichever agent sent it. A recorded abort still holds across any such mismatch. A payload with a string `turn_id` is reported as harness `codex`; other Codex payloads are reported as `claude-code`.
+**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. If either the stored session or the call has a string `turn_id`, both must have the same one, or the call gets no intent. A `turn_id` that names no turn, such as an empty string or a JSON object, never gives intent on either side; `null` counts as no `turn_id`. A call without one therefore cannot pick up a keyed session's prompt, whichever agent sent it. A recorded abort still holds across any such mismatch. A payload with a string `turn_id` is reported as harness `codex`; other Codex payloads are reported as `claude-code`.
 
 **Antigravity.** The transcript is `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`, and the intent is its last `USER_INPUT` / `USER_EXPLICIT` record. The payload's `transcriptPath` is used only if it resolves to exactly that location for the payload's conversation ID and is a regular file. At most the last 8 MB are scanned, and text over 8 KB is unusable.
 

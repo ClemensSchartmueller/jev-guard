@@ -5,6 +5,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 
 	"jev-guard/pkg/harness"
@@ -12,6 +14,15 @@ import (
 
 // maxSymlinkHops bounds symlink following. A chain this long fails in the OS too.
 const maxSymlinkHops = 64
+
+// maxPathLikeBytes is longer than any usable path, so a longer argument is treated as content.
+const maxPathLikeBytes = 4096
+
+// commandArgKeys hold commands, as a string or as an argument list.
+var commandArgKeys = []string{"CommandLine", "command", "cmd", "script"}
+
+// patchFileHeader finds the files an apply_patch body names.
+var patchFileHeader = regexp.MustCompile(`(?m)^\*\*\* (?:Add File|Update File|Delete File|Move to): (.*)$`)
 
 // homePrefixes are spellings of the home directory that a tool or shell expands itself.
 var homePrefixes = []string{"~", "$HOME", "${HOME}", "$env:HOME", "$env:USERPROFILE", "%USERPROFILE%", "%HOME%"}
@@ -38,59 +49,136 @@ func CheckTranscriptTampering(call *harness.NormalizedToolCall) *harness.Evaluat
 // transcriptTamperingReason protects the transcript that Antigravity prompt intent is
 // read from: an agent that could write it could forge the user's authorization. Every path
 // input is checked as written and as the filesystem would resolve it, so a symlink cannot
-// hide the transcript. A path computed when a shell command runs is out of reach here.
+// hide the transcript. Inputs are resolved from their exact bytes; any trimmed or decoded
+// form is checked in addition, never instead. A path computed when a shell command runs is
+// out of reach here (see the limits in docs/security-model.md).
 func transcriptTamperingReason(call *harness.NormalizedToolCall) string {
+	const directReason = "Direct access to Antigravity conversation transcript/system state is prohibited"
+	const commandReason = "Access to Antigravity conversation transcript/system state via command is prohibited"
+
 	dirs := callWorkingDirs(call)
 	targets := append([]string{call.TargetPath}, dirs...)
 	for _, key := range harness.PathArgKeys {
 		targets = append(targets, stringValues(call.RawArgs[key])...)
 	}
+	args := allStrings(call.RawArgs)
+	for _, text := range append(args, call.Command) {
+		for _, match := range patchFileHeader.FindAllStringSubmatch(text, -1) {
+			targets = append(targets, match[1])
+		}
+	}
 	for _, target := range targets {
 		for _, form := range pathForms(target, dirs) {
 			if isAntigravitySystemPath(form, "") {
-				return "Direct access to Antigravity conversation transcript/system state is prohibited"
+				return directReason
 			}
 		}
 	}
 
-	// Commands are matched more broadly on purpose: shell globs and variables
-	// (e.g. ~/.gemini/antigravity/brain/*/.sys*/logs/t*) cannot be parsed reliably.
-	lowerCommand := strings.ToLower(normalizePathSeparators(call.Command))
-	if strings.Contains(lowerCommand, "antigravity/brain") || strings.Contains(lowerCommand, ".system_generated") || strings.Contains(lowerCommand, "transcript.jsonl") {
-		return "Access to Antigravity conversation transcript/system state via command is prohibited"
-	}
-	// A word that resolves anywhere under the brain directory gets the same answer as
-	// spelling that path out, so a link to a conversation directory cannot be moved or replaced.
-	for _, token := range commandPathTokens(call.Command) {
-		for _, form := range pathForms(token, dirs) {
-			if strings.Contains(strings.ToLower(normalizePathSeparators(form)), "/.gemini/antigravity/brain") {
-				return "Access to Antigravity conversation transcript/system state via command is prohibited"
+	// Any other argument may be a path under a name we do not know, or just text that
+	// mentions one. It only counts when it is one line and leads somewhere real.
+	for _, value := range args {
+		if len(value) > maxPathLikeBytes || strings.ContainsAny(value, "\r\n") {
+			continue
+		}
+		for _, form := range pathForms(value, dirs) {
+			if isAntigravitySystemPath(form, "") && parentExists(form) {
+				return directReason
 			}
 		}
 	}
 
+	commands := []string{call.Command}
+	for _, key := range commandArgKeys {
+		commands = append(commands, stringValues(call.RawArgs[key])...)
+	}
+	for _, command := range commands {
+		// Matched broadly on purpose: shell globs and variables
+		// (e.g. ~/.gemini/antigravity/brain/*/.sys*/logs/t*) cannot be parsed reliably.
+		if namesTranscriptInText(command) {
+			return commandReason
+		}
+		for _, word := range shellWords(command) {
+			if namesTranscriptInText(word) {
+				return commandReason
+			}
+			// A word that resolves anywhere under the brain directory gets the same answer as
+			// spelling that path out, so a link to a conversation directory cannot be moved or replaced.
+			for _, form := range pathForms(word, dirs) {
+				if strings.Contains(strings.ToLower(normalizePathSeparators(form)), "/.gemini/antigravity/brain") {
+					return commandReason
+				}
+			}
+		}
+	}
 	return ""
+}
+
+func namesTranscriptInText(text string) bool {
+	lower := strings.ToLower(normalizePathSeparators(text))
+	return strings.Contains(lower, "antigravity/brain") || strings.Contains(lower, ".system_generated") || strings.Contains(lower, "transcript.jsonl")
+}
+
+func parentExists(form string) bool {
+	_, err := os.Lstat(filepath.Dir(form))
+	return err == nil
 }
 
 // callWorkingDirs returns the directories relative paths may be resolved against: the
 // normalized one and any other working-directory argument, which the tool may honor instead.
+// Exact values come first; a value that differs when trimmed is also listed trimmed.
 func callWorkingDirs(call *harness.NormalizedToolCall) []string {
 	var dirs []string
-	if cwd := strings.TrimSpace(call.Cwd); cwd != "" {
-		dirs = append(dirs, cwd)
+	add := func(dir string) {
+		for _, d := range dirs {
+			if d == dir {
+				return
+			}
+		}
+		if strings.TrimSpace(dir) != "" {
+			dirs = append(dirs, dir)
+		}
 	}
+	add(call.Cwd)
+	add(strings.TrimSpace(call.Cwd))
+	bases := append([]string(nil), dirs...)
 	for _, key := range harness.CwdArgKeys {
 		for _, value := range stringValues(call.RawArgs[key]) {
-			if value = strings.TrimSpace(value); value == "" {
-				continue
+			for _, form := range []string{value, strings.TrimSpace(value)} {
+				if filepath.IsAbs(form) || len(bases) == 0 {
+					add(form)
+					continue
+				}
+				for _, base := range bases {
+					add(base + string(filepath.Separator) + form)
+				}
 			}
-			if base := strings.TrimSpace(call.Cwd); base != "" && !filepath.IsAbs(value) {
-				value = base + string(filepath.Separator) + value
-			}
-			dirs = append(dirs, value)
 		}
 	}
 	return dirs
+}
+
+// allStrings returns every string inside a tool's arguments, at any depth.
+func allStrings(raw interface{}) []string {
+	switch v := raw.(type) {
+	case string:
+		return []string{v}
+	case []string:
+		return v
+	case []interface{}:
+		var out []string
+		for _, item := range v {
+			out = append(out, allStrings(item)...)
+		}
+		return out
+	case map[string]interface{}:
+		var out []string
+		for _, item := range v {
+			out = append(out, allStrings(item)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func stringValues(raw interface{}) []string {
@@ -111,43 +199,104 @@ func stringValues(raw interface{}) []string {
 	return nil
 }
 
-// pathForms returns p as written and resolved against each working directory, without
-// requiring it to exist. Absolute forms are cleaned lexically by the caller's matcher.
+// pathVariants returns p's exact bytes first, then any other spelling a tool or shell may
+// mean by it. Each is an addition: a form never replaces the one it came from.
+func pathVariants(p string) []string {
+	variants := []string{p}
+	add := func(v string) {
+		for _, existing := range variants {
+			if existing == v {
+				return
+			}
+		}
+		if v != "" {
+			variants = append(variants, v)
+		}
+	}
+	add(strings.TrimSpace(p))
+	for _, v := range append([]string(nil), variants...) {
+		if rest, ok := fileURIPath(v); ok {
+			add(rest)
+			if decoded, err := url.PathUnescape(rest); err == nil {
+				add(decoded)
+			}
+		}
+	}
+	for _, v := range append([]string(nil), variants...) {
+		add(expandHome(v))
+	}
+	return variants
+}
+
+// fileURIPath returns the path of a file: URI, in any of the spellings tools accept.
+func fileURIPath(p string) (string, bool) {
+	lower := strings.ToLower(p)
+	switch {
+	case strings.HasPrefix(lower, "file://localhost/"):
+		return p[len("file://localhost"):], true
+	case isFileURI(p):
+		return extractFilePathFromURI(p), true
+	case strings.HasPrefix(lower, "file:"):
+		return p[len("file:"):], true
+	}
+	return "", false
+}
+
+// pathForms returns p in every spelling, as written and resolved against each working
+// directory, without requiring it to exist.
 func pathForms(p string, dirs []string) []string {
-	p = strings.TrimSpace(p)
-	if p == "" || isURL(p) {
+	if strings.TrimSpace(p) == "" {
 		return nil
 	}
-	if isFileURI(p) {
-		p = extractFilePathFromURI(p)
-		if decoded, err := url.PathUnescape(p); err == nil {
-			p = decoded
-		}
-	}
-	forms := []string{p}
-	p = expandHome(p)
-	if filepath.IsAbs(p) {
-		return append(forms, resolvedForms(p)...)
-	}
 	if len(dirs) == 0 {
-		if wd, err := os.Getwd(); err == nil {
-			dirs = []string{wd}
-		}
+		dirs = []string{""}
 	}
+	var forms []string
 	for _, dir := range dirs {
-		// Deliberately not filepath.Join, which would remove ".." before symlinks are seen.
-		joined := dir + string(filepath.Separator) + p
-		forms = append(forms, normalizePathSeparators(joined))
-		forms = append(forms, resolvedForms(joined)...)
+		for _, variant := range pathVariants(p) {
+			forms = append(forms, variant)
+			candidates := []string{variant}
+			if strings.ContainsRune(variant, '$') {
+				candidates = append(candidates, expandVariables(variant, dir))
+			}
+			for _, candidate := range candidates {
+				if !filepath.IsAbs(candidate) && dir != "" {
+					// Deliberately not filepath.Join, which would remove ".." before symlinks are seen.
+					candidate = dir + string(filepath.Separator) + candidate
+					forms = append(forms, normalizePathSeparators(candidate))
+				}
+				forms = append(forms, resolvedForms(candidate)...)
+			}
+		}
 	}
 	return forms
 }
 
-func resolvedForms(abs string) []string {
-	forms := []string{walkSymlinks(abs)}
-	// EvalSymlinks also handles what Lstat does not report as a symlink, such as Windows junctions.
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		forms = append(forms, resolved)
+// expandVariables applies the hook's environment, which approximates the shell's.
+func expandVariables(p, dir string) string {
+	return os.Expand(p, func(name string) string {
+		if name == "PWD" && dir != "" {
+			return dir
+		}
+		return os.Getenv(name)
+	})
+}
+
+func resolvedForms(p string) []string {
+	if !filepath.IsAbs(p) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil
+		}
+		p = wd + string(filepath.Separator) + p
+	}
+	forms := []string{walkSymlinks(p)}
+	// Windows junctions are not reported as symlinks by Lstat. Elsewhere this would only
+	// repeat the walk, on a path checked for every word of every command.
+	if runtime.GOOS == "windows" {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			forms = append(forms, resolved)
+		}
 	}
 	return forms
 }
@@ -159,6 +308,7 @@ func walkSymlinks(p string) string {
 	volume := filepath.VolumeName(p)
 	current := volume + string(filepath.Separator)
 	pending := splitPath(p[len(volume):])
+	missing := false
 	for hops := 0; len(pending) > 0; {
 		component := pending[0]
 		pending = pending[1:]
@@ -167,10 +317,16 @@ func walkSymlinks(p string) string {
 			continue
 		case "..":
 			current = filepath.Dir(current)
+			missing = false
 			continue
 		}
 		next := filepath.Join(current, component)
+		if missing {
+			current = next
+			continue
+		}
 		info, err := os.Lstat(next)
+		missing = err != nil
 		if err != nil || info.Mode()&os.ModeSymlink == 0 || hops >= maxSymlinkHops {
 			current = next
 			continue
@@ -209,21 +365,6 @@ func expandHome(p string) string {
 		}
 	}
 	return p
-}
-
-// commandPathTokens lists the words of a shell command that may name a path, keeping
-// quoted spans together and also splitting on operators and flag values. It is not a shell
-// evaluator: it cannot see variables, globs, substitutions, or links made while the command runs.
-func commandPathTokens(command string) []string {
-	var tokens []string
-	for _, arg := range sensitiveCommandArguments(command) {
-		tokens = append(tokens, arg)
-		pieces := strings.FieldsFunc(arg, func(r rune) bool { return strings.ContainsRune(";|&<>()`=", r) })
-		if len(pieces) > 1 || (len(pieces) == 1 && pieces[0] != arg) {
-			tokens = append(tokens, pieces...)
-		}
-	}
-	return tokens
 }
 
 // isAntigravitySystemPath reports whether p, joined with cwd when relative and lexically
