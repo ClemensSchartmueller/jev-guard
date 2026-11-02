@@ -43,7 +43,7 @@ Without `--agent`, `init` prints the agents it detected. With `--scope user`, it
 
 `init` preserves existing hook configuration, and running it again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they work without a `PATH` change.
 
-`doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation.
+`doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation. For Claude Code it also reports the `PostToolUse` taint hook and the effective `taint_mode`. A missing taint hook is a `[WARN]`.
 
 `version`/`-v` and `help`/`-h` also work as aliases for `--version` and `--help`.
 
@@ -129,5 +129,6 @@ jev-guard status                   # also: jev-guard cache status, jev-guard cac
 - `ingest` sends its confirmation to stderr, so it never pollutes the user's prompt.
 - `end-turn` clears only that session's intent, prints nothing to stdout, and always exits 0. A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it. A session file that cannot be read is also kept, since its abort state is unknown.
 - `clear-intent` without `--session`, a stdin payload, or `--all` prints usage and exits 1.
-- `status` lists unreadable session files together with their error.
+- `status` lists unreadable session files together with their error, and shows when a session is tainted by untrusted tool output, with the tool name and time.
+- The bare `jev-guard` command also handles Claude Code `PostToolUse` payloads, which taint the session. It never gates them.
 - Aliases: `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.

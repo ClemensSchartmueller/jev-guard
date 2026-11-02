@@ -332,7 +332,7 @@ func TestSession_TempFileCleanup(t *testing.T) {
 	if err := ClearAllSessions(); err != nil {
 		t.Fatalf("ClearAllSessions failed: %v", err)
 	}
-	entries, _ := os.ReadDir(sessionsDir)
+	entries := entriesExceptLocks(t, sessionsDir)
 	if len(entries) != 0 {
 		t.Errorf("expected sessionsDir to be empty after ClearAllSessions, got %d files", len(entries))
 	}
@@ -378,10 +378,23 @@ func TestSaveSession_RetriesThenCleansUp(t *testing.T) {
 	if fmt.Sprint(sleeps) != fmt.Sprint(want) {
 		t.Fatalf("backoff sequence = %v, want %v", sleeps, want)
 	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "sessions"))
+	entries := entriesExceptLocks(t, filepath.Join(dir, "sessions"))
 	if len(entries) != 0 {
 		t.Fatalf("expected empty sessions dir, got %d entries", len(entries))
 	}
+}
+
+// entriesExceptLocks lists dir without the persistent session lock files.
+func entriesExceptLocks(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".lock") {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 func TestSaveSession_PermanentRenameErrorNotRetried(t *testing.T) {

@@ -12,6 +12,10 @@ import (
 
 var initAgents = []string{"claude", "codex", "antigravity"}
 
+// claudePostToolUseMatcher selects the Claude Code tools whose output is
+// untrusted external content.
+const claudePostToolUseMatcher = "WebFetch|WebSearch|mcp__.*"
+
 func (r *Runner) handleInit(args []string) (Action, int) {
 	agent, scope := "", "project"
 	for i := 0; i < len(args); i++ {
@@ -238,6 +242,12 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 		changed = changed || c
 		c, err = ensureHook(section, "Stop", "", command+" end-turn", false)
+		if err != nil {
+			return false, err
+		}
+		changed = changed || c
+		// PostToolUse taints the session after untrusted output (web, MCP) enters it.
+		c, err = ensureHook(section, "PostToolUse", claudePostToolUseMatcher, command, false)
 		if err != nil {
 			return false, err
 		}
