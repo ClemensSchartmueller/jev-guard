@@ -370,8 +370,9 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 }
 
 func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {
-	if callTurnKey != "" {
-		// Keyed (Codex) calls only accept intent ingested in the exact same turn.
+	if callTurnKey != "" || sessionTurnKey != "" {
+		// A string key on either side requires the same key on both. Keyed sessions
+		// normally store numeric turn 0, which the numeric rule below would accept for any call.
 		if sessionTurnKey != callTurnKey {
 			return ""
 		}

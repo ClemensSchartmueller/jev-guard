@@ -344,3 +344,66 @@ func TestEvalDeniesTranscriptAccessWithFastpathDisabled(t *testing.T) {
 	rep := e.report("--tool", "view_file", "--target", target, "--offline", "--cwd", e.workspace())
 	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
 }
+
+// A string turn key on either side requires an identical key on the other. Codex sessions
+// normally store numeric turn 0, which the numeric rule would treat as "matches anything".
+func TestTurnKeyRequiredOnBothSides(t *testing.T) {
+	const prompt = "delete build"
+	payload := func(turn string) []byte {
+		body := `{"session_id":"shared","tool_name":"Bash","tool_input":{"command":"rm -rf build"},"cwd":` + jsonString(t.TempDir())
+		if turn != "" {
+			body += `,"turn_id":` + turn
+		}
+		return []byte(body + `}`)
+	}
+	for _, tc := range []struct {
+		name       string
+		stored     session.SessionState
+		callTurn   string
+		wantIntent string
+	}{
+		{name: "stored key, numeric call without key", stored: session.SessionState{TurnKey: "old-codex-turn"}, callTurn: "99"},
+		{name: "stored key, call without any turn", stored: session.SessionState{TurnKey: "old-codex-turn"}},
+		{name: "stored numeric turn, call with key", stored: session.SessionState{TurnID: 7}, callTurn: `"turn-A"`},
+		{name: "stored no turn, call with key", stored: session.SessionState{}, callTurn: `"turn-A"`},
+		{name: "different keys", stored: session.SessionState{TurnKey: "turn-A"}, callTurn: `"turn-B"`},
+		{name: "same key", stored: session.SessionState{TurnKey: "turn-A"}, callTurn: `"turn-A"`, wantIntent: prompt},
+		{name: "same numeric turn", stored: session.SessionState{TurnID: 7}, callTurn: "7", wantIntent: prompt},
+		{name: "no keys, no call turn", stored: session.SessionState{TurnID: 7}, wantIntent: prompt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			state := tc.stored
+			state.SessionID, state.Prompt = "shared", prompt
+			if err := session.SaveSession(&state); err != nil {
+				t.Fatal(err)
+			}
+			call, err := harness.ParsePayload(payload(tc.callTurn))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hold := applySessionContext(call, config.DefaultConfig(), io.Discard); hold != nil {
+				t.Fatalf("unexpected hold: %+v", hold)
+			}
+			if call.UserIntent != tc.wantIntent {
+				t.Fatalf("UserIntent = %q, want %q", call.UserIntent, tc.wantIntent)
+			}
+		})
+		t.Run(tc.name+"/abort still holds", func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			state := tc.stored
+			state.SessionID, state.Prompt = "shared", "stop"
+			if err := session.SaveSession(&state); err != nil {
+				t.Fatal(err)
+			}
+			call, err := harness.ParsePayload(payload(tc.callTurn))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hold := applySessionContext(call, config.DefaultConfig(), io.Discard)
+			if hold == nil || hold.Source != sourceSessionAborted || call.UserIntent != "" {
+				t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
+			}
+		})
+	}
+}

@@ -144,7 +144,8 @@ func TestResolveUserIntent(t *testing.T) {
 		{name: "matching turn keys", callTurnKey: "t1", sessionKey: "t1", prompt: "p", expected: "p"},
 		{name: "different turn keys", callTurnKey: "t2", sessionKey: "t1", prompt: "p", expected: ""},
 		{name: "call key but session has none", callTurnKey: "t1", prompt: "p", expected: ""},
-		{name: "session key only (Claude call)", sessionKey: "t1", prompt: "p", expected: "p"},
+		{name: "session key but call has none", sessionKey: "t1", prompt: "p", expected: ""},
+		{name: "session key but call has only a number", callTurnID: 99, sessionKey: "t1", prompt: "p", expected: ""},
 	}
 
 	for _, tc := range tests {
