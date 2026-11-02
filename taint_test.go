@@ -17,6 +17,15 @@ import (
 	"jev-guard/pkg/session"
 )
 
+// A test that runs the gate must use runGateWithStdin, which injects temp paths.
+// Without this, it would read the real user configuration, because config paths
+// come from the OS account (user.Current), not from $HOME.
+func init() {
+	gateLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
+		panic("gate test ran without runGateWithStdin: it would read the real user configuration")
+	}
+}
+
 func taintConfig(mode string) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.TaintMode = mode
@@ -230,9 +239,16 @@ func TestTraceGateEvaluation_TaintEscalatesFastpathAllow(t *testing.T) {
 	}
 }
 
-// runGateWithStdin runs the hook entry point on input.
+// runGateWithStdin runs the hook entry point on input, with the real config
+// loader pointed at an empty temp user config and trust registry.
 func runGateWithStdin(t *testing.T, input string, initErr error) int {
 	t.Helper()
+	profile := t.TempDir()
+	origLoad := gateLoadConfig
+	gateLoadConfig = func(call *harness.NormalizedToolCall) *config.Config {
+		return config.LoadConfigForCallWithPaths(call, filepath.Join(profile, ".jevguard.json"), filepath.Join(profile, "trusted-project-configs.json"))
+	}
+	defer func() { gateLoadConfig = origLoad }()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)

@@ -38,6 +38,10 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// gateLoadConfig is a seam so tests can inject configuration; the user config path is
+// deliberately not overridable through the environment.
+var gateLoadConfig = config.LoadConfigForCall
+
 // runGate orchestrates ingestion, local fast-path, semantic evaluation, and response delivery.
 // initErr is a user config initialization failure, which holds PreToolUse calls.
 func runGate(initErr error) int {
@@ -50,7 +54,7 @@ func runGate(initErr error) int {
 	// gated or answered as a pending PreToolUse call. It is dispatched from
 	// its envelope, before the tool arguments are parsed.
 	if post := parsePostToolUseEnvelope(inputBytes); post != nil {
-		cfg := config.LoadConfigForCall(post)
+		cfg := gateLoadConfig(post)
 		for _, diagnostic := range cfg.Diagnostics {
 			fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 		}
@@ -65,7 +69,7 @@ func runGate(initErr error) int {
 		return handleFatalError(nil, "Failed to parse tool call payload", err)
 	}
 
-	cfg := config.LoadConfigForCall(call)
+	cfg := gateLoadConfig(call)
 	for _, diagnostic := range cfg.Diagnostics {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
