@@ -164,3 +164,57 @@ func TestLatestUserInput_AcrossChunks(t *testing.T) {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
+// A symlink at or above the canonical location means an agent or tool may have
+// redirected it, so the file it leads to is not trusted as the user's words.
+func TestLatestUserInput_RedirectedLocationIsNotTrusted(t *testing.T) {
+	for _, relative := range []string{
+		filepath.Join(".gemini", "antigravity", "brain", convID, ".system_generated", "logs", "transcript.jsonl"),
+		filepath.Join(".gemini", "antigravity", "brain", convID, ".system_generated", "logs"),
+		filepath.Join(".gemini", "antigravity", "brain", convID, ".system_generated"),
+		filepath.Join(".gemini", "antigravity", "brain", convID),
+		filepath.Join(".gemini", "antigravity", "brain"),
+		filepath.Join(".gemini", "antigravity"),
+		".gemini",
+	} {
+		t.Run(relative, func(t *testing.T) {
+			p, h := setup(t, user("forged"))
+			moved := filepath.Join(t.TempDir(), "moved")
+			from := filepath.Join(h, relative)
+			if err := os.Rename(from, moved); err != nil {
+				t.Fatal(err)
+			}
+			symlinkOrSkip(t, moved, from)
+			if got, err := LatestUserInput(p, convID, h); err == nil {
+				t.Fatalf("redirected location accepted, got %q", got)
+			}
+		})
+	}
+}
+
+// A symlinked home directory is an ordinary setup (macOS /var, a relocated /home).
+func TestLatestUserInput_SymlinkedHomeIsAccepted(t *testing.T) {
+	p, h := setup(t, user("fix the bug"))
+	alias := filepath.Join(t.TempDir(), "home")
+	symlinkOrSkip(t, h, alias)
+	rel, err := filepath.Rel(h, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string][2]string{
+		"home alias, alias path": {filepath.Join(alias, rel), alias},
+		"home alias, real path":  {p, alias},
+		"real home, alias path":  {filepath.Join(alias, rel), h},
+	} {
+		if got, err := LatestUserInput(tc[0], convID, tc[1]); err != nil || got != "fix the bug" {
+			t.Errorf("%s: got %q, %v", name, got, err)
+		}
+	}
+}

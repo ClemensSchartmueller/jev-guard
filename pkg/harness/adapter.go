@@ -169,8 +169,7 @@ func extractCwd(args map[string]interface{}) string {
 		return ""
 	}
 
-	cwdKeys := []string{"Cwd", "cwd", "working_dir", "workingDir", "workdir", "directory"}
-	for _, key := range cwdKeys {
+	for _, key := range CwdArgKeys {
 		if val, exists := args[key]; exists {
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
 				return strings.TrimSpace(strVal)
@@ -179,6 +178,9 @@ func extractCwd(args map[string]interface{}) string {
 	}
 	return ""
 }
+
+// CwdArgKeys lists tool argument keys treated as the working directory, in priority order.
+var CwdArgKeys = []string{"Cwd", "cwd", "working_dir", "workingDir", "workdir", "directory"}
 
 // PathArgKeys lists tool argument keys treated as filesystem/URL targets, in
 // priority order. extractCommandAndTarget picks the first non-empty one.

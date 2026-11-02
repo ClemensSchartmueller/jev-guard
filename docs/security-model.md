@@ -54,7 +54,18 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 
 Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied.
 
-The Antigravity transcript gets the same `DENY`, because an agent that could write it could forge your authorization. This covers any path into `.gemini/antigravity/brain/<id>/.system_generated/` in the target, another path argument, or the working directory, and any shell command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl`, in every agent. The command match is broad on purpose, since globs and variables cannot be parsed reliably, so an unrelated `cat transcript.jsonl` is denied too. Other files under `brain/<id>/`, such as `task.md`, are not affected. This check also runs when `fastpath_enabled` is false.
+The Antigravity transcript gets the same `DENY`, because an agent that could write it could forge your authorization. This covers any path into `.gemini/antigravity/brain/<id>/.system_generated/` in the target, another path argument, or a working directory, in every agent. Each path is checked as written and as the filesystem resolves it, so a symlink to the transcript or to a parent directory is denied too, including when the final file does not exist yet. Other files under `brain/<id>/`, such as `task.md`, are not affected for file tools. This check also runs when `fastpath_enabled` is false.
+
+Shell commands get two checks. Any command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl` is denied; this is broad on purpose, so an unrelated `cat transcript.jsonl` is denied too. Each word of the command is also resolved, with `~` and `$HOME` expanded, and is denied if it leads anywhere under `.gemini/antigravity/brain`. A command run from a working directory under there is denied as well.
+
+**This does not make shell commands safe.** `jev-guard` reads a command's text and does not run a shell, so it cannot see these, and such a command goes on to the remaining checks:
+
+- A path computed when the command runs, such as a variable other than `$HOME`, a substitution, a decoded string, or a script file.
+- A glob that matches a symlink, such as `cat work/d*`.
+- A symlink created earlier in the same command, or relative paths after a `cd` in the same command.
+- A hard link to the transcript, which looks like an ordinary file.
+
+So an agent with shell access can still forge a transcript this way if the command gets through the remaining checks, and transcript intent is only as strong as those checks. If this matters for your setup, set `antigravity_transcript_intent` to `false`.
 
 ### Trusted commands and read tools
 
@@ -109,6 +120,7 @@ This feature is optional. Disable it with `"context_awareness_enabled": false` i
 This format is undocumented and can change, so the feature fails closed:
 
 - If the latest user record is unusable (empty, not text, malformed, truncated, or over the size cap), the call has no intent, and older messages and the session cache are not used as a fallback. It is gated as if no intent existed, and a diagnostic goes to stderr.
+- If the canonical location is redirected, the call also has no intent, and the file it leads to is not read. That means the location, or any directory between it and your home directory, is a symlink (or on Windows, a junction). This includes a `.gemini` directory symlinked from a dotfiles repository, which then gets no transcript intent. Your home directory itself may be a symlink.
 - If the transcript is unavailable (wrong path, unreadable, or no user record in the scanned window), the transcript adds nothing. Only a turn-matched intent from an explicit `jev-guard ingest` can still apply.
 
 Limits:

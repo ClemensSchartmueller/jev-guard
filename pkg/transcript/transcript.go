@@ -29,6 +29,10 @@ var ErrNoUserInput = errors.New("no user input found in transcript")
 // ErrUnusableUserInput means the latest explicit user message exists but carries no usable text (empty, non-text, missing, malformed, truncated, or over the size cap).
 var ErrUnusableUserInput = errors.New("latest user input in transcript has no usable text")
 
+// ErrUntrustedLocation means the canonical transcript location is a symlink or lies behind one
+// below the home directory, so the file it leads to may not be what Antigravity wrote.
+var ErrUntrustedLocation = errors.New("transcript location is redirected")
+
 var conversationIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 type record struct {
@@ -39,8 +43,9 @@ type record struct {
 }
 
 // LatestUserInput returns the content of the last USER_INPUT/USER_EXPLICIT record
-// in the transcript at path. The path must be the canonical transcript location of
-// conversationID under home, otherwise an error is returned. If the latest explicit
+// in the transcript at path. The path must resolve to the canonical transcript location of
+// conversationID under home, otherwise an error is returned. No component of that location
+// below home may be a symlink (ErrUntrustedLocation). If the latest explicit
 // user record has no usable text, ErrUnusableUserInput (possibly wrapped) is returned
 // and older messages are never used.
 func LatestUserInput(path, conversationID, home string) (string, error) {
@@ -57,8 +62,9 @@ func LatestUserInput(path, conversationID, home string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat transcript: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("transcript is not a regular file")
+	// The location may have been swapped between validation and open.
+	if current, err := os.Lstat(resolved); err != nil || !os.SameFile(info, current) {
+		return "", fmt.Errorf("transcript changed while opening: %w", ErrUntrustedLocation)
 	}
 	return scanBackwards(f, info.Size())
 }
@@ -70,26 +76,30 @@ func validatePath(path, conversationID, home string) (string, error) {
 	if strings.TrimSpace(path) == "" || strings.TrimSpace(home) == "" {
 		return "", errors.New("transcript path or home directory is empty")
 	}
-	expected := filepath.Join(home, ".gemini", "antigravity", "brain", conversationID, ".system_generated", "logs", "transcript.jsonl")
+	// Home itself may be a symlink (macOS /var, a relocated /home); nothing below it may be.
+	expected, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	components := []string{".gemini", "antigravity", "brain", conversationID, ".system_generated", "logs", "transcript.jsonl"}
+	for i, component := range components {
+		expected = filepath.Join(expected, component)
+		info, err := os.Lstat(expected)
+		if err != nil {
+			return "", fmt.Errorf("stat transcript location: %w", err)
+		}
+		if leaf := i == len(components)-1; (leaf && !info.Mode().IsRegular()) || (!leaf && !info.IsDir()) {
+			return "", fmt.Errorf("%s is not a plain file or directory: %w", expected, ErrUntrustedLocation)
+		}
+	}
 	got, err := filepath.EvalSymlinks(filepath.Clean(path))
 	if err != nil {
 		return "", fmt.Errorf("resolve transcript path: %w", err)
 	}
-	want, err := filepath.EvalSymlinks(expected)
-	if err != nil {
-		return "", fmt.Errorf("resolve expected transcript path: %w", err)
-	}
-	if !pathsEqual(got, want) {
+	if !pathsEqual(got, expected) {
 		return "", errors.New("transcript path is not the expected location for this conversation")
 	}
-	info, err := os.Stat(got)
-	if err != nil {
-		return "", fmt.Errorf("stat transcript: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("transcript is not a regular file")
-	}
-	return got, nil
+	return expected, nil
 }
 
 func pathsEqual(a, b string) bool {

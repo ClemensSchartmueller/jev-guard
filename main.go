@@ -133,17 +133,17 @@ func abortedSessionResult() *harness.EvaluationResult {
 // applyTranscriptIntent reads the latest user request from the Antigravity transcript when
 // the harness and the antigravity_transcript_intent setting allow it.
 // It sets call.UserIntent and returns false normally, or returns true when that request
-// is a stop/abort command. An unusable latest user message clears any session-cache intent
-// already on the call, because the newest user message is authoritative and older intent
-// must never be used as a fallback. Other errors (e.g. transcript unavailable) leave the
-// call unchanged.
+// is a stop/abort command. An unusable latest user message or a redirected transcript location
+// clears any session-cache intent already on the call, because the newest user message is
+// authoritative and older intent must never be used as a fallback. Other errors (e.g.
+// transcript unavailable) leave the call unchanged.
 func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config, home string, stderr io.Writer) bool {
 	if call.Harness != harness.HarnessAntigravity || !cfg.IsAntigravityTranscriptIntentEnabled() {
 		return false
 	}
 	text, err := transcript.LatestUserInput(call.TranscriptPath, call.SessionID, home)
 	if err != nil {
-		if errors.Is(err, transcript.ErrUnusableUserInput) {
+		if errors.Is(err, transcript.ErrUnusableUserInput) || errors.Is(err, transcript.ErrUntrustedLocation) {
 			// The newest user message is authoritative; never fall back to older intent.
 			call.UserIntent = ""
 		}
