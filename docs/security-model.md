@@ -6,6 +6,7 @@ This page describes what `jev-guard` checks, in what order, and why. For a short
 - [Local fast path](#local-fast-path)
 - [Semantic evaluation with TypeSafe AI](#semantic-evaluation-with-typesafe-ai)
 - [Context-aware intent](#context-aware-intent)
+- [Intent per agent](#intent-per-agent)
 - [Intent policy matrix](#intent-policy-matrix)
 - [Behavior per agent](#behavior-per-agent)
 - [Repository Git config (`.git/config`)](#repository-git-config-gitconfig)
@@ -53,6 +54,8 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 
 Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied.
 
+The Antigravity transcript gets the same `DENY`, because an agent that could write it could forge your authorization. This covers any path into `.gemini/antigravity/brain/<id>/.system_generated/` in the target, another path argument, or the working directory, and any shell command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl`, in every agent. The command match is broad on purpose, since globs and variables cannot be parsed reliably, so an unrelated `cat transcript.jsonl` is denied too. Other files under `brain/<id>/`, such as `task.md`, are not affected. This check also runs when `fastpath_enabled` is false.
+
 ### Trusted commands and read tools
 
 Safe local read tools and trusted shell inspection commands are allowed immediately (`ALLOW`) once the boundary, flag-argument, and sensitive-file checks pass. The built-in trusted commands are `git status`, `git diff`, `git log`, `git branch`, `git show`, `ls`, `dir`, `pwd`, `echo`, `whoami`, `which`, `where.exe`, `node -v`, `go version`, and `python --version`.
@@ -84,11 +87,37 @@ Fail-safe: if the API key is missing, the endpoint is unsafe, the response is no
 
 This feature is optional. Disable it with `"context_awareness_enabled": false` in `~/.jevguard/.jevguard.json`. When the cache is cold, `jev-guard` falls back to strict stateless checks.
 
-- **Intent ingestion.** Claude Code's `UserPromptSubmit` hook sends the active prompt to an ephemeral session cache in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating.
-- **Scope.** Intent covers a single reply. Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it; `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn`, so background work stays held until the TTL expires or the next prompt arrives.
+- **Intent ingestion.** Claude Code's and Codex CLI's `UserPromptSubmit` hooks send the active prompt to an ephemeral session cache in `~/.jevguard/sessions/`. Antigravity's hook payload has no prompt text, so `jev-guard` reads the latest explicit user request from the conversation transcript at each `PreToolUse` instead. See [Intent per agent](#intent-per-agent).
+- **Scope.** Intent covers a single reply. In Claude Code and Codex, the `Stop` hook runs `jev-guard end-turn` to clear it; `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn`, so background work stays held until the TTL expires or the next prompt arrives. A session abort holds the call whichever turn it was recorded in.
 - **Fail closed on unreadable sessions.** If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate holds the call with `force_ask` (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out. `end-turn` keeps such a file too. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
 - **Fewer needless prompts.** When you explicitly ask for an action (for example *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms that the call matches your intent and allows it, so you are not asked again.
 - **Catastrophic ceiling.** Even with a matching intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) are capped at `force_ask`, never `ALLOW`.
+
+### Intent per agent
+
+| | Claude Code | Codex CLI | Antigravity |
+| :--- | :--- | :--- | :--- |
+| **Intent source** | `UserPromptSubmit` hook | `UserPromptSubmit` hook | Conversation transcript, read at `PreToolUse` |
+| **Turn scoping** | Numeric turn when the payload has one; `Stop` clears the session | Exact match on the string `turn_id`; `Stop` clears the session | The latest user message in that conversation; no `Stop` hook and no TTL |
+| **Stop/abort prompt** | Holds until the TTL expires or the next prompt | Holds until the TTL expires or the next prompt | Holds while it is the latest user message |
+| **Turn off** | `context_awareness_enabled` | `context_awareness_enabled` | `context_awareness_enabled` or `antigravity_transcript_intent` |
+
+**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. A payload with a string `turn_id` is reported as harness `codex`. Other Codex payloads are handled the same way but are reported as `claude_code`, and they get no exact turn matching.
+
+**Antigravity.** The transcript is `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`, and the intent is its last `USER_INPUT` / `USER_EXPLICIT` record. The payload's `transcriptPath` is used only if it resolves to exactly that location for the payload's conversation ID and is a regular file. At most the last 8 MB are scanned, and text over 8 KB is unusable.
+
+This format is undocumented and can change, so the feature fails closed:
+
+- If the latest user record is unusable (empty, not text, malformed, truncated, or over the size cap), the call has no intent, and older messages and the session cache are not used as a fallback. It is gated as if no intent existed, and a diagnostic goes to stderr.
+- If the transcript is unavailable (wrong path, unreadable, or no user record in the scanned window), the transcript adds nothing. Only a turn-matched intent from an explicit `jev-guard ingest` can still apply.
+
+Limits:
+
+- An unusable latest record is not treated as a stop, because every long prompt would then hold every call. A stop that cannot be read is therefore not honored.
+- Without a `Stop` hook, transcript intent lasts until the next user message, including for background work after the reply ends.
+- Transcript text can include anything you pasted, like any other prompt.
+
+Agent access to the transcript is denied (see [Anti-tampering](#anti-tampering)).
 
 ## Intent policy matrix
 

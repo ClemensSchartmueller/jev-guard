@@ -13,7 +13,7 @@
 
 Security settings are read only from `~/.jevguard/.jevguard.json` (on Windows, `%USERPROFILE%\.jevguard\.jevguard.json`). The executable creates this file with enforcing defaults when it is missing and never overwrites an existing file. If creation fails, it reports the error and exits without evaluating the tool call.
 
-The generated file contains `mode`, `timeout_ms`, `fastpath_enabled`, `context_awareness_enabled`, `intent_ttl_minutes`, and the full built-in `sensitive_files` and `trusted_commands` lists. Entries in `sensitive_files` and `trusted_commands` are always merged with the built-in defaults, so defaults cannot be removed.
+The generated file contains `mode`, `timeout_ms`, `fastpath_enabled`, `context_awareness_enabled`, `intent_ttl_minutes`, `antigravity_transcript_intent`, and the full built-in `sensitive_files` and `trusted_commands` lists. Entries in `sensitive_files` and `trusted_commands` are always merged with the built-in defaults, so defaults cannot be removed.
 
 The same directory holds the binary, trust registry, and session data:
 
@@ -42,6 +42,7 @@ Run `jev-guard config show` to see the effective values and where each comes fro
   "fastpath_enabled": true,
   "context_awareness_enabled": true,
   "intent_ttl_minutes": 30,
+  "antigravity_transcript_intent": true,
   "audit_log_path": ".jevguard.log",
   "sensitive_files": [
     ".env",
@@ -76,7 +77,8 @@ The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs
 | **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fast path** | `fastpath_enabled` | — | `true` | Enable the local sub-millisecond filter |
 | **Context awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching and intent-aware evaluation |
-| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1–1440); the Claude `Stop` hook normally ends it sooner. User config only |
+| **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1–1440); the Claude Code or Codex `Stop` hook normally ends it sooner. Does not apply to Antigravity transcript intent. User config only |
+| **Antigravity transcript intent** | `antigravity_transcript_intent` | — | `true` | Read Antigravity prompt intent from the conversation transcript at `PreToolUse`; `false` gates Antigravity without it. See [Intent per agent](security-model.md#intent-per-agent). User config only |
 | **Audit log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging. Relative paths are anchored to `~/.jevguard` |
 | **Sensitive files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; a trusted project config can only add more |
 | **Trusted commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes allowed without a network call; merged with the built-in defaults, same as sensitive files |
@@ -102,7 +104,7 @@ Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
 1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
 2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key and, when set, overrides `api_key` in the user config.
 3. **Trusted project config** can add `sensitive_files`, only when its canonical path and exact SHA-256 digest match the user trust registry.
-4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, standard sensitive file patterns, and read commands.
+4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, `antigravity_transcript_intent: true`, standard sensitive file patterns, and read commands.
 
 ## Project configs and trust
 

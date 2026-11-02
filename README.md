@@ -82,7 +82,7 @@ The variable must be set in the environment you start your agent from. To make i
 On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything marked `[FAIL]`, and make sure the `API key` line is not a warning: without a key, every call the local fast path cannot decide is held for confirmation. Then start your agent as usual.
 
 > [!TIP]
-> **Using Codex?** Run `/hooks` inside Codex once to review and trust the new hook; Codex does not run untrusted project hooks.
+> **Using Codex?** Run `/hooks` inside Codex to review and trust the new hooks (`PreToolUse`, `UserPromptSubmit`, and `Stop`). Do it again whenever `init` adds or changes a hook; Codex does not run hooks you have not trusted.
 >
 > **Want a specific agent or user-wide hooks?** Append flags after the package name: `--agent claude|codex|antigravity|all` and `--scope user`.
 
@@ -113,6 +113,8 @@ On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything
 ```
 
 Each agent receives the verdict in its own protocol. In Claude Code and Codex, `ASK` becomes a block (exit code 2) with the reason sent to the agent, in every mode. That is also why bypass flags such as `--dangerously-skip-permissions` and `--yolo` cannot skip it. An `ALLOW` in Claude Code is sent as `permissionDecision: "allow"`, which pre-approves the tool call so Claude Code does not prompt for it. In Antigravity, `ASK` becomes `force_ask`, which prompts you even in Turbo mode.
+
+Your stated intent comes from your latest prompt: through hooks in Claude Code and Codex, and from the conversation transcript in Antigravity. If it is missing or unusable, `jev-guard` decides without it.
 
 The full rules, including the list of protected files, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
 

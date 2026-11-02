@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/policy"
 	"jev-guard/pkg/session"
+	"jev-guard/pkg/transcript"
 )
 
 func main() {
@@ -74,12 +76,15 @@ const (
 	sourceSessionReadError = "session_read_error"
 )
 
-// applySessionContext loads the session state when context awareness is
-// enabled. It returns a force_ask hold when the session recorded an abort or
-// when its state cannot be read or decoded (an unreadable session might be
-// an aborted one, so it fails closed). Otherwise it copies the active prompt
-// into call.UserIntent and returns nil. An absent or expired session is not
-// an error. The hold is returned before audit-mode rewriting.
+// applySessionContext resolves the user's prompt intent for the call when context
+// awareness is enabled. It returns a force_ask hold when the session recorded an
+// abort (regardless of turn: a successful ingest of a new prompt already clears it,
+// so a mismatch only means that ingest failed), when the session state cannot be read
+// or decoded (an unreadable session might be an aborted one, so it fails closed), or
+// when the latest Antigravity transcript request is a stop command. Otherwise it sets
+// call.UserIntent from the turn-matched session prompt and the transcript, and returns
+// nil. An absent or expired session is not an error. The hold is returned before
+// audit-mode rewriting.
 func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
 	if !cfg.IsContextAwarenessEnabled() {
 		return nil
@@ -99,19 +104,23 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 			Confidence: 1.0,
 		}
 	}
-	if sessState == nil {
-		return nil
+	if sessState != nil {
+		if sessState.Aborted {
+			return abortedSessionResult()
+		}
+		if intent := resolveUserIntent(call.TurnID, sessState.TurnID, call.TurnKey, sessState.TurnKey, sessState.Prompt); intent != "" {
+			call.UserIntent = intent
+		}
 	}
-	if sessState.Aborted {
+	// An empty home fails transcript path validation, which leaves the call unchanged.
+	home, _ := os.UserHomeDir()
+	if applyTranscriptIntent(call, cfg, home, stderr) {
 		return abortedSessionResult()
-	}
-	if intent := resolveUserIntent(call.TurnID, sessState.TurnID, sessState.Prompt); intent != "" {
-		call.UserIntent = intent
 	}
 	return nil
 }
 
-// abortedSessionResult is the verdict the hook returns while an abort/stop signal is active.
+// abortedSessionResult is the verdict for an aborted session or transcript stop request.
 func abortedSessionResult() *harness.EvaluationResult {
 	return &harness.EvaluationResult{
 		Decision:   harness.DecisionForceAsk,
@@ -119,6 +128,37 @@ func abortedSessionResult() *harness.EvaluationResult {
 		Source:     sourceSessionAborted,
 		Confidence: 1.0,
 	}
+}
+
+// applyTranscriptIntent reads the latest user request from the Antigravity transcript when
+// the harness and the antigravity_transcript_intent setting allow it.
+// It sets call.UserIntent and returns false normally, or returns true when that request
+// is a stop/abort command. An unusable latest user message clears any session-cache intent
+// already on the call, because the newest user message is authoritative and older intent
+// must never be used as a fallback. Other errors (e.g. transcript unavailable) leave the
+// call unchanged.
+func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config, home string, stderr io.Writer) bool {
+	if call.Harness != harness.HarnessAntigravity || !cfg.IsAntigravityTranscriptIntentEnabled() {
+		return false
+	}
+	text, err := transcript.LatestUserInput(call.TranscriptPath, call.SessionID, home)
+	if err != nil {
+		if errors.Is(err, transcript.ErrUnusableUserInput) {
+			// The newest user message is authoritative; never fall back to older intent.
+			call.UserIntent = ""
+		}
+		if !errors.Is(err, transcript.ErrNoUserInput) {
+			fmt.Fprintf(stderr, "jev-guard: antigravity transcript intent unavailable: %v\n", err)
+		}
+		return false
+	}
+	if session.IsNegativeIntent(text) {
+		// A hold carries no intent, even one a turn-matched session prompt supplied.
+		call.UserIntent = ""
+		return true
+	}
+	call.UserIntent = text
+	return false
 }
 
 func readStandardInput() ([]byte, error) {
@@ -188,6 +228,10 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 			trace.Final = applyAuditMode(fastResult, cfg.Mode)
 			return trace
 		}
+	} else if tampering := fastpath.CheckTranscriptTampering(call); tampering != nil {
+		// The transcript is an authorization input whether or not the fast path runs.
+		trace.Final = applyAuditMode(tampering, cfg.Mode)
+		return trace
 	}
 
 	if offline {
@@ -325,7 +369,14 @@ func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) i
 	return outputHarnessVerdict(call, res)
 }
 
-func resolveUserIntent(callTurnID, sessionTurnID int, sessionPrompt string) string {
+func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {
+	if callTurnKey != "" {
+		// Keyed (Codex) calls only accept intent ingested in the exact same turn.
+		if sessionTurnKey != callTurnKey {
+			return ""
+		}
+		return sessionPrompt
+	}
 	if callTurnID == 0 || sessionTurnID == 0 || callTurnID == sessionTurnID {
 		return sessionPrompt
 	}

@@ -67,9 +67,36 @@ Do not add `SubagentStop`: a subagent finishing must not clear the main reply's 
 
 ## Codex CLI (`.codex/hooks.json`)
 
+The hooks do the same jobs as in Claude Code:
+
+- `UserPromptSubmit` stores your prompt as session intent, scoped to the event's `turn_id`.
+- `Stop` clears that intent when the turn finishes.
+- `PreToolUse` gates each tool call, and uses the intent only if its `turn_id` matches.
+
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard ingest"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard end-turn"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
@@ -85,7 +112,9 @@ Do not add `SubagentStop`: a subagent finishing must not clear the main reply's 
 }
 ```
 
-Codex loads project hooks only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the hook before it can run; editing the hook requires a new review.
+Codex loads project hooks only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the hooks before they can run. Any hook that is new or edited needs a new review, including the `UserPromptSubmit` and `Stop` hooks that `init` adds to an existing setup. Until then the gate still works, but without prompt intent. `jev-guard doctor` warns if these hooks are missing from the file, but it cannot tell whether Codex has trusted them.
+
+`ingest` and `end-turn` print nothing to stdout, because Codex would inject that text into the model's context. Every `ASK`, `force_ask`, and `DENY` exits with code 2 and the reason on stderr, because `jev-guard` never emits `permissionDecision: "ask"`.
 
 ## Antigravity (`.agents/hooks.json`)
 
@@ -109,4 +138,6 @@ Codex loads project hooks only when the project is trusted. Run `/hooks` in the 
 
 If the `jev-guard` section already exists with `"enabled": false`, `init` sets it to `true`.
 
-Antigravity's documented `PreInvocation` payload includes a transcript path but not the prompt text, and the transcript JSONL format is undocumented. `jev-guard init --agent antigravity` therefore installs stateless tool gates and removes any older managed `PreInvocation` ingest hook. Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.
+Antigravity only needs `PreToolUse`. Its payload includes a transcript path but not the prompt text, so each `PreToolUse` call reads your latest request from the conversation transcript, with no session cache or `Stop` hook. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook. Do not add that hook back.
+
+The transcript format is undocumented, so this fails closed. See [Intent per agent](security-model.md#intent-per-agent). To turn it off, set `antigravity_transcript_intent` to `false` in `~/.jevguard/.jevguard.json`. Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.
