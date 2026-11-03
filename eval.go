@@ -57,6 +57,8 @@ type evalReport struct {
 	Intent                string   `json:"intent,omitempty"`
 	IntentApplied         bool     `json:"intent_applied"`
 	IntentNote            string   `json:"intent_note,omitempty"`
+	// AntigravityTranscriptIntent reports the opt-in. eval itself never reads the transcript.
+	AntigravityTranscriptIntent bool `json:"antigravity_transcript_intent"`
 }
 
 // evalLoadConfig is a seam so tests can inject configuration; the user config path is
@@ -298,25 +300,26 @@ func applyEvalIntent(call *harness.NormalizedToolCall, cfg *config.Config, text 
 
 func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *gateTrace, offline bool) *evalReport {
 	rep := &evalReport{
-		Offline:               offline,
-		Mode:                  cfg.Mode,
-		UserConfigPath:        cfg.UserConfigPath,
-		ModeSource:            cfg.Sources["mode"],
-		SensitiveFilesSource:  cfg.Sources["sensitive_files"],
-		TrustedCommandsSource: cfg.Sources["trusted_commands"],
-		SensitiveFilesCount:   len(cfg.SensitiveFiles),
-		TrustedCommandsCount:  len(cfg.TrustedCommands),
-		Diagnostics:           cfg.Diagnostics,
-		Harness:               string(call.Harness),
-		ToolName:              call.ToolName,
-		Command:               call.Command,
-		TargetPath:            call.TargetPath,
-		Cwd:                   call.Cwd,
-		WorkspaceRoots:        call.WorkspaceRoots,
-		FastpathRan:           t.FastpathRan,
-		TypeSafeRan:           t.SemanticRan,
-		WouldSendToJudge:      t.WouldSendToJudge,
-		BoundaryStatus:        boundaryStatus(call, t),
+		Offline:                     offline,
+		Mode:                        cfg.Mode,
+		UserConfigPath:              cfg.UserConfigPath,
+		ModeSource:                  cfg.Sources["mode"],
+		SensitiveFilesSource:        cfg.Sources["sensitive_files"],
+		TrustedCommandsSource:       cfg.Sources["trusted_commands"],
+		SensitiveFilesCount:         len(cfg.SensitiveFiles),
+		TrustedCommandsCount:        len(cfg.TrustedCommands),
+		Diagnostics:                 cfg.Diagnostics,
+		Harness:                     string(call.Harness),
+		ToolName:                    call.ToolName,
+		Command:                     call.Command,
+		TargetPath:                  call.TargetPath,
+		Cwd:                         call.Cwd,
+		WorkspaceRoots:              call.WorkspaceRoots,
+		FastpathRan:                 t.FastpathRan,
+		TypeSafeRan:                 t.SemanticRan,
+		WouldSendToJudge:            t.WouldSendToJudge,
+		BoundaryStatus:              boundaryStatus(call, t),
+		AntigravityTranscriptIntent: cfg.IsAntigravityTranscriptIntentEnabled(),
 	}
 	if t.BoundaryRan {
 		rep.Contained = &t.Contained
@@ -346,6 +349,13 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 		}
 	}
 	return rep
+}
+
+func onOff(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
 }
 
 func summaryLine(rep *evalReport) string {
@@ -390,6 +400,7 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	default:
 		fmt.Fprintf(w, "    %q %s\n", rep.Intent, in.Note)
 	}
+	fmt.Fprintf(w, "    Antigravity transcript intent: %s (%s); eval never reads the transcript\n", onOff(cfg.IsAntigravityTranscriptIntentEnabled()), cfg.Sources["antigravity_transcript_intent"])
 	hdr("Boundary")
 	switch rep.BoundaryStatus {
 	case boundaryStatusSkipped:
@@ -423,6 +434,8 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 		fmt.Fprintf(w, "    judgments: %s\n", b)
 	case t.WouldSendToJudge:
 		fmt.Fprintln(w, "    would be sent to TypeSafe (skipped, --offline)")
+	case !t.FastpathRan:
+		fmt.Fprintln(w, "    not consulted (transcript guard decided)")
 	default:
 		fmt.Fprintln(w, "    not consulted (fastpath decided)")
 	}

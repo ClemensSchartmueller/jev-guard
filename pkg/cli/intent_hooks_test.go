@@ -50,32 +50,37 @@ func TestDoctorFindsIntentHooksInEitherScope(t *testing.T) {
 	}
 }
 
-func TestDoctorReportsAntigravityIntentSource(t *testing.T) {
+func TestDoctorReportsTranscriptIntentSetting(t *testing.T) {
 	dir, home := t.TempDir(), t.TempDir()
-	if _, err := installAgentHooks(initSettingsPath("antigravity", "project", dir, home), "antigravity", "jev-guard"); err != nil {
-		t.Fatal(err)
+	on, off := true, false
+
+	out, _ := doctorRun(t, &Runner{}, doctorConfig(t), dir, home, true)
+	if !strings.Contains(out, "[OK]   Antigravity transcript intent: off") {
+		t.Fatalf("default not reported as off, even with no Antigravity hooks:\n%s", out)
 	}
+
 	cfg := doctorConfig(t)
-	out, _ := doctorRun(t, &Runner{}, cfg, dir, home, true)
-	if !strings.Contains(out, "[OK]   Intent (antigravity): read from the conversation transcript") {
-		t.Fatalf("transcript intent not reported:\n%s", out)
-	}
-	if strings.Contains(out, "Intent (antigravity): no jev-guard") {
-		t.Fatalf("Antigravity must not be asked for UserPromptSubmit or Stop hooks:\n%s", out)
-	}
-
-	off := false
-	cfg.AntigravityTranscriptIntent = &off
+	cfg.AntigravityTranscriptIntent = &on
 	out, _ = doctorRun(t, &Runner{}, cfg, dir, home, true)
-	if !strings.Contains(out, "Intent (antigravity): off") {
-		t.Fatalf("disabled transcript intent not reported:\n%s", out)
+	if !strings.Contains(out, "[WARN] Antigravity transcript intent: on") || !strings.Contains(out, "forge") {
+		t.Fatalf("opt-in not reported with its risk:\n%s", out)
 	}
 
-	cfg = doctorConfig(t)
 	cfg.ContextAwarenessEnabled = &off
 	out, _ = doctorRun(t, &Runner{}, cfg, dir, home, true)
-	if strings.Contains(out, "Intent (") {
-		t.Fatalf("no intent line expected with context awareness disabled:\n%s", out)
+	if !strings.Contains(out, "context awareness is off") {
+		t.Fatalf("on without context awareness reads nothing, and must say so:\n%s", out)
+	}
+}
+
+func TestStatusReportsTranscriptIntentSetting(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	runner, stdout, _ := newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"status"}); code != 0 {
+		t.Fatalf("status exit %d", code)
+	}
+	if !strings.Contains(stdout.String(), "Antigravity transcript intent: off") {
+		t.Fatalf("setting missing:\n%s", stdout.String())
 	}
 }
 

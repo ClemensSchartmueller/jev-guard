@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,24 +23,26 @@ const MaxConfigFileSize = 1 << 20
 
 // Config encapsulates runtime parameters loaded from environment and configuration files.
 type Config struct {
-	Mode                        string             `json:"mode"`                       // "enforcing" or "audit"
-	APIKey                      string             `json:"api_key,omitempty"`          // from TYPESAFE_API_KEY or file
-	TypesafeAPIKey              string             `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
-	BaseURL                     string             `json:"base_url,omitempty"`         // API endpoint
-	Model                       string             `json:"model,omitempty"`            // e.g. "jev-latest"
-	Timeout                     time.Duration      `json:"-"`
-	TimeoutMs                   int                `json:"timeout_ms,omitempty"`
-	AuditLogPath                string             `json:"audit_log_path,omitempty"`
-	FastpathEnabled             *bool              `json:"fastpath_enabled,omitempty"`              // whether local fastpath filter is active
-	ContextAwarenessEnabled     *bool              `json:"context_awareness_enabled,omitempty"`     // whether session intent cache and context awareness are active
-	IntentTTLMinutes            *int               `json:"intent_ttl_minutes,omitempty"`            // backstop lifetime of a stored prompt intent (1-1440)
-	AntigravityTranscriptIntent *bool              `json:"antigravity_transcript_intent,omitempty"` // derive Antigravity prompt intent from the conversation transcript (user config only)
-	SensitiveFiles              []string           `json:"sensitive_files,omitempty"`
-	TrustedCommands             []string           `json:"trusted_commands,omitempty"`
-	Sources                     map[string]string  `json:"-"`
-	Diagnostics                 []string           `json:"-"`
-	ProjectConfig               *ProjectConfigInfo `json:"-"`
-	UserConfigPath              string             `json:"-"`
+	Mode                        string        `json:"mode"`                       // "enforcing" or "audit"
+	APIKey                      string        `json:"api_key,omitempty"`          // from TYPESAFE_API_KEY or file
+	TypesafeAPIKey              string        `json:"typesafe_api_key,omitempty"` // alias for api_key in config file
+	BaseURL                     string        `json:"base_url,omitempty"`         // API endpoint
+	Model                       string        `json:"model,omitempty"`            // e.g. "jev-latest"
+	Timeout                     time.Duration `json:"-"`
+	TimeoutMs                   int           `json:"timeout_ms,omitempty"`
+	AuditLogPath                string        `json:"audit_log_path,omitempty"`
+	FastpathEnabled             *bool         `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
+	ContextAwarenessEnabled     *bool         `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
+	IntentTTLMinutes            *int          `json:"intent_ttl_minutes,omitempty"`        // backstop lifetime of a stored prompt intent (1-1440)
+	AntigravityTranscriptIntent *bool         `json:"-"`                                   // read Antigravity prompt intent from the transcript and run the guard that protects it; off by default, user config only
+	// AntigravityTranscriptIntentRaw keeps a wrong JSON type from invalidating the whole file, which is what a *bool would do.
+	AntigravityTranscriptIntentRaw json.RawMessage    `json:"antigravity_transcript_intent,omitempty"`
+	SensitiveFiles                 []string           `json:"sensitive_files,omitempty"`
+	TrustedCommands                []string           `json:"trusted_commands,omitempty"`
+	Sources                        map[string]string  `json:"-"`
+	Diagnostics                    []string           `json:"-"`
+	ProjectConfig                  *ProjectConfigInfo `json:"-"`
+	UserConfigPath                 string             `json:"-"`
 }
 
 // ConfigFileNames specifies the recognized jevguard configuration filenames in order of precedence.
@@ -56,7 +59,7 @@ func DefaultConfig() *Config {
 	enabled := true
 	contextAwareness := true
 	intentTTL := DefaultIntentTTLMinutes
-	transcriptIntent := true
+	transcriptIntent := false
 	return &Config{
 		Mode:                        "enforcing",
 		Timeout:                     1500 * time.Millisecond,
@@ -93,10 +96,12 @@ func (c *Config) IsContextAwarenessEnabled() bool {
 	return *c.ContextAwarenessEnabled
 }
 
-// IsAntigravityTranscriptIntentEnabled reports whether Antigravity prompt intent may be read from the conversation transcript (defaults to true).
+// IsAntigravityTranscriptIntentEnabled reports whether the user opted in to reading Antigravity
+// prompt intent from the conversation transcript. It also turns on the guard that protects the
+// transcript from every agent. Off by default.
 func (c *Config) IsAntigravityTranscriptIntentEnabled() bool {
 	if c.AntigravityTranscriptIntent == nil {
-		return true
+		return false
 	}
 	return *c.AntigravityTranscriptIntent
 }
@@ -656,9 +661,17 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config intent_ttl_minutes ignored: expected an integer from 1 to %d, using default %d", MaxIntentTTLMinutes, DefaultIntentTTLMinutes))
 		}
 	}
-	if fileCfg.AntigravityTranscriptIntent != nil {
-		cfg.AntigravityTranscriptIntent = fileCfg.AntigravityTranscriptIntent
-		cfg.Sources["antigravity_transcript_intent"] = "user config"
+	if raw := bytes.TrimSpace(fileCfg.AntigravityTranscriptIntentRaw); len(raw) > 0 && string(raw) != "null" {
+		var enabled bool
+		if err := json.Unmarshal(raw, &enabled); err == nil {
+			cfg.AntigravityTranscriptIntent = &enabled
+			cfg.Sources["antigravity_transcript_intent"] = "user config"
+		} else {
+			enabled = false
+			cfg.AntigravityTranscriptIntent = &enabled
+			cfg.Sources["antigravity_transcript_intent"] = "safe fallback after invalid user config"
+			cfg.Diagnostics = append(cfg.Diagnostics, "user config antigravity_transcript_intent ignored: expected true or false, leaving it off")
+		}
 	}
 	if len(fileCfg.SensitiveFiles) > 0 {
 		cfg.SensitiveFiles = mergeUniqueStrings(DefaultSensitiveFiles(), fileCfg.SensitiveFiles)

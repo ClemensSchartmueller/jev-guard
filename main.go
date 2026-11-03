@@ -230,10 +230,12 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 			trace.Final = applyAuditMode(fastResult, cfg.Mode)
 			return trace
 		}
-	} else if tampering := fastpath.CheckTranscriptTampering(call); tampering != nil {
-		// The transcript is an authorization input whether or not the fast path runs.
-		trace.Final = applyAuditMode(tampering, cfg.Mode)
-		return trace
+	} else if cfg.IsAntigravityTranscriptIntentEnabled() {
+		// With the opt-in on, the transcript is an authorization input whether or not the fast path runs.
+		if result := fastpath.CheckTranscriptTampering(call); result != nil {
+			trace.Final = applyAuditMode(result, cfg.Mode)
+			return trace
+		}
 	}
 
 	if offline {

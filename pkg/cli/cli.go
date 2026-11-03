@@ -526,8 +526,15 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 }
 
 func (r *Runner) handleStatus() (Action, int) {
+	transcriptIntent := "unknown"
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
+		cfg := loadConfig(cwd)
+		session.SetSessionTTL(cfg.IntentTTL())
+		transcriptIntent = "off"
+		if cfg.IsAntigravityTranscriptIntentEnabled() {
+			transcriptIntent = "on"
+		}
+		transcriptIntent += " (" + cfg.Sources["antigravity_transcript_intent"] + ")"
 	}
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
@@ -541,6 +548,7 @@ func (r *Runner) handleStatus() (Action, int) {
 	fmt.Fprintln(r.Stdout, "jev-guard status:")
 	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
 	fmt.Fprintf(r.Stdout, "  Sessions Directory: %s\n", sessionsDir)
+	fmt.Fprintf(r.Stdout, "  Antigravity transcript intent: %s\n", transcriptIntent)
 	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(scan.Active))
 	if len(scan.Unreadable) > 0 {
 		fmt.Fprintf(r.Stdout, "  Unreadable Sessions: %d (tool calls in these sessions are held)\n", len(scan.Unreadable))

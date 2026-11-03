@@ -23,6 +23,8 @@ type Filter struct {
 	boundaryChecker BoundaryChecker
 	sensitiveFiles  []string
 	trustedCommands []string
+	// protectTranscript runs the transcript guard. It is on only when the user opted in to transcript intent.
+	protectTranscript bool
 }
 
 // NewFilter constructs a fast-path filter with injected boundary checker and configuration.
@@ -34,9 +36,10 @@ func NewFilter(checker BoundaryChecker, cfg *config.Config) *Filter {
 	sensitiveFiles := append([]string{}, cfg.SensitiveFiles...)
 	sensitiveFiles = append(sensitiveFiles, xdgGitSensitivePatterns(os.Getenv("XDG_CONFIG_HOME"))...)
 	return &Filter{
-		boundaryChecker: checker,
-		sensitiveFiles:  sensitiveFiles,
-		trustedCommands: cfg.TrustedCommands,
+		boundaryChecker:   checker,
+		sensitiveFiles:    sensitiveFiles,
+		trustedCommands:   cfg.TrustedCommands,
+		protectTranscript: cfg.IsAntigravityTranscriptIntentEnabled(),
 	}
 }
 
@@ -54,6 +57,12 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 			Reason:     reason,
 			Source:     "fastpath_tampering",
 			Confidence: 1.0,
+		}
+	}
+
+	if f.protectTranscript {
+		if result := CheckTranscriptTampering(call); result != nil {
+			return result
 		}
 	}
 
@@ -115,7 +124,7 @@ func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
 		return "Access to jev-guard configuration or session state via command is prohibited"
 	}
 
-	return transcriptTamperingReason(call)
+	return ""
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {

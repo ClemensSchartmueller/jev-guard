@@ -462,12 +462,12 @@ func TestApplyTranscriptIntent(t *testing.T) {
 	}
 
 	call := newCall()
-	if applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) || call.UserIntent != "refactor the parser" {
+	if applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) || call.UserIntent != "refactor the parser" {
 		t.Fatalf("expected intent to be set, got held/intent %q", call.UserIntent)
 	}
 
 	off := false
-	cfg := config.DefaultConfig()
+	cfg := transcriptOnConfig()
 	cfg.AntigravityTranscriptIntent = &off
 	call = newCall()
 	if applyTranscriptIntent(call, cfg, home, io.Discard) || call.UserIntent != "" {
@@ -476,13 +476,13 @@ func TestApplyTranscriptIntent(t *testing.T) {
 
 	call = newCall()
 	call.TranscriptPath = filepath.Join(t.TempDir(), "transcript.jsonl")
-	if applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) || call.UserIntent != "" {
+	if applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) || call.UserIntent != "" {
 		t.Fatal("invalid path must yield no intent")
 	}
 
 	claude := newCall()
 	claude.Harness = harness.HarnessClaudeCode
-	if applyTranscriptIntent(claude, config.DefaultConfig(), home, io.Discard) || claude.UserIntent != "" {
+	if applyTranscriptIntent(claude, transcriptOnConfig(), home, io.Discard) || claude.UserIntent != "" {
 		t.Fatal("non-Antigravity calls must be unaffected")
 	}
 }
@@ -491,7 +491,7 @@ func TestApplyTranscriptIntent_OverridesSessionIntent(t *testing.T) {
 	home, path := writeTranscript(t, "conv-4", "refactor the parser")
 	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-4", TranscriptPath: path}
 	call.UserIntent = "old cached intent"
-	if applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) {
+	if applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) {
 		t.Fatal("expected no hold")
 	}
 	if call.UserIntent != "refactor the parser" {
@@ -514,7 +514,7 @@ func TestApplyTranscriptIntent_UnusableLatestClearsIntent(t *testing.T) {
 	}
 	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-3", TranscriptPath: path}
 	call.UserIntent = "stale cached intent"
-	if applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) {
+	if applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) {
 		t.Fatal("unusable latest message must not hold")
 	}
 	if call.UserIntent != "" {
@@ -527,7 +527,7 @@ func TestApplyTranscriptIntent_UnavailableKeepsSessionIntent(t *testing.T) {
 	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-5"}
 	call.TranscriptPath = filepath.Join(t.TempDir(), "transcript.jsonl")
 	call.UserIntent = "cached"
-	if applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) {
+	if applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) {
 		t.Fatal("unavailable transcript must not hold")
 	}
 	if call.UserIntent != "cached" {
@@ -538,7 +538,7 @@ func TestApplyTranscriptIntent_UnavailableKeepsSessionIntent(t *testing.T) {
 func TestApplyTranscriptIntent_StopIsHeld(t *testing.T) {
 	home, path := writeTranscript(t, "conv-2", "stop")
 	call := &harness.NormalizedToolCall{Harness: harness.HarnessAntigravity, SessionID: "conv-2", TranscriptPath: path}
-	if !applyTranscriptIntent(call, config.DefaultConfig(), home, io.Discard) {
+	if !applyTranscriptIntent(call, transcriptOnConfig(), home, io.Discard) {
 		t.Fatal("expected stop request to hold the action")
 	}
 	if call.UserIntent != "" {
@@ -546,7 +546,7 @@ func TestApplyTranscriptIntent_StopIsHeld(t *testing.T) {
 	}
 
 	off := false
-	cfg := config.DefaultConfig()
+	cfg := transcriptOnConfig()
 	cfg.AntigravityTranscriptIntent = &off
 	if applyTranscriptIntent(call, cfg, home, io.Discard) {
 		t.Fatal("setting disabled must not hold")

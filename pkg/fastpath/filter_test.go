@@ -517,7 +517,10 @@ func TestFastPath_AntiTampering(t *testing.T) {
 }
 
 func TestFastPath_AntiTampering_AntigravityTranscript(t *testing.T) {
-	filter := NewDefaultFilter()
+	on := true
+	cfg := config.DefaultConfig()
+	cfg.AntigravityTranscriptIntent = &on
+	filter := NewFilter(nil, cfg)
 
 	denyTargets := []string{
 		`/home/bob/.gemini/antigravity/brain/abc-123/.system_generated/logs/transcript.jsonl`,

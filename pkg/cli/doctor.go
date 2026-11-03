@@ -122,6 +122,15 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 	// 4. Model and feature flags.
 	report(doctorOK, "Model: %s; fastpath: %t; context awareness: %t", effectiveValue(cfg.Model, "jev-latest"), cfg.IsFastpathEnabled(), cfg.IsContextAwarenessEnabled())
 
+	switch source := cfg.Sources["antigravity_transcript_intent"]; {
+	case !cfg.IsAntigravityTranscriptIntentEnabled():
+		report(doctorOK, "Antigravity transcript intent: off (%s); Codex and Claude Code intent do not depend on it", source)
+	case !cfg.IsContextAwarenessEnabled():
+		report(doctorWarn, "Antigravity transcript intent: on (%s), but context awareness is off, so no transcript is read; the transcript guard still runs for every agent", source)
+	default:
+		report(doctorWarn, "Antigravity transcript intent: on (%s); the transcript guard runs for every agent, but an agent with shell access can still forge a transcript, so this trusts your agents not to", source)
+	}
+
 	// 5. Workspace.
 	if root := doctorGitRoot(cwd); root != "" {
 		report(doctorOK, "Workspace: cwd %s, git root %s", cwd, root)
@@ -204,12 +213,7 @@ func reportIntentSource(report func(level, format string, a ...interface{}), cfg
 		return
 	}
 	if agent == "antigravity" {
-		if cfg.IsAntigravityTranscriptIntentEnabled() {
-			report(doctorOK, "Intent (antigravity): read from the conversation transcript at PreToolUse; an unusable transcript means no intent")
-		} else {
-			report(doctorOK, "Intent (antigravity): off (antigravity_transcript_intent is false)")
-		}
-		return
+		return // It has no prompt hooks; its intent is the opt-in reported once for all agents.
 	}
 	var missing []string
 	if !anyManagedHook(paths, "UserPromptSubmit", " ingest") {

@@ -12,11 +12,26 @@ import (
 	"jev-guard/pkg/harness"
 )
 
-// maxSymlinkHops bounds symlink following. A chain this long fails in the OS too.
-const maxSymlinkHops = 64
+// The guard's work budget, per tool call. It is sized so a call that fits finishes well under
+// a second. A call over budget gets an explicit ASK, never a pass.
+const (
+	maxGuardCommandBytes = 2 << 20 // of one command
+	maxGuardPathBytes    = 1 << 20 // of one path input
+	maxGuardWords        = 50_000  // distinct words and word parts of all commands in a call
+	maxGuardComponents   = 1_000_000
+	maxGuardLookups      = 60_000 // filesystem calls, which are the slow part on Windows
+	maxSymlinkHops       = 64     // per path; a chain this long fails in the OS too
+	maxGuardHops         = 10_000
+)
 
 // maxPathLikeBytes is longer than any usable path, so a longer argument is treated as content.
 const maxPathLikeBytes = 4096
+
+// lookupCacheBytes keeps the per-call cache small on hostile input: only short paths are kept.
+const lookupCacheBytes = 512
+
+// sourceTranscriptGuardLimit is reported when a call is too large to check.
+const sourceTranscriptGuardLimit = "transcript_guard_limit"
 
 // commandArgKeys hold commands, as a string or as an argument list.
 var commandArgKeys = []string{"CommandLine", "command", "cmd", "script"}
@@ -27,32 +42,62 @@ var patchFileHeader = regexp.MustCompile(`(?m)^\*\*\* (?:Add File|Update File|De
 // homePrefixes are spellings of the home directory that a tool or shell expands itself.
 var homePrefixes = []string{"~", "$HOME", "${HOME}", "$env:HOME", "$env:USERPROFILE", "%USERPROFILE%", "%HOME%"}
 
-// CheckTranscriptTampering denies access to the Antigravity conversation transcript. The
-// gate calls it directly when the fast path is disabled, because the transcript is still
-// read as user intent. Returns nil when the call is clean.
+// msysDrivePath matches how Git Bash and MSYS spell a Windows drive: /c/Users/x.
+var msysDrivePath = regexp.MustCompile(`^/([a-zA-Z])(/.*)?$`)
+
+// CheckTranscriptTampering protects the transcript that Antigravity prompt intent is read
+// from: an agent that could write it could forge the user's authorization. It denies access
+// and asks when a call is too large to check. Callers run it only when the user opted in to
+// transcript intent; it has no cost otherwise. Returns nil when the call is clean.
 func CheckTranscriptTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
 	if call == nil {
 		return nil
 	}
-	reason := transcriptTamperingReason(call)
-	if reason == "" {
-		return nil
+	guard := &transcriptGuard{lookups: map[string]lookupResult{}}
+	if reason := guard.check(call); reason != "" {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionDeny,
+			Reason:     reason,
+			Source:     "fastpath_tampering",
+			Confidence: 1.0,
+		}
 	}
-	return &harness.EvaluationResult{
-		Decision:   harness.DecisionDeny,
-		Reason:     reason,
-		Source:     "fastpath_tampering",
-		Confidence: 1.0,
+	if guard.overBudget != "" {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     "Access to the Antigravity transcript could not be verified: " + guard.overBudget,
+			Source:     sourceTranscriptGuardLimit,
+			Confidence: 1.0,
+		}
+	}
+	return nil
+}
+
+type lookupResult struct {
+	mode os.FileMode
+	err  error
+}
+
+// transcriptGuard holds one call's work budget. Once overBudget is set, checks stop.
+type transcriptGuard struct {
+	overBudget string
+	components int
+	hops       int
+	lookupRuns int
+	lookups    map[string]lookupResult
+}
+
+func (g *transcriptGuard) exceed(what string) {
+	if g.overBudget == "" {
+		g.overBudget = what + " is over the limit the guard will check"
 	}
 }
 
-// transcriptTamperingReason protects the transcript that Antigravity prompt intent is
-// read from: an agent that could write it could forge the user's authorization. Every path
-// input is checked as written and as the filesystem would resolve it, so a symlink cannot
-// hide the transcript. Inputs are resolved from their exact bytes; any trimmed or decoded
-// form is checked in addition, never instead. A path computed when a shell command runs is
-// out of reach here (see the limits in docs/security-model.md).
-func transcriptTamperingReason(call *harness.NormalizedToolCall) string {
+// check runs every path input through the matcher, as written and as the filesystem would
+// resolve it, so a symlink cannot hide the transcript. Inputs are resolved from their exact
+// bytes; any trimmed or decoded form is checked in addition, never instead. A path computed
+// when a shell command runs is out of reach here (see the limits in docs/security-model.md).
+func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 	const directReason = "Direct access to Antigravity conversation transcript/system state is prohibited"
 	const commandReason = "Access to Antigravity conversation transcript/system state via command is prohibited"
 
@@ -68,10 +113,17 @@ func transcriptTamperingReason(call *harness.NormalizedToolCall) string {
 		}
 	}
 	for _, target := range targets {
-		for _, form := range pathForms(target, dirs) {
+		if len(target) > maxGuardPathBytes {
+			g.exceed("a path")
+			return ""
+		}
+		for _, form := range g.pathForms(target, dirs) {
 			if isAntigravitySystemPath(form, "") {
 				return directReason
 			}
+		}
+		if g.overBudget != "" {
+			return ""
 		}
 	}
 
@@ -81,34 +133,80 @@ func transcriptTamperingReason(call *harness.NormalizedToolCall) string {
 		if len(value) > maxPathLikeBytes || strings.ContainsAny(value, "\r\n") {
 			continue
 		}
-		for _, form := range pathForms(value, dirs) {
+		for _, form := range g.pathForms(value, dirs) {
 			if isAntigravitySystemPath(form, "") && parentExists(form) {
 				return directReason
 			}
 		}
+		if g.overBudget != "" {
+			return ""
+		}
 	}
 
-	commands := []string{call.Command}
-	for _, key := range commandArgKeys {
-		commands = append(commands, stringValues(call.RawArgs[key])...)
-	}
-	for _, command := range commands {
+	var words, textWords []string
+	seenCommands := map[string]bool{}
+	addCommand := func(command string) bool {
+		if command == "" || seenCommands[command] {
+			return true
+		}
+		seenCommands[command] = true
 		// Matched broadly on purpose: shell globs and variables
 		// (e.g. ~/.gemini/antigravity/brain/*/.sys*/logs/t*) cannot be parsed reliably.
 		if namesTranscriptInText(command) {
-			return commandReason
+			return false
 		}
-		for _, word := range shellWords(command) {
-			if namesTranscriptInText(word) {
+		if len(command) > maxGuardCommandBytes {
+			g.exceed("a command")
+			return true
+		}
+		words = append(words, shellWords(command)...)
+		// What a heredoc holds is data, so the spelled-out-name rule does not read it.
+		textWords = append(textWords, shellTextWords(command)...)
+		return true
+	}
+	if !addCommand(call.Command) {
+		return commandReason
+	}
+	for _, key := range commandArgKeys {
+		raw := call.RawArgs[key]
+		if value, ok := raw.(string); ok {
+			if !addCommand(value) {
 				return commandReason
 			}
-			// A word that resolves anywhere under the brain directory gets the same answer as
-			// spelling that path out, so a link to a conversation directory cannot be moved or replaced.
-			for _, form := range pathForms(word, dirs) {
-				if strings.Contains(strings.ToLower(normalizePathSeparators(form)), "/.gemini/antigravity/brain") {
-					return commandReason
-				}
+			continue
+		}
+		// An argument list holds literal words, so only a string some program will run is a command.
+		list := stringValues(raw)
+		words = append(words, list...)
+		textWords = append(textWords, list...)
+		for _, payload := range commandPayloads(list) {
+			if !addCommand(payload) {
+				return commandReason
 			}
+		}
+	}
+	if g.overBudget != "" {
+		return ""
+	}
+	if len(words) > maxGuardWords || len(textWords) > maxGuardWords {
+		g.exceed("the number of words in a command")
+		return ""
+	}
+	for _, word := range textWords {
+		if namesTranscriptInText(word) {
+			return commandReason
+		}
+	}
+	for _, word := range words {
+		// A word that resolves anywhere under the brain directory gets the same answer as
+		// spelling that path out, so a link to a conversation directory cannot be moved or replaced.
+		for _, form := range g.pathForms(word, dirs) {
+			if strings.Contains(strings.ToLower(normalizePathSeparators(form)), "/.gemini/antigravity/brain") {
+				return commandReason
+			}
+		}
+		if g.overBudget != "" {
+			return ""
 		}
 	}
 	return ""
@@ -127,17 +225,19 @@ func parentExists(form string) bool {
 // callWorkingDirs returns the directories relative paths may be resolved against: the
 // normalized one and any other working-directory argument, which the tool may honor instead.
 // Exact values come first; a value that differs when trimmed is also listed trimmed.
+// A name made only of whitespace is a valid directory; only an empty value is skipped.
 func callWorkingDirs(call *harness.NormalizedToolCall) []string {
 	var dirs []string
 	add := func(dir string) {
+		if dir == "" {
+			return
+		}
 		for _, d := range dirs {
 			if d == dir {
 				return
 			}
 		}
-		if strings.TrimSpace(dir) != "" {
-			dirs = append(dirs, dir)
-		}
+		dirs = append(dirs, dir)
 	}
 	add(call.Cwd)
 	add(strings.TrimSpace(call.Cwd))
@@ -145,6 +245,9 @@ func callWorkingDirs(call *harness.NormalizedToolCall) []string {
 	for _, key := range harness.CwdArgKeys {
 		for _, value := range stringValues(call.RawArgs[key]) {
 			for _, form := range []string{value, strings.TrimSpace(value)} {
+				if form == "" {
+					continue
+				}
 				if filepath.IsAbs(form) || len(bases) == 0 {
 					add(form)
 					continue
@@ -225,7 +328,21 @@ func pathVariants(p string) []string {
 	for _, v := range append([]string(nil), variants...) {
 		add(expandHome(v))
 	}
+	if runtime.GOOS == "windows" {
+		for _, v := range append([]string(nil), variants...) {
+			add(windowsDriveFromMSYS(v))
+		}
+	}
 	return variants
+}
+
+// windowsDriveFromMSYS turns Git Bash's /c/Users/x into c:/Users/x. Returns "" for anything else.
+func windowsDriveFromMSYS(p string) string {
+	match := msysDrivePath.FindStringSubmatch(p)
+	if match == nil {
+		return ""
+	}
+	return match[1] + ":" + match[2]
 }
 
 // fileURIPath returns the path of a file: URI, in any of the spellings tools accept.
@@ -243,9 +360,10 @@ func fileURIPath(p string) (string, bool) {
 }
 
 // pathForms returns p in every spelling, as written and resolved against each working
-// directory, without requiring it to exist.
-func pathForms(p string, dirs []string) []string {
-	if strings.TrimSpace(p) == "" {
+// directory, without requiring it to exist. Only an empty p is skipped: a name made of
+// whitespace is valid, and is resolved from its exact bytes.
+func (g *transcriptGuard) pathForms(p string, dirs []string) []string {
+	if p == "" {
 		return nil
 	}
 	if len(dirs) == 0 {
@@ -265,7 +383,7 @@ func pathForms(p string, dirs []string) []string {
 					candidate = dir + string(filepath.Separator) + candidate
 					forms = append(forms, normalizePathSeparators(candidate))
 				}
-				forms = append(forms, resolvedForms(candidate)...)
+				forms = append(forms, g.resolvedForms(candidate)...)
 			}
 		}
 	}
@@ -282,7 +400,7 @@ func expandVariables(p, dir string) string {
 	})
 }
 
-func resolvedForms(p string) []string {
+func (g *transcriptGuard) resolvedForms(p string) []string {
 	if !filepath.IsAbs(p) {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -290,10 +408,10 @@ func resolvedForms(p string) []string {
 		}
 		p = wd + string(filepath.Separator) + p
 	}
-	forms := []string{walkSymlinks(p)}
+	forms := []string{g.walkSymlinks(p)}
 	// Windows junctions are not reported as symlinks by Lstat. Elsewhere this would only
 	// repeat the walk, on a path checked for every word of every command.
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" && len(p) <= maxLookupPathBytes() {
 		if resolved, err := filepath.EvalSymlinks(p); err == nil {
 			forms = append(forms, resolved)
 		}
@@ -301,54 +419,121 @@ func resolvedForms(p string) []string {
 	return forms
 }
 
+// maxLookupPathBytes is the longest path the OS could accept in one call. Longer ones are
+// treated as missing without a filesystem call.
+func maxLookupPathBytes() int {
+	if runtime.GOOS == "windows" {
+		return 32767
+	}
+	return 4096
+}
+
+func (g *transcriptGuard) lstat(p string) (os.FileMode, error) {
+	if result, ok := g.lookups[p]; ok {
+		return result.mode, result.err
+	}
+	g.lookupRuns++
+	if g.lookupRuns > maxGuardLookups {
+		g.exceed("the number of paths in a call")
+		return 0, os.ErrNotExist
+	}
+	var mode os.FileMode
+	info, err := os.Lstat(p)
+	if err == nil {
+		mode = info.Mode()
+	}
+	if len(p) <= lookupCacheBytes {
+		g.lookups[p] = lookupResult{mode: mode, err: err}
+	}
+	return mode, err
+}
+
 // walkSymlinks resolves p the way the OS does: one component at a time, so ".." applies
 // after a symlink, and a missing component (a file about to be created, or the target of a
-// dangling link) is kept as written instead of failing like filepath.EvalSymlinks.
-func walkSymlinks(p string) string {
+// dangling link) is kept as written instead of failing like filepath.EvalSymlinks. It keeps
+// a stack of components in one buffer, so its work is linear in the length of p.
+func (g *transcriptGuard) walkSymlinks(p string) string {
+	separator := string(filepath.Separator)
 	volume := filepath.VolumeName(p)
-	current := volume + string(filepath.Separator)
-	pending := splitPath(p[len(volume):])
+	buf := append(make([]byte, 0, len(p)+1), volume...)
+	var ends []int // where each resolved component ends in buf
+	// pending is a stack with the next component on top, so a symlink's target is pushed in O(its length).
+	pending := reversedComponents(p[len(volume):], nil)
 	missing := false
-	for hops := 0; len(pending) > 0; {
-		component := pending[0]
-		pending = pending[1:]
+	hops := 0
+	for len(pending) > 0 && g.overBudget == "" {
+		component := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		g.components++
+		if g.components > maxGuardComponents {
+			g.exceed("the length of the paths in a call")
+			break
+		}
 		switch component {
 		case ".":
 			continue
 		case "..":
-			current = filepath.Dir(current)
+			if len(ends) > 0 {
+				ends = ends[:len(ends)-1]
+				buf = buf[:len(volume)]
+				if len(ends) > 0 {
+					buf = buf[:ends[len(ends)-1]]
+				}
+			}
 			missing = false
 			continue
 		}
-		next := filepath.Join(current, component)
-		if missing {
-			current = next
+		buf = append(append(buf, separator...), component...)
+		ends = append(ends, len(buf))
+		if missing || len(buf) > maxLookupPathBytes() {
+			missing = true
 			continue
 		}
-		info, err := os.Lstat(next)
+		current := string(buf)
+		mode, err := g.lstat(current)
 		missing = err != nil
-		if err != nil || info.Mode()&os.ModeSymlink == 0 || hops >= maxSymlinkHops {
-			current = next
+		if err != nil || mode&os.ModeSymlink == 0 {
 			continue
 		}
-		target, err := os.Readlink(next)
+		target, err := os.Readlink(current)
+		g.lookupRuns++
 		if err != nil {
-			current = next
 			continue
 		}
 		hops++
+		g.hops++
+		if hops > maxSymlinkHops || g.hops > maxGuardHops {
+			g.exceed("a chain of symlinks")
+			break
+		}
+		// The link itself is not part of the resolved path; its target replaces it.
+		ends = ends[:len(ends)-1]
+		buf = buf[:len(volume)]
+		if len(ends) > 0 {
+			buf = buf[:ends[len(ends)-1]]
+		}
 		if filepath.IsAbs(target) {
 			targetVolume := filepath.VolumeName(target)
-			current = targetVolume + string(filepath.Separator)
+			buf = append(buf[:0], targetVolume...)
+			volume = targetVolume
+			ends = ends[:0]
 			target = target[len(targetVolume):]
 		}
-		pending = append(splitPath(target), pending...)
+		pending = reversedComponents(target, pending)
 	}
-	return current
+	if len(buf) == len(volume) {
+		return volume + separator
+	}
+	return string(buf)
 }
 
-func splitPath(p string) []string {
-	return strings.FieldsFunc(p, func(r rune) bool { return r < 0x80 && os.IsPathSeparator(uint8(r)) })
+// reversedComponents pushes p's components onto a stack, so the first one is on top.
+func reversedComponents(p string, stack []string) []string {
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r < 0x80 && os.IsPathSeparator(uint8(r)) })
+	for i := len(parts) - 1; i >= 0; i-- {
+		stack = append(stack, parts[i])
+	}
+	return stack
 }
 
 func expandHome(p string) string {
@@ -384,11 +569,13 @@ func isAntigravitySystemPath(p, cwd string) bool {
 		if segs[i] != ".gemini" || segs[i+1] != "antigravity" || segs[i+2] != "brain" {
 			continue
 		}
-		for j := i + 3; j < len(segs); j++ {
-			if segs[j] == ".system_generated" {
+		// One scan of the rest answers for every later match too.
+		for _, seg := range segs[i+3:] {
+			if seg == ".system_generated" {
 				return true
 			}
 		}
+		return false
 	}
 	return false
 }

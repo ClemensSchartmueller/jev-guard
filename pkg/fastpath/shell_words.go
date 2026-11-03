@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// maxShellNesting bounds how deep quoted strings are read as commands (sh -c "sh -c '...'").
+// maxShellNesting bounds how deep strings that a program will run are read as commands.
 const maxShellNesting = 3
 
 // shellWords lists what a command's words may mean, for the transcript guard. The shell
@@ -13,39 +13,322 @@ const maxShellNesting = 3
 // shells and separates paths on Windows, while PowerShell escapes with a backtick and cmd.exe
 // with a caret. So the command is read under each set of rules and all results are kept. This
 // is deliberately not a shell parser: it adds spellings and never decides between them.
-// It cannot see variables, globs, brace expansion, or anything else the shell computes.
+// Quoted text stays text unless a recognized program will run it (see commandPayloads) or it
+// is a substitution. It cannot see variables, globs, brace expansion, or anything else the
+// shell computes.
 func shellWords(command string) []string {
+	return readCommand(command, false)
+}
+
+// shellTextWords is shellWords without heredoc bodies, which are data unless a shell reads them.
+// Only the spelled-out-name rule uses it: path resolution still sees those words, so a
+// heredoc that a shell runs, or a marker misread as a heredoc, cannot hide a real path.
+func shellTextWords(command string) []string {
+	return readCommand(command, true)
+}
+
+func readCommand(command string, skipHeredocs bool) []string {
 	seen := map[string]bool{}
 	nested := map[string]bool{}
 	var words []string
 	var visit func(text string, depth int)
 	visit = func(text string, depth int) {
-		for _, split := range [][]string{posixWords(text), powerShellWords(text), cmdWords(text), strings.Fields(text)} {
-			for _, word := range split {
+		if skipHeredocs {
+			text = stripHeredocBodies(text)
+		}
+		nest := func(payload string) {
+			if depth < maxShellNesting && !nested[payload] {
+				nested[payload] = true
+				visit(payload, depth+1)
+			}
+		}
+		readings := [][]string{posixWords(text), powerShellWords(text), cmdWords(text), strings.Fields(text)}
+		// An apostrophe is not a quote in cmd.exe, so a word holding one came from text that
+		// the other shells read as quoted. Its quotes would be removed wrongly here.
+		kept := readings[2][:0]
+		for _, word := range readings[2] {
+			if !strings.Contains(word, "'") {
+				kept = append(kept, word)
+			}
+		}
+		readings[2] = kept
+		for _, reading := range readings {
+			for _, word := range reading {
 				for _, form := range wordForms(word) {
 					if !seen[form] {
 						seen[form] = true
 						words = append(words, form)
 					}
 				}
-				// A quoted string may itself be a command, for sh -c or an interpreter.
-				if depth < maxShellNesting && word != text && !nested[word] && strings.ContainsAny(word, " \t\r\n;|&<>()'\"`\\$^,") {
-					nested[word] = true
-					visit(word, depth+1)
-				}
 			}
+			for _, payload := range commandPayloads(reading) {
+				nest(payload)
+			}
+		}
+		for _, substitution := range commandSubstitutions(text) {
+			nest(substitution)
 		}
 	}
 	visit(command, 0)
 	return words
 }
 
+// shellPrograms take a command string after a flag holding a "c", such as -c or -lc.
+var shellPrograms = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true, "mksh": true, "ash": true, "fish": true, "su": true}
+
+// interpreterFlags are the flags that make an interpreter run a string from the command line.
+var interpreterFlags = map[string][]string{
+	"python": {"-c"}, "pypy": {"-c"}, "node": {"-e", "--eval", "-p", "--print"}, "nodejs": {"-e", "--eval", "-p", "--print"},
+	"bun": {"-e", "--eval"}, "perl": {"-e", "-E", "-ne", "-pe"}, "ruby": {"-e", "-ne", "-pe"}, "php": {"-r"}, "lua": {"-e"},
+}
+
+// commandPayloads returns the strings in a command's words that a recognized program will run.
+func commandPayloads(words []string) []string {
+	var payloads []string
+	for i, word := range words {
+		name := programName(word)
+		rest := words[i+1:]
+		switch {
+		case name == "eval":
+			payloads = append(payloads, strings.Join(rest, " "))
+		case shellPrograms[name]:
+			for j, flag := range rest {
+				if value, ok := strings.CutPrefix(flag, "--command="); ok {
+					payloads = append(payloads, value)
+					break
+				}
+				isFlag := flag == "--command" || (len(flag) > 1 && flag[0] == '-' && flag[1] != '-' && strings.Contains(flag, "c"))
+				if isFlag && j+1 < len(rest) {
+					payloads = append(payloads, rest[j+1])
+					break
+				}
+			}
+		case name == "cmd":
+			for j, flag := range rest {
+				lower := strings.ToLower(flag)
+				if len(lower) >= 2 && lower[0] == '/' && strings.IndexByte("ckr", lower[1]) >= 0 {
+					payloads = append(payloads, strings.TrimSpace(flag[2:]+" "+strings.Join(rest[j+1:], " ")))
+					break
+				}
+			}
+		case name == "powershell" || name == "pwsh":
+			// PowerShell runs its arguments as a command, with or without -Command.
+			for j, flag := range rest {
+				lower := strings.ToLower(flag)
+				if len(lower) >= 2 && (lower[0] == '-' || lower[0] == '/') && strings.HasPrefix("command", lower[1:]) {
+					rest = rest[j+1:]
+					break
+				}
+			}
+			payloads = append(payloads, strings.Join(rest, " "))
+		default:
+			for _, known := range interpreterFlags[interpreterName(name)] {
+				for j, flag := range rest {
+					if flag == known && j+1 < len(rest) {
+						payloads = append(payloads, rest[j+1])
+					}
+				}
+			}
+		}
+	}
+	return payloads
+}
+
+// programName reduces /usr/bin/Python3.exe to python3.
+func programName(word string) string {
+	if i := strings.LastIndexAny(word, `/\`); i >= 0 {
+		word = word[i+1:]
+	}
+	return strings.TrimSuffix(strings.ToLower(word), ".exe")
+}
+
+// interpreterName reduces versioned names such as python3.11 to python.
+func interpreterName(name string) string {
+	return strings.TrimRight(name, "0123456789.")
+}
+
+// commandSubstitutions returns the outermost $(...) and `...` spans a POSIX shell would run,
+// in one pass. Single-quoted text is literal, so it is skipped.
+func commandSubstitutions(s string) []string {
+	var spans []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\':
+			i++
+		case c == '\'' && depth == 0:
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				return spans
+			}
+			i += end + 1
+		case c == '`' && depth == 0:
+			end := i + 1
+			for end < len(s) && s[end] != '`' {
+				if s[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(s) {
+				return append(spans, s[i+1:])
+			}
+			spans = append(spans, s[i+1:end])
+			i = end
+		case c == '$' && i+1 < len(s) && s[i+1] == '(':
+			if depth == 0 {
+				start = i + 2
+			}
+			depth++
+			i++
+		case c == '(' && depth > 0:
+			depth++
+		case c == ')' && depth > 0:
+			depth--
+			if depth == 0 {
+				spans = append(spans, s[start:i])
+			}
+		}
+	}
+	if depth > 0 {
+		spans = append(spans, s[start:])
+	}
+	return spans
+}
+
+// stripHeredocBodies removes heredoc bodies the way a POSIX shell finds them. It tracks quotes
+// and comments, because a marker inside either one is not a heredoc and the lines after it
+// are commands. Unterminated bodies run to the end of the text, as in a shell.
+func stripHeredocBodies(s string) string {
+	if !strings.Contains(s, "<<") {
+		return s
+	}
+	type heredoc struct {
+		delimiter string
+		tabs      bool
+	}
+	var out strings.Builder
+	var pending []heredoc
+	atWordStart := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\':
+			end := min(i+2, len(s))
+			out.WriteString(s[i:end])
+			i = end - 1
+			atWordStart = false
+		case c == '\'':
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				out.WriteString(s[i:])
+				return out.String()
+			}
+			out.WriteString(s[i : i+end+2])
+			i += end + 1
+			atWordStart = false
+		case c == '"':
+			end := i + 1
+			for end < len(s) && s[end] != '"' {
+				if s[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(s) {
+				out.WriteString(s[i:])
+				return out.String()
+			}
+			out.WriteString(s[i : end+1])
+			i = end
+			atWordStart = false
+		case c == '#' && atWordStart:
+			end := strings.IndexByte(s[i:], '\n')
+			if end < 0 {
+				out.WriteString(s[i:])
+				return out.String()
+			}
+			out.WriteString(s[i : i+end])
+			i += end - 1
+		case strings.HasPrefix(s[i:], "$(("):
+			end := strings.Index(s[i:], "))")
+			if end < 0 {
+				out.WriteString(s[i:])
+				return out.String()
+			}
+			out.WriteString(s[i : i+end+2])
+			i += end + 1
+			atWordStart = false
+		case strings.HasPrefix(s[i:], "<<<"):
+			out.WriteString("<<<")
+			i += 2
+			atWordStart = false
+		case strings.HasPrefix(s[i:], "<<"):
+			j := i + 2
+			tabs := j < len(s) && s[j] == '-'
+			if tabs {
+				j++
+			}
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+				j++
+			}
+			end := j
+			for end < len(s) && !isShellSpace(s[end]) && strings.IndexByte(";&|<>()", s[end]) < 0 {
+				end++
+			}
+			if words := posixWords(s[j:end]); len(words) == 1 && words[0] != "" {
+				pending = append(pending, heredoc{delimiter: words[0], tabs: tabs})
+			}
+			out.WriteString(s[i:end])
+			i = end - 1
+			atWordStart = false
+		case c == '\n':
+			out.WriteByte(c)
+			atWordStart = true
+			for _, doc := range pending {
+				for i+1 < len(s) {
+					lineEnd := strings.IndexByte(s[i+1:], '\n')
+					line := s[i+1:]
+					next := len(s) - 1
+					if lineEnd >= 0 {
+						line = s[i+1 : i+1+lineEnd]
+						next = i + 1 + lineEnd
+					}
+					i = next
+					if doc.tabs {
+						line = strings.TrimLeft(line, "\t")
+					}
+					if line == doc.delimiter {
+						break
+					}
+				}
+			}
+			pending = nil
+		default:
+			out.WriteByte(c)
+			atWordStart = isShellSpace(c) || strings.IndexByte(";&|(", c) >= 0
+		}
+	}
+	return out.String()
+}
+
 // wordForms returns a word and the paths it may carry: parts split at operators and
 // separators, and values attached to a short flag or an @.
 func wordForms(word string) []string {
 	forms := []string{word}
-	if parts := strings.FieldsFunc(word, func(r rune) bool { return strings.ContainsRune(";|&<>()`=,:", r) }); len(parts) > 1 || (len(parts) == 1 && parts[0] != word) {
-		forms = append(forms, parts...)
+	add := func(parts []string) {
+		if len(parts) > 1 || (len(parts) == 1 && parts[0] != word) {
+			forms = append(forms, parts...)
+		}
+	}
+	// Operators first, so a drive-letter path after one (x>>C:/a) survives whole. Splitting at
+	// colons is a second pass, because a colon is also part of that path.
+	operatorParts := strings.FieldsFunc(word, func(r rune) bool { return strings.ContainsRune(";|&<>()`=,", r) })
+	add(operatorParts)
+	for _, part := range operatorParts {
+		if colonParts := strings.Split(part, ":"); len(colonParts) > 1 {
+			forms = append(forms, colonParts...)
+		}
 	}
 	for _, form := range append([]string(nil), forms...) {
 		if len(form) > 2 && form[0] == '-' && form[1] != '-' {
@@ -137,9 +420,10 @@ func posixWords(s string) []string {
 	return b.words
 }
 
+var ansiEscapes = map[byte]byte{'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': 10, 'r': 13, 't': 9, 'v': 11, '\\': '\\', '\'': '\'', '"': '"', '?': '?'}
+
 // ansiQuoted decodes the body of $'...' starting at i, returning it and the closing quote's index.
 func ansiQuoted(s string, i int) (string, int) {
-	simple := map[byte]byte{'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': 10, 'r': 13, 't': 9, 'v': 11, '\\': '\\', '\'': '\'', '"': '"', '?': '?'}
 	var out strings.Builder
 	for ; i < len(s) && s[i] != '\''; i++ {
 		if s[i] != '\\' || i+1 >= len(s) {
@@ -148,7 +432,7 @@ func ansiQuoted(s string, i int) (string, int) {
 		}
 		i++
 		c := s[i]
-		if value, ok := simple[c]; ok {
+		if value, ok := ansiEscapes[c]; ok {
 			out.WriteByte(value)
 			continue
 		}

@@ -73,7 +73,7 @@ func rmBuild(t *testing.T, conv, path string) *harness.NormalizedToolCall {
 func TestAntigravityFlow_TranscriptIntentReachesCall(t *testing.T) {
 	_, path := agHome(t, "c1", userRecord("delete the build folder")+transcriptModelRecord)
 	call := rmBuild(t, "c1", path)
-	if hold := applySessionContext(call, config.DefaultConfig(), io.Discard); hold != nil {
+	if hold := applySessionContext(call, transcriptOnConfig(), io.Discard); hold != nil {
 		t.Fatalf("unexpected hold: %+v", hold)
 	}
 	if call.UserIntent != "delete the build folder" {
@@ -84,7 +84,7 @@ func TestAntigravityFlow_TranscriptIntentReachesCall(t *testing.T) {
 func TestAntigravityFlow_LatestStopRequestIsHeld(t *testing.T) {
 	_, path := agHome(t, "c1", userRecord("delete the build folder")+transcriptModelRecord+userRecord("stop"))
 	call := rmBuild(t, "c1", path)
-	hold := applySessionContext(call, config.DefaultConfig(), io.Discard)
+	hold := applySessionContext(call, transcriptOnConfig(), io.Discard)
 	if hold == nil || hold.Decision != harness.DecisionForceAsk || hold.Source != sourceSessionAborted {
 		t.Fatalf("expected abort hold, got %+v", hold)
 	}
@@ -99,7 +99,7 @@ func TestAntigravityFlow_StopDropsTurnMatchedSessionIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := rmBuild(t, "c1", path)
-	if hold := applySessionContext(call, config.DefaultConfig(), io.Discard); hold == nil {
+	if hold := applySessionContext(call, transcriptOnConfig(), io.Discard); hold == nil {
 		t.Fatal("expected a hold")
 	}
 	if call.UserIntent != "" {
@@ -123,7 +123,7 @@ func TestAntigravityFlow_UnusableLatestMessageFailsClosed(t *testing.T) {
 			}
 			call := agCall(t, "c1", path, "view_file", map[string]any{"AbsolutePath": ".env"})
 			var stderr bytes.Buffer
-			if hold := applySessionContext(call, config.DefaultConfig(), &stderr); hold != nil {
+			if hold := applySessionContext(call, transcriptOnConfig(), &stderr); hold != nil {
 				t.Fatalf("unexpected hold: %+v", hold)
 			}
 			if call.UserIntent != "" {
@@ -132,7 +132,7 @@ func TestAntigravityFlow_UnusableLatestMessageFailsClosed(t *testing.T) {
 			if stderr.Len() == 0 {
 				t.Error("expected a stderr diagnostic")
 			}
-			final := traceGateEvaluation(call, config.DefaultConfig(), true).Final
+			final := traceGateEvaluation(call, transcriptOnConfig(), true).Final
 			if final == nil || final.Decision != harness.DecisionAsk || final.Source != "fastpath_sensitive" {
 				t.Fatalf("expected stateless ASK, got %+v", final)
 			}
@@ -148,7 +148,7 @@ func TestAntigravityFlow_ForgedTranscriptPathIsIgnored(t *testing.T) {
 	}
 	call := rmBuild(t, "c1", forged)
 	var stderr bytes.Buffer
-	if hold := applySessionContext(call, config.DefaultConfig(), &stderr); hold != nil {
+	if hold := applySessionContext(call, transcriptOnConfig(), &stderr); hold != nil {
 		t.Fatalf("unexpected hold: %+v", hold)
 	}
 	if call.UserIntent != "" || stderr.Len() == 0 {
@@ -165,7 +165,7 @@ func TestAntigravityFlow_SessionHoldsComeFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 		call := rmBuild(t, "c1", path)
-		hold := applySessionContext(call, config.DefaultConfig(), io.Discard)
+		hold := applySessionContext(call, transcriptOnConfig(), io.Discard)
 		if hold == nil || hold.Source != sourceSessionAborted || call.UserIntent != "" {
 			t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
 		}
@@ -176,7 +176,7 @@ func TestAntigravityFlow_SessionHoldsComeFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 		call := rmBuild(t, "c1", path)
-		hold := applySessionContext(call, config.DefaultConfig(), io.Discard)
+		hold := applySessionContext(call, transcriptOnConfig(), io.Discard)
 		if hold == nil || hold.Source != sourceSessionReadError || call.UserIntent != "" {
 			t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
 		}
@@ -191,7 +191,7 @@ func TestAntigravityFlow_DisabledSettingsSkipTranscript(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, path := agHome(t, "c1", userRecord("stop"))
-			cfg := config.DefaultConfig()
+			cfg := transcriptOnConfig()
 			mutate(cfg)
 			call := rmBuild(t, "c1", path)
 			var stderr bytes.Buffer
@@ -206,7 +206,7 @@ func TestAntigravityFlow_DisabledSettingsSkipTranscript(t *testing.T) {
 func TestNewIntentPathsRespectCanonicalReadTarget(t *testing.T) {
 	_, path := agHome(t, "c1", userRecord("show me both files"))
 	ag := agCall(t, "c1", path, "view_file", map[string]any{"AbsolutePath": "README.md", "path": "/etc/passwd"})
-	if hold := applySessionContext(ag, config.DefaultConfig(), io.Discard); hold != nil || ag.UserIntent == "" {
+	if hold := applySessionContext(ag, transcriptOnConfig(), io.Discard); hold != nil || ag.UserIntent == "" {
 		t.Fatalf("hold=%+v intent=%q", hold, ag.UserIntent)
 	}
 	ingest(t, `{"session_id":"cx","turn_id":"t1","prompt":"show me both files"}`)
@@ -215,11 +215,11 @@ func TestNewIntentPathsRespectCanonicalReadTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hold := applySessionContext(cx, config.DefaultConfig(), io.Discard); hold != nil || cx.UserIntent == "" {
+	if hold := applySessionContext(cx, transcriptOnConfig(), io.Discard); hold != nil || cx.UserIntent == "" {
 		t.Fatalf("hold=%+v intent=%q", hold, cx.UserIntent)
 	}
 	for _, call := range []*harness.NormalizedToolCall{ag, cx} {
-		final := traceGateEvaluation(call, config.DefaultConfig(), true).Final
+		final := traceGateEvaluation(call, transcriptOnConfig(), true).Final
 		if final == nil || final.Decision != harness.DecisionAsk || final.Source != "fastpath_boundary" {
 			t.Errorf("%s: expected boundary ASK, got %+v", call.Harness, final)
 		}
@@ -238,10 +238,10 @@ func TestCodexFlow_StaleTurnIntentDoesNotDeferSensitiveRead(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if hold := applySessionContext(call, config.DefaultConfig(), io.Discard); hold != nil {
+		if hold := applySessionContext(call, transcriptOnConfig(), io.Discard); hold != nil {
 			t.Fatalf("unexpected hold: %+v", hold)
 		}
-		return traceGateEvaluation(call, config.DefaultConfig(), true)
+		return traceGateEvaluation(call, transcriptOnConfig(), true)
 	}
 	if tr := run("turn-A"); !tr.WouldSendToJudge {
 		t.Errorf("matching turn should defer to TypeSafe: %+v", tr.Final)
@@ -284,7 +284,7 @@ func TestTranscriptProtectedThroughGate(t *testing.T) {
 				call := *base
 				call.Harness = harness.HarnessAntigravity
 				call.UserIntent = "edit the transcript"
-				cfg := config.DefaultConfig()
+				cfg := transcriptOnConfig()
 				if fastpathOff {
 					cfg.FastpathEnabled = &off
 				}
@@ -343,7 +343,7 @@ func TestEvalReportsCodexHarnessFromStringTurnID(t *testing.T) {
 }
 
 func TestEvalDeniesTranscriptAccessWithFastpathDisabled(t *testing.T) {
-	e := newEvalEnv(t, `{"fastpath_enabled":false}`)
+	e := newEvalEnv(t, `{"fastpath_enabled":false,"antigravity_transcript_intent":true}`)
 	target := filepath.Join(e.root, ".gemini", "antigravity", "brain", "c1", ".system_generated", "logs", "transcript.jsonl")
 	rep := e.report("--tool", "view_file", "--target", target, "--offline", "--cwd", e.workspace())
 	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
@@ -386,7 +386,7 @@ func TestTurnKeyRequiredOnBothSides(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if hold := applySessionContext(call, config.DefaultConfig(), io.Discard); hold != nil {
+			if hold := applySessionContext(call, transcriptOnConfig(), io.Discard); hold != nil {
 				t.Fatalf("unexpected hold: %+v", hold)
 			}
 			if call.UserIntent != tc.wantIntent {
@@ -404,7 +404,7 @@ func TestTurnKeyRequiredOnBothSides(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			hold := applySessionContext(call, config.DefaultConfig(), io.Discard)
+			hold := applySessionContext(call, transcriptOnConfig(), io.Discard)
 			if hold == nil || hold.Source != sourceSessionAborted || call.UserIntent != "" {
 				t.Fatalf("hold=%+v intent=%q", hold, call.UserIntent)
 			}
@@ -438,9 +438,9 @@ func TestTranscriptSymlinkAliasCannotForgeIntent(t *testing.T) {
 		t.Fatalf("write through alias not denied: %+v", res)
 	}
 	off := false
-	cfg := config.DefaultConfig()
+	cfg := transcriptOnConfig()
 	cfg.FastpathEnabled = &off
-	for name, c := range map[string]*config.Config{"fastpath on": config.DefaultConfig(), "fastpath off": cfg} {
+	for name, c := range map[string]*config.Config{"fastpath on": transcriptOnConfig(), "fastpath off": cfg} {
 		if final := traceGateEvaluation(call, c, true).Final; final == nil || final.Decision != harness.DecisionDeny || final.Source != "fastpath_tampering" {
 			t.Errorf("%s: expected DENY, got %+v", name, final)
 		}
@@ -543,7 +543,7 @@ func TestRedirectedTranscriptYieldsNoIntent(t *testing.T) {
 	}
 	call := rmBuild(t, "c1", canonical)
 	var stderr bytes.Buffer
-	if hold := applySessionContext(call, config.DefaultConfig(), &stderr); hold != nil {
+	if hold := applySessionContext(call, transcriptOnConfig(), &stderr); hold != nil {
 		t.Fatalf("unexpected hold: %+v", hold)
 	}
 	if call.UserIntent != "" {
@@ -569,7 +569,7 @@ func TestUnusableTurnIDNeverYieldsIntent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return call, applySessionContext(call, config.DefaultConfig(), io.Discard)
+		return call, applySessionContext(call, transcriptOnConfig(), io.Discard)
 	}
 	saveIngest := func(t *testing.T, turn, prompt string) {
 		t.Helper()
@@ -696,7 +696,9 @@ func TestTranscriptAliasWithWhitespaceInName(t *testing.T) {
 
 // shellSpellings are words that a shell turns into the name "data" or the alias path.
 func shellSpellings(work string) map[string]string {
-	abs := filepath.Join(work, "d")
+	// Forward slashes: on Windows, a shell that reads backslashes as escapes (Git Bash) would
+	// also eat C:\\Users, while cmd.exe and PowerShell read d\\ata as the path d, ata.
+	abs := filepath.ToSlash(filepath.Join(work, "d"))
 	return map[string]string{
 		"backslash":           `d\ata`,
 		"absolute backslash":  abs + `\ata`,
@@ -731,7 +733,7 @@ func TestTranscriptAliasThroughShellSpelling(t *testing.T) {
 	}
 	other := t.TempDir()
 	for name, call := range map[string]*harness.NormalizedToolCall{
-		"reproduction":            {Command: `printf 'forged\n' > ` + filepath.Join(work, "d") + `\ata`, Cwd: other},
+		"reproduction":            {Command: `printf 'forged\n' > ` + filepath.ToSlash(filepath.Join(work, "d")) + `\ata`, Cwd: other},
 		"powershell backtick":     {Command: "Get-Content d`a`t`a", Cwd: work},
 		"powershell first":        {Command: "Set-Content `data x", Cwd: work},
 		"powershell in quotes":    {Command: "Get-Content \"d`at`a\"", Cwd: work},
@@ -773,15 +775,15 @@ func TestTranscriptAliasThroughShellSpelling(t *testing.T) {
 
 // Prove the spellings are real: a real shell writes through each one, and the guard denies it.
 func TestShellSpellingsReachTheAliasInARealShell(t *testing.T) {
-	shell, err := exec.LookPath("bash")
-	if err != nil || runtime.GOOS == "windows" {
-		t.Skip("bash unavailable")
-	}
+	shell := realBash(t)
 	for name, word := range shellSpellings("/placeholder") {
 		if strings.HasPrefix(word, "/placeholder") {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
+			if strings.Contains(word, `\u`) && !bashHasUnicodeEscapes(shell) {
+				t.Skip("this bash has no \\u escape, as on macOS (bash 3.2)")
+			}
 			_, canonical, work := aliasFixture(t)
 			command := "printf forged >> " + word
 			if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: command, Cwd: work}); res == nil {
@@ -802,6 +804,25 @@ func TestShellSpellingsReachTheAliasInARealShell(t *testing.T) {
 			}
 		})
 	}
+}
+
+// realBash finds a bash to run. On Windows that means Git Bash, never the WSL launcher in
+// System32, and its native symlink support depends on the runner, so callers there may skip.
+func realBash(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("bash fixtures run on Unix; Git Bash spellings are covered by TestGitBashPathsOnWindows")
+	}
+	shell, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	return shell
+}
+
+func bashHasUnicodeEscapes(shell string) bool {
+	out, err := exec.Command(shell, "--noprofile", "--norc", "-c", `printf %s $'\u0064'`).Output()
+	return err == nil && string(out) == "d"
 }
 
 // Paths outside the known argument names: nested, in a patch header, and URI spellings.
@@ -845,23 +866,65 @@ func TestTranscriptAliasThroughOtherArguments(t *testing.T) {
 	}
 }
 
-// Documented limits, pinned so docs/security-model.md stays honest: if one starts being
-// denied, update the docs' list.
+// Documented limits. Each fixture passes the guard, then really runs in an isolated shell,
+// writes a record through the alias, and is accepted as user intent. So the docs' list states
+// what works today; if a fixture stops passing the guard or stops forging, update the docs.
 func TestTranscriptGuardDocumentedLimits(t *testing.T) {
-	_, _, work := aliasFixture(t)
-	// Cwd is the parent of work, so "data" alone resolves to nothing until the cd runs.
-	parent, base := filepath.Dir(work), filepath.Base(work)
-	for name, command := range map[string]string{
-		"variable set in the command": `f=da; printf x > "` + base + `/${f}ta"`,
-		"glob":                        `printf x > ` + base + `/d*`,
-		"brace expansion":             `printf x > ` + base + `/{d,}ata`,
-		"cd in the same command":      `cd ` + base + ` && printf x > data`,
-		"decoded at run time":         `printf x > "$(printf 'ZGF0YQ==' | base64 -d)"`,
-		"link made in the command":    `ln -s "$(printf dat)a" q; printf x > q`,
+	shell := realBash(t)
+	const record = `printf '%s\n' "$R" >> `
+	for _, tc := range []struct {
+		name    string
+		needs   string
+		command func(base string) string
+		setup   func(t *testing.T, canonical, work string)
+	}{
+		{name: "variable set in the command", command: func(base string) string { return `f=da; ` + record + `"` + base + `/${f}ta"` }},
+		{name: "variable the hook does not have", command: func(base string) string { return record + `"` + base + `/${LIMIT_NAME}"` }},
+		{name: "glob", command: func(base string) string { return record + base + `/d*` }},
+		{name: "brace expansion", needs: "tee", command: func(base string) string { return `printf '%s\n' "$R" | tee -a ` + base + `/{d,e}ata > /dev/null` }},
+		{name: "cd in the same command", command: func(base string) string { return `cd ` + base + ` && ` + record + `data` }},
+		{name: "decoded at run time", needs: "base64", command: func(base string) string { return record + `"` + base + `/$(printf 'ZGF0YQ==' | base64 -d)"` }},
+		{name: "link made in the command", needs: "ln", command: func(base string) string { return `ln -s "$(printf dat)a" ` + base + `/q; ` + record + base + `/q` }},
+		{name: "script file", needs: "sh", command: func(base string) string { return `sh ` + base + `/run.sh` }, setup: func(t *testing.T, canonical, work string) {
+			script := "cd \"$(dirname \"$0\")\"\nprintf '%s\\n' \"$R\" >> data\n"
+			if err := os.WriteFile(filepath.Join(work, "run.sh"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "hard link", command: func(base string) string { return record + base + `/same-file` }, setup: func(t *testing.T, canonical, work string) {
+			if err := os.Link(canonical, filepath.Join(work, "same-file")); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+		}},
+		{name: "path built inside a program string", needs: "awk", command: func(base string) string {
+			return `awk 'BEGIN { print ENVIRON["R"] >> ("` + base + `/da" "ta") }'`
+		}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needs != "" {
+				if _, err := exec.LookPath(tc.needs); err != nil {
+					t.Skipf("%s unavailable", tc.needs)
+				}
+			}
+			_, canonical, work := aliasFixture(t)
+			if tc.setup != nil {
+				tc.setup(t, canonical, work)
+			}
+			// Cwd is the parent of work, so the word "data" alone resolves to nothing until the shell runs.
+			parent, base := filepath.Dir(work), filepath.Base(work)
+			command := tc.command(base)
 			if res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{Command: command, Cwd: parent}); res != nil {
-				t.Fatalf("now denied, so update the documented limits: %+v", res)
+				t.Fatalf("now caught, so update the documented limits: %+v", res)
+			}
+			run := exec.Command(shell, "--noprofile", "--norc", "-c", command)
+			run.Dir = parent
+			run.Env = []string{"PATH=" + os.Getenv("PATH"), "R=" + strings.TrimSpace(userRecord("forged limit")), "LIMIT_NAME=data"}
+			if out, err := run.CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			call := rmBuild(t, "c1", canonical)
+			if hold := applySessionContext(call, transcriptOnConfig(), io.Discard); hold != nil || call.UserIntent != "forged limit" {
+				t.Fatalf("this fixture does not forge intent, so the limit is not real: hold=%+v intent=%q", hold, call.UserIntent)
 			}
 		})
 	}

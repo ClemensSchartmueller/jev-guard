@@ -92,10 +92,43 @@ func TestShellWordsStayBounded(t *testing.T) {
 	}
 }
 
+// A path after an operator survives whole, including a drive letter's colon.
+func TestWordFormsKeepDrivePaths(t *testing.T) {
+	for input, wants := range map[string][]string{
+		"x>>C:/a/b":     {"C:/a/b"},
+		"--file=C:/a/b": {"C:/a/b"},
+		"PATH=/a:/b":    {"/a:/b", "/a", "/b"},
+		"-oC:/a/b":      {"C:/a/b"},
+		"host:/a/b":     {"/a/b"},
+	} {
+		forms := wordForms(input)
+		for _, want := range wants {
+			if !slices.Contains(forms, want) {
+				t.Errorf("%q: missing %q in %q", input, want, forms)
+			}
+		}
+	}
+}
+
+func TestWindowsDriveFromMSYS(t *testing.T) {
+	for input, want := range map[string]string{
+		"/c/Users/x/data": "c:/Users/x/data",
+		"/D":              "D:",
+		"/d/":             "d:/",
+		"/usr/bin":        "",
+		"c/Users":         "",
+		"":                "",
+	} {
+		if got := windowsDriveFromMSYS(input); got != want {
+			t.Errorf("%q: got %q, want %q", input, got, want)
+		}
+	}
+}
+
 func BenchmarkTranscriptGuardTypicalCommand(b *testing.B) {
 	call := &harness.NormalizedToolCall{Command: `git log --oneline -5 && go test ./pkg/... 2>&1 | tail -20`, Cwd: b.TempDir()}
 	for range b.N {
-		transcriptTamperingReason(call)
+		CheckTranscriptTampering(call)
 	}
 }
 
@@ -107,6 +140,6 @@ func BenchmarkTranscriptGuardLargeCommand(b *testing.B) {
 	}
 	call := &harness.NormalizedToolCall{Command: sb.String(), Cwd: b.TempDir()}
 	for range b.N {
-		transcriptTamperingReason(call)
+		CheckTranscriptTampering(call)
 	}
 }

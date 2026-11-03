@@ -114,7 +114,7 @@ On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything
 
 Each agent receives the verdict in its own protocol. In Claude Code and Codex, `ASK` becomes a block (exit code 2) with the reason sent to the agent, in every mode. That is also why bypass flags such as `--dangerously-skip-permissions` and `--yolo` cannot skip it. An `ALLOW` in Claude Code is sent as `permissionDecision: "allow"`, which pre-approves the tool call so Claude Code does not prompt for it. In Antigravity, `ASK` becomes `force_ask`, which prompts you even in Turbo mode.
 
-Your stated intent comes from your latest prompt: through hooks in Claude Code and Codex, and from the conversation transcript in Antigravity. If it is missing or unusable, `jev-guard` decides without it.
+Your stated intent comes from your latest prompt: through hooks in Claude Code and Codex, and in Antigravity only if you opt in to reading the conversation transcript ([details and risk](docs/security-model.md#intent-per-agent)). If it is missing or unusable, `jev-guard` decides without it.
 
 The full rules, including the list of protected files, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
 

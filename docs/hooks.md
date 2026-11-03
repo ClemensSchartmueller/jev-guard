@@ -112,7 +112,7 @@ The hooks do the same jobs as in Claude Code:
 }
 ```
 
-Codex loads project hooks only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the hooks before they can run. Any hook that is new or edited needs a new review, including the `UserPromptSubmit` and `Stop` hooks that `init` adds to an existing setup. Until then the gate still works, but without prompt intent. `jev-guard doctor` warns if these hooks are missing from the file, but it cannot tell whether Codex has trusted them.
+Codex intent does not depend on `antigravity_transcript_intent`. Codex loads project hooks only when the project is trusted. Run `/hooks` in the Codex CLI to review and trust the hooks before they can run. Any hook that is new or edited needs a new review, including the `UserPromptSubmit` and `Stop` hooks that `init` adds to an existing setup. Until then the gate still works, but without prompt intent. `jev-guard doctor` warns if these hooks are missing from the file, but it cannot tell whether Codex has trusted them.
 
 `ingest` and `end-turn` print nothing to stdout, because Codex would inject that text into the model's context. Every `ASK`, `force_ask`, and `DENY` exits with code 2 and the reason on stderr, because `jev-guard` never emits `permissionDecision: "ask"`.
 
@@ -138,6 +138,6 @@ Codex loads project hooks only when the project is trusted. Run `/hooks` in the 
 
 If the `jev-guard` section already exists with `"enabled": false`, `init` sets it to `true`.
 
-Antigravity only needs `PreToolUse`. Its payload includes a transcript path but not the prompt text, so each `PreToolUse` call reads your latest request from the conversation transcript, with no session cache or `Stop` hook. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook. Do not add that hook back.
+Antigravity only needs `PreToolUse`. Its payload has a transcript path but not the prompt text, so by default it gets no intent. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook. Do not add that hook back.
 
-The transcript format is undocumented, so this fails closed. See [Intent per agent](security-model.md#intent-per-agent). To turn it off, set `antigravity_transcript_intent` to `false` in `~/.jevguard/.jevguard.json`. Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.
+To read your latest request from the conversation transcript at each `PreToolUse`, set `antigravity_transcript_intent` to `true` in `~/.jevguard/.jevguard.json`. It needs no extra hooks. It is off by default because an agent with shell access can still forge a transcript. See [Intent per agent](security-model.md#intent-per-agent). Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.
