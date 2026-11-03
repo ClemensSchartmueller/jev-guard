@@ -17,7 +17,7 @@ Run `jev-guard --help` for the built-in summary. When run in an interactive term
 | `jev-guard eval` / `explain` | Simulate how a tool call would be judged |
 | `jev-guard status` | Show active sessions and the cache directory |
 | `jev-guard ingest` | Store the user's prompt as session intent (used by hooks) |
-| `jev-guard end-turn` | Clear intent when a reply ends (Claude Code `Stop` hook) |
+| `jev-guard end-turn` | Clear intent when a reply ends (Claude Code and Codex `Stop` hook) |
 | `jev-guard clear-intent` | Clear intent for one session, or all with `--all` |
 | `jev-guard config trust` / `untrust` | Prepare or revoke a project config trust record ([details](configuration.md#project-configs-and-trust)) |
 | `<payload-json> \| jev-guard` | Evaluate a hook payload; this is what the hooks run |
@@ -44,6 +44,8 @@ Without `--agent`, `init` prints the agents it detected. With `--scope user`, it
 `init` preserves existing hook configuration, and running it again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they work without a `PATH` change.
 
 `doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation.
+
+When an agent has a registered gate, `doctor` also reports where it gets prompt intent, and warns if Claude Code or Codex is missing the `UserPromptSubmit` or `Stop` hook, which older setups can be. It always reports `antigravity_transcript_intent`: `[OK]` when off, and `[WARN]` when on, because an agent with shell access can still forge a transcript.
 
 `version`/`-v` and `help`/`-h` also work as aliases for `--version` and `--help`.
 
@@ -73,7 +75,7 @@ ASK: Access to sensitive file or credential pattern: .env (source: fastpath_sens
 - `--tool NAME --target PATH` simulates any other tool in a Claude Code-shaped payload, passing the target under the tool's canonical path argument (`TargetFile` for `write_to_file`/`replace_file_content`, `AbsolutePath` for `view_file`, `notebook_path` for `NotebookEdit`, `path` for Glob/Grep/LS, otherwise `file_path`).
 - `--payload FILE` uses a raw hook JSON payload of any harness. Use it to reproduce an exact Antigravity or Codex call.
 - `--cwd DIR` sets the working directory (default: current directory).
-- `--intent TEXT` simulates the user's prompt for intent-aware decisions, for example `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent exactly as the hook does, so the fast path defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (such as `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
+- `--intent TEXT` simulates the user's prompt for intent-aware decisions, for example `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent exactly as the hook does, so the fast path defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (such as `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written and the Antigravity transcript is never read, so a cached intent, an abort, or a live conversation never affects `eval`, even with a `--payload` that has a `transcriptPath`. `--explain` and `--json` report `antigravity_transcript_intent`, and with it on, `eval` applies the transcript guard as the hook does.
 - `--offline` skips the TypeSafe network call. If the fast path has no verdict, the result says the call "would be sent to TypeSafe".
 - `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fast path result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
@@ -129,5 +131,6 @@ jev-guard status                   # also: jev-guard cache status, jev-guard cac
 - `ingest` sends its confirmation to stderr, so it never pollutes the user's prompt.
 - `end-turn` clears only that session's intent, prints nothing to stdout, and always exits 0. A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it. A session file that cannot be read is also kept, since its abort state is unknown.
 - `clear-intent` without `--session`, a stdin payload, or `--all` prints usage and exits 1.
-- `status` lists unreadable session files together with their error.
-- Aliases: `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.
+- `status` lists unreadable session files together with their error, and reports `antigravity_transcript_intent`.
+- `ingest --turn-key <id>` stores an opaque string turn ID, the same value a Codex `turn_id` provides. Payloads with a string `turn_id` set it automatically, and a tool call whose `turn_id` differs or is missing does not get that intent. A blank key gives no intent for any call, though a stop prompt saved with one still holds. `status` shows it as the session's turn.
+- Aliases: `--turn_key` works for `--turn-key`, `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.

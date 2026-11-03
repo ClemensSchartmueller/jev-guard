@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -163,6 +164,7 @@ func (r *Runner) handleConfigShow() (Action, int) {
 	fmt.Fprintf(r.Stdout, "  Fastpath enabled:     %t (%s)\n", cfg.IsFastpathEnabled(), cfg.Sources["fastpath_enabled"])
 	fmt.Fprintf(r.Stdout, "  Context awareness:    %t (%s)\n", cfg.IsContextAwarenessEnabled(), cfg.Sources["context_awareness_enabled"])
 	fmt.Fprintf(r.Stdout, "  Intent TTL:           %d minutes (%s)\n", int(cfg.IntentTTL()/time.Minute), cfg.Sources["intent_ttl_minutes"])
+	fmt.Fprintf(r.Stdout, "  Antigravity transcript intent: %t (%s)\n", cfg.IsAntigravityTranscriptIntentEnabled(), cfg.Sources["antigravity_transcript_intent"])
 	fmt.Fprintf(r.Stdout, "  Sensitive files:      %d patterns (%s)\n", len(cfg.SensitiveFiles), cfg.Sources["sensitive_files"])
 	fmt.Fprintf(r.Stdout, "  Trusted commands:     %d prefixes (%s)\n", len(cfg.TrustedCommands), cfg.Sources["trusted_commands"])
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
@@ -299,11 +301,18 @@ func (r *Runner) handleUnknown(arg string) (Action, int) {
 func (r *Runner) handleIngest(args []string) (Action, int) {
 	var sessionID string
 	var turnID int
+	var turnKey string
+	var turnUnusable bool
 	var prompt string
 
 	for i := 0; i < len(args); i++ {
 		if val, ok := parseFlagValue(args, &i, "-s", "--session", "--session-id", "--session_id"); ok {
 			sessionID = val
+			continue
+		}
+		if val, ok := parseFlagValue(args, &i, "--turn-key", "--turn_key"); ok {
+			turnKey = val
+			turnUnusable = strings.TrimSpace(val) == ""
 			continue
 		}
 		if val, ok := parseFlagValue(args, &i, "-t", "--turn", "--turn-id", "--turn_id"); ok {
@@ -336,6 +345,10 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 				if turnID == 0 {
 					turnID = parsedState.TurnID
 				}
+				if turnKey == "" && !turnUnusable {
+					turnKey = parsedState.TurnKey
+					turnUnusable = parsedState.TurnUnusable
+				}
 				if prompt == "" {
 					prompt = parsedState.Prompt
 				}
@@ -353,9 +366,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	}
 
 	state := &session.SessionState{
-		SessionID: sessionID,
-		TurnID:    turnID,
-		Prompt:    prompt,
+		SessionID:    sessionID,
+		TurnID:       turnID,
+		TurnKey:      turnKey,
+		TurnUnusable: turnUnusable,
+		Prompt:       prompt,
 	}
 
 	if err := session.SaveSession(state); err != nil {
@@ -367,7 +382,11 @@ func (r *Runner) handleIngest(args []string) (Action, int) {
 	if session.IsNegativeIntent(prompt) {
 		fmt.Fprintf(r.Stderr, "Abort signal recorded for session '%s' (active intent cancelled)\n", sessionID)
 	} else {
-		fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		if turnKey != "" {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %s)\n", sessionID, turnKey)
+		} else {
+			fmt.Fprintf(r.Stderr, "Session intent recorded for session '%s' (turn: %d)\n", sessionID, turnID)
+		}
 	}
 
 	return ActionHandled, 0
@@ -507,8 +526,15 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 }
 
 func (r *Runner) handleStatus() (Action, int) {
+	transcriptIntent := "unknown"
 	if cwd, err := os.Getwd(); err == nil {
-		session.SetSessionTTL(loadConfig(cwd).IntentTTL())
+		cfg := loadConfig(cwd)
+		session.SetSessionTTL(cfg.IntentTTL())
+		transcriptIntent = "off"
+		if cfg.IsAntigravityTranscriptIntentEnabled() {
+			transcriptIntent = "on"
+		}
+		transcriptIntent += " (" + cfg.Sources["antigravity_transcript_intent"] + ")"
 	}
 	homeDir := session.GetJevguardDir()
 	sessionsDir := session.GetSessionsDir()
@@ -522,6 +548,7 @@ func (r *Runner) handleStatus() (Action, int) {
 	fmt.Fprintln(r.Stdout, "jev-guard status:")
 	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
 	fmt.Fprintf(r.Stdout, "  Sessions Directory: %s\n", sessionsDir)
+	fmt.Fprintf(r.Stdout, "  Antigravity transcript intent: %s\n", transcriptIntent)
 	fmt.Fprintf(r.Stdout, "  Active Sessions:    %d\n", len(scan.Active))
 	if len(scan.Unreadable) > 0 {
 		fmt.Fprintf(r.Stdout, "  Unreadable Sessions: %d (tool calls in these sessions are held)\n", len(scan.Unreadable))
@@ -536,8 +563,12 @@ func (r *Runner) handleStatus() (Action, int) {
 		if len(promptPreview) > 60 {
 			promptPreview = promptPreview[:57] + "..."
 		}
-		fmt.Fprintf(r.Stdout, "  - [%s] Status: %s, Turn: %d, Updated: %s\n",
-			s.SessionID, status, s.TurnID, s.UpdatedAt.Format("15:04:05"))
+		turn := strconv.Itoa(s.TurnID)
+		if s.TurnKey != "" {
+			turn = s.TurnKey
+		}
+		fmt.Fprintf(r.Stdout, "  - [%s] Status: %s, Turn: %s, Updated: %s\n",
+			s.SessionID, status, turn, s.UpdatedAt.Format("15:04:05"))
 		if promptPreview != "" {
 			fmt.Fprintf(r.Stdout, "    Prompt: %q\n", promptPreview)
 		}
@@ -559,7 +590,7 @@ Usage:
 Commands:
   init            Configure agent hooks in the current project
   ingest          Ingest active user prompt/intent into session cache
-  end-turn        Clear the session intent when a reply ends (Claude Code Stop hook)
+  end-turn        Clear the session intent when a reply ends (Claude Code / Codex Stop hook)
   clear-intent    Clear active user intent for one session (--all for every session)
   cache clear     Alias for clear-intent
   eval            Simulate how a tool call would be judged (--cmd, --tool/--target, --payload; --offline, --explain, --json)
@@ -577,6 +608,7 @@ Flags:
 Ingest Flags:
   -s, --session <id>   Session / Conversation ID (defaults to "default")
   -t, --turn <num>     Turn / Invocation sequence number
+      --turn-key <id>  Opaque string turn ID (Codex turn_id) for exact turn scoping
   -p, --prompt <text>  Active user prompt text (or pipe payload JSON via stdin)
 
 Eval Flags:

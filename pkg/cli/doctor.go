@@ -122,6 +122,15 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 	// 4. Model and feature flags.
 	report(doctorOK, "Model: %s; fastpath: %t; context awareness: %t", effectiveValue(cfg.Model, "jev-latest"), cfg.IsFastpathEnabled(), cfg.IsContextAwarenessEnabled())
 
+	switch source := cfg.Sources["antigravity_transcript_intent"]; {
+	case !cfg.IsAntigravityTranscriptIntentEnabled():
+		report(doctorOK, "Antigravity transcript intent: off (%s); Codex and Claude Code intent do not depend on it", source)
+	case !cfg.IsContextAwarenessEnabled():
+		report(doctorWarn, "Antigravity transcript intent: on (%s), but context awareness is off, so no transcript is read; the transcript guard still runs for every agent", source)
+	default:
+		report(doctorWarn, "Antigravity transcript intent: on (%s); the transcript guard runs for every agent, but an agent with shell access can still forge a transcript, so this trusts your agents not to", source)
+	}
+
 	// 5. Workspace.
 	if root := doctorGitRoot(cwd); root != "" {
 		report(doctorOK, "Workspace: cwd %s, git root %s", cwd, root)
@@ -160,7 +169,7 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 				scopes = append(scopes, hookScope{"user", userPath})
 			}
 		}
-		found := false
+		found, registered := false, false
 		var checked []string
 		for _, s := range scopes {
 			checked = append(checked, s.path)
@@ -173,7 +182,7 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 				found = true
 				report(doctorFail, "Hooks (%s): %s scope integration disabled in %s; run `jev-guard init --agent %s --scope %s`", agent, s.name, s.path, agent, s.name)
 			case "found":
-				found = true
+				found, registered = true, true
 				exe := hookExecutable(command)
 				if resolved, ok := resolveExecutable(exe); ok {
 					report(doctorOK, "Hooks (%s): PreToolUse registered in %s scope (%s); command %s", agent, s.name, s.path, resolved)
@@ -181,6 +190,9 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 					report(doctorFail, "Hooks (%s): PreToolUse registered in %s scope (%s) but command %q not found or not executable", agent, s.name, s.path, exe)
 				}
 			}
+		}
+		if registered {
+			reportIntentSource(report, cfg, agent, checked)
 		}
 		if !found {
 			report(doctorWarn, "Hooks (%s): no jev-guard PreToolUse entry in %s; run `jev-guard init --agent %s`", agent, strings.Join(checked, " or "), agent)
@@ -191,6 +203,58 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		return 1
 	}
 	return 0
+}
+
+// reportIntentSource says where an agent with a registered gate gets prompt intent.
+// Claude Code and Codex need the UserPromptSubmit and Stop hooks, which may live in
+// either scope; a missing hook only warns because the gate still works without intent.
+func reportIntentSource(report func(level, format string, a ...interface{}), cfg *config.Config, agent string, paths []string) {
+	if !cfg.IsContextAwarenessEnabled() {
+		return
+	}
+	if agent == "antigravity" {
+		return // It has no prompt hooks; its intent is the opt-in reported once for all agents.
+	}
+	var missing []string
+	if !anyManagedHook(paths, "UserPromptSubmit", " ingest") {
+		missing = append(missing, "UserPromptSubmit")
+	}
+	if !anyManagedHook(paths, "Stop", " end-turn") {
+		missing = append(missing, "Stop")
+	}
+	if len(missing) > 0 {
+		report(doctorWarn, "Intent (%s): no jev-guard %s hook in %s, so prompt intent is not tracked correctly; run `jev-guard init --agent %s`", agent, strings.Join(missing, " or "), strings.Join(paths, " or "), agent)
+		return
+	}
+	report(doctorOK, "Intent (%s): UserPromptSubmit and Stop registered", agent)
+}
+
+// anyManagedHook reports whether any settings file registers the jev-guard subcommand for a hook event.
+func anyManagedHook(paths []string, event, subcommand string) bool {
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var root struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(data, &root) != nil {
+			continue
+		}
+		for _, entry := range root.Hooks[event] {
+			for _, hook := range entry.Hooks {
+				if managedHookCommand(hook.Command, "jev-guard"+subcommand) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func maskKey(key string) string {
