@@ -13,7 +13,7 @@ import (
 )
 
 // The guard's work budget, per tool call. It is sized so a call that fits finishes well under
-// a second. A call over budget gets an explicit ASK, never a pass.
+// a second. A call over budget gets an explicit ASK, which audit mode reports like any verdict.
 const (
 	maxGuardCommandBytes = 2 << 20 // of one command
 	maxGuardPathBytes    = 1 << 20 // of one path input
@@ -177,6 +177,14 @@ func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 		}
 		// An argument list holds literal words, so only a string some program will run is a command.
 		list := stringValues(raw)
+		size := 0
+		for _, word := range list {
+			size += len(word)
+		}
+		if size > maxGuardCommandBytes {
+			g.exceed("a command")
+			return ""
+		}
 		words = append(words, list...)
 		textWords = append(textWords, list...)
 		for _, payload := range commandPayloads(list) {

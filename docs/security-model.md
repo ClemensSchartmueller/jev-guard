@@ -69,7 +69,7 @@ Commands and other arguments get these checks:
 
 A command run from a working directory under the brain directory is denied as well.
 
-**Work limits.** A call too large to check gets `ASK` (source `transcript_guard_limit`, reason "could not be verified"), never a pass. The limits are 2 MiB per command, 1 MiB per path argument, 50,000 distinct words, 1,000,000 path components, 60,000 filesystem lookups, and 64 symlink hops per path, so a very large heredoc can hit them. A symlink loop also gets this `ASK`.
+**Work limits.** A call too large to check gets `ASK` (source `transcript_guard_limit`, reason "could not be verified"), so the size of a call cannot get it past the guard. As with every other verdict, audit mode logs this as `[AUDIT-MODE: ask]` and allows the call. The limits are 2 MiB per command (a string or an argument list), 1 MiB per path argument, 50,000 distinct words, 1,000,000 path components, 60,000 filesystem lookups, and 64 symlink hops per path, so a very large heredoc can hit them. A symlink loop also gets this `ASK`.
 
 **This does not make shell commands safe, and turning the setting on trusts your agents not to forge a transcript.** `jev-guard` reads a command's text and does not run a shell. It cannot see the following, and such a command goes on to the remaining checks. Each of the first group is run by a test in a real `bash`: the command passes the guard, writes a record through a symlink to the transcript, and that record is accepted as your intent.
 

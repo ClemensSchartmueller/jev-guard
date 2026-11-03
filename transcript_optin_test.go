@@ -380,3 +380,39 @@ func TestGitBashPathsOnWindows(t *testing.T) {
 	}
 	t.Log("Git Bash wrote through the alias with an escaped name")
 }
+
+// An argument list gets the same size limit as a command string, for one word and in total.
+func TestTranscriptGuardBudgetCoversCommandLists(t *testing.T) {
+	for name, list := range map[string][]string{
+		"one oversized word":  {"echo", strings.Repeat("x", 3<<20)},
+		"many words in total": {"echo", strings.Repeat("x", 3000), strings.Repeat("y z", 1<<20)},
+		"oversized in total":  {"echo", strings.Repeat("x", 3<<19), strings.Repeat("y", 3<<19)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{
+				ToolName: "run_command",
+				Cwd:      t.TempDir(),
+				RawArgs:  map[string]interface{}{"command": list},
+			})
+			if res == nil || res.Source != "transcript_guard_limit" || res.Decision != harness.DecisionAsk {
+				t.Fatalf("expected a stated ASK, got %+v", res)
+			}
+		})
+	}
+}
+
+// Audit mode reports every verdict without enforcing it (docs/configuration.md), and the
+// limit's ASK is no exception. The rewritten reason has to say what would have happened.
+func TestTranscriptGuardLimitIsReportedInAuditMode(t *testing.T) {
+	for mode, fastpathOn := range map[string]bool{"fastpath on": true, "fastpath off": false} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := withFastpath(transcriptOnConfig(), fastpathOn)
+			cfg.Mode = "audit"
+			call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "echo " + strings.Repeat("x", 3<<20), Cwd: t.TempDir()}
+			final := traceGateEvaluation(call, cfg, true).Final
+			if final == nil || final.Decision != harness.DecisionAllow || final.Source != "transcript_guard_limit" || !strings.HasPrefix(final.Reason, "[AUDIT-MODE: ask] ") {
+				t.Fatalf("got %+v", final)
+			}
+		})
+	}
+}
