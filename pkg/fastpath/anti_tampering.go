@@ -66,9 +66,12 @@ func IsTamperingDenial(result *harness.EvaluationResult) bool {
 	return result != nil && result.Decision == harness.DecisionDeny
 }
 
-// maxTamperingPathLookups bounds the path-like command words resolved against the security
-// directory per call, because each resolution reads the filesystem.
-const maxTamperingPathLookups = 2048
+// maxTamperingPathLookups bounds the distinct command-word paths resolved against the security
+// directory per call. The boundary evaluation's work budget bounds the bytes the lookups walk
+// (deep working directories); this bounds their number, since each costs a system call even
+// on a short path (tens of microseconds on Windows). It is well above the operand count of an
+// ordinary command, bare file names included.
+const maxTamperingPathLookups = 8192
 
 // commandWordsMentionJevguard reads every command in the call the way a shell would (see
 // shellWords) and reports whether any word names a protected file once its quotes and escapes
@@ -214,7 +217,7 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 		return false
 	}
 	bare := !strings.ContainsAny(word, `/\~$%`)
-	if bare {
+	if bare && (len(c.dirs) == 0 || strings.HasPrefix(word, "-")) {
 		return false
 	}
 	candidates := []string{word}

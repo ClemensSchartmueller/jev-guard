@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"jev-guard/internal/testpaths"
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/harness"
 )
 
@@ -526,5 +528,127 @@ func TestCheckAntiTampering_VariableQuoting(t *testing.T) {
 	list := &harness.NormalizedToolCall{ToolName: "exec", Cwd: ws, RawArgs: map[string]interface{}{"command": []interface{}{"cat", "$REVIEW_PATH/state"}}}
 	if res := CheckAntiTampering(list); res != nil {
 		t.Errorf("argument list word: %+v; want nil", res)
+	}
+}
+
+// Every resolution anti-tampering makes for a call draws on one boundary evaluation scope: the
+// working directory's prefix is resolved once, the security directory is canonicalized once,
+// and the shared work budget bounds the rest. Thousands of short relative words under a deep
+// working directory (PR #80 review, finding 2: over 170 s before) stay fast, and when the
+// budget runs out the result is the anti_tampering_limit ASK floor, never clean and never a
+// denial for words that only might be paths.
+func TestCheckAntiTampering_DeepCwdShortWordsAreBounded(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	// Leave room for "/f2047" below the deepest directory.
+	deep, depth := testpaths.DeepDirs(t, t.TempDir(), 1024, 16)
+	if depth < 64 {
+		t.Fatalf("tree only %d deep", depth)
+	}
+	for _, tc := range []struct {
+		name   string
+		format string
+	}{
+		{"dot-slash words", "./f%d "},
+		{"bare words", "f%d "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			b.WriteString("cat ")
+			for i := 0; i < 2048; i++ {
+				fmt.Fprintf(&b, tc.format, i)
+			}
+			start := time.Now()
+			res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: b.String(), Cwd: deep})
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("took %v (depth %d)", elapsed, depth)
+			}
+			t.Logf("%s: %v, depth %d, result %+v", tc.name, time.Since(start), depth, res)
+			if res != nil && (res.Decision != harness.DecisionAsk || res.Source != SourceAntiTamperingLimit) {
+				t.Errorf("result = %+v; want nil or the limit ASK", res)
+			}
+		})
+	}
+
+	// A budget that covers the walk down the working directory and a few hundred words runs
+	// out partway: the floor, not a clean result or a denial. (Walking the tree costs about
+	// half its length times its depth; each word below it about its length.)
+	restore := boundary.SetWorkBudgetForTesting(int64(len(deep)*depth/2 + 256*len(deep) + 64<<10))
+	defer restore()
+	var b strings.Builder
+	b.WriteString("cat ")
+	for i := 0; i < 2048; i++ {
+		fmt.Fprintf(&b, "./f%d ", i)
+	}
+	res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: b.String(), Cwd: deep})
+	if res == nil || res.Decision != harness.DecisionAsk || res.Source != SourceAntiTamperingLimit {
+		t.Errorf("exhausted budget: %+v; want ASK %s", res, SourceAntiTamperingLimit)
+	}
+	// A denial found before the budget ran out still wins.
+	home := os.Getenv("JEV_GUARD_HOME")
+	res = CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat " + filepath.Join(home, "state") + " " + b.String(), Cwd: deep})
+	if !IsTamperingDenial(res) {
+		t.Errorf("denial before the budget ran out: %+v; want DENY", res)
+	}
+}
+
+// Bare words (no separator, ~ or variable) are resolved against the working directory too: a
+// bare symlink into the security directory, or a plain file name while the working directory
+// is inside it, names a protected file (PR #80 review, finding 3). Ordinary bare words of
+// developer commands are unaffected.
+func TestCheckAntiTampering_BareWords(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "secure-store")
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "state"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JEV_GUARD_HOME", home)
+	ws := filepath.Join(root, "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"go test ./...", "ls src", "make build", "git status --short", "npm run build", "cat README.md main.go",
+		"rm -rf build", "grep -rn TODO src", "docker build -t app .", "ls -la ..",
+	} {
+		if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws}); res != nil {
+			t.Errorf("CheckAntiTampering(%q) = %+v; want nil", command, res)
+		}
+	}
+
+	// The working directory inside the security directory: plain names are protected files.
+	for _, cwd := range []string{home, filepath.Join(home, "sessions")} {
+		for _, command := range []string{"cat state", "rm -f state", "ls ..", "ls"} {
+			if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: cwd}); !IsTamperingDenial(res) {
+				t.Errorf("cwd %s, %q: %+v; want DENY", cwd, command, res)
+			}
+		}
+	}
+	// One level up from the security directory, its bare name reaches it.
+	if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "rm -rf secure-store", Cwd: root}); !IsTamperingDenial(res) {
+		t.Errorf("bare security directory name: %+v; want DENY", res)
+	}
+
+	if err := os.Symlink(filepath.Join(home, "state"), filepath.Join(ws, "alias")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(home, filepath.Join(ws, "store")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		call *harness.NormalizedToolCall
+	}{
+		{"bare symlink to a protected file", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat alias", Cwd: ws}},
+		{"bare symlink to the directory", &harness.NormalizedToolCall{ToolName: "Bash", Command: "rm -rf store", Cwd: ws}},
+		{"redirect", &harness.NormalizedToolCall{ToolName: "Bash", Command: "echo x >alias", Cwd: ws}},
+		{"argument list", &harness.NormalizedToolCall{ToolName: "exec", Cwd: ws, RawArgs: map[string]interface{}{"command": []interface{}{"cat", "alias"}}}},
+		{"nested", &harness.NormalizedToolCall{ToolName: "Bash", Command: `bash -c "cat alias"`, Cwd: ws}},
+	} {
+		if res := CheckAntiTampering(tc.call); !IsTamperingDenial(res) {
+			t.Errorf("%s: %+v; want DENY", tc.name, res)
+		}
 	}
 }
