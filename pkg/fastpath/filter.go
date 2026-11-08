@@ -23,6 +23,8 @@ type Filter struct {
 	boundaryChecker BoundaryChecker
 	sensitiveFiles  []string
 	trustedCommands []string
+	// protectTranscript runs the transcript guard. It is on only when the user opted in to transcript intent.
+	protectTranscript bool
 }
 
 // NewFilter constructs a fast-path filter with injected boundary checker and configuration.
@@ -34,9 +36,10 @@ func NewFilter(checker BoundaryChecker, cfg *config.Config) *Filter {
 	sensitiveFiles := append([]string{}, cfg.SensitiveFiles...)
 	sensitiveFiles = append(sensitiveFiles, xdgGitSensitivePatterns(os.Getenv("XDG_CONFIG_HOME"))...)
 	return &Filter{
-		boundaryChecker: checker,
-		sensitiveFiles:  sensitiveFiles,
-		trustedCommands: cfg.TrustedCommands,
+		boundaryChecker:   checker,
+		sensitiveFiles:    sensitiveFiles,
+		trustedCommands:   cfg.TrustedCommands,
+		protectTranscript: cfg.IsAntigravityTranscriptIntentEnabled(),
 	}
 }
 
@@ -50,6 +53,12 @@ func NewDefaultFilter() *Filter {
 // Anti-tampering is not part of the filter: callers run CheckAntiTampering first,
 // regardless of whether the fast path is enabled.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
+	if f.protectTranscript {
+		if result := CheckTranscriptTampering(call); result != nil {
+			return result
+		}
+	}
+
 	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,

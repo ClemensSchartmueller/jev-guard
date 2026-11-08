@@ -662,3 +662,24 @@ func TestEvalIgnoresAndPreservesSessionState(t *testing.T) {
 		t.Errorf("session files changed:\nbefore=%v\nafter=%v", before, after)
 	}
 }
+
+func TestEvalReportsTranscriptIntentSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+		jsonValue          bool
+	}{
+		{"default", "", "Antigravity transcript intent: off (built-in default)", false},
+		{"on", `{"antigravity_transcript_intent":true}`, "Antigravity transcript intent: on (user config)", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEvalEnv(t, tc.config)
+			ws := e.workspace()
+			if out := e.mustRun("--cmd", "ls", "--offline", "--explain", "--cwd", ws); !strings.Contains(out, tc.want) {
+				t.Errorf("explain missing %q:\n%s", tc.want, out)
+			}
+			if got := e.rawReport("--cmd", "ls", "--offline", "--cwd", ws)["antigravity_transcript_intent"]; got != tc.jsonValue {
+				t.Errorf("json = %v, want %v", got, tc.jsonValue)
+			}
+		})
+	}
+}
