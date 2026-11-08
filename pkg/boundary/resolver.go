@@ -160,6 +160,13 @@ func canonicalizePath(path string) (string, error) {
 		return normalizeSeparators(clean), nil
 	}
 
+	// Check the length before filepath.Abs: on Windows, Abs itself fails on a very long
+	// path, and that error must not hide the limit from callers that fail closed on it.
+	// Making a path absolute never shortens it below its cleaned relative form by more
+	// than its ".." components, so this only rejects paths far beyond the limit.
+	if err := checkPathLength(filepath.Clean(path)); err != nil {
+		return "", err
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
