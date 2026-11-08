@@ -137,8 +137,8 @@ func commandWordsMentionJevguard(call *harness.NormalizedToolCall) (deny bool, l
 			}
 		}
 	}
-	if c.reader.exhausted {
-		c.exceed("a command needs more work to read than the check will do")
+	if reason := c.reader.incomplete(); reason != "" {
+		c.exceed(reason)
 	}
 	if words > maxGuardWords {
 		c.exceed("the number of words in a command is over the limit the check will read")
@@ -153,6 +153,9 @@ type commandCheck struct {
 	home     string
 	resolved map[string]bool
 	limit    string
+
+	securityDirs     [][]string // the security directory's components, as configured and resolved
+	securityDirsRead bool
 }
 
 func (c *commandCheck) exceed(limit string) {
@@ -175,20 +178,31 @@ func (c *commandCheck) wordsTargetJevguard(words, patterns []string) bool {
 	return false
 }
 
-// wordReachesJevguard reports whether a path-like word (one holding a separator or starting
-// with a home or variable spelling) points into the security directory, as written, with the
-// home directory and the hook's environment variables expanded, and resolved against each
-// working directory. session.IsJevguardPath compares it with the configured directory, so a
-// custom JEV_GUARD_HOME is protected under any spelling that reaches it, including symlinks.
+// wordReachesJevguard is pathReachesJevguard for a word the reader returned. Its variables are
+// filled in only when a shell would expand them (see shellReader.expands): '$X/state' is a
+// literal name in every shell, and so is a word of an argument list.
 func (c *commandCheck) wordReachesJevguard(word string) bool {
+	return c.pathReachesJevguard(word, c.reader.expands[word])
+}
+
+// pathReachesJevguard reports whether a path-like word (one holding a separator or starting
+// with a home or variable spelling) points into the security directory, as written, with a
+// leading ~ expanded, with the home directory's other spellings and the hook's environment
+// variables filled in when expand is set, and resolved against each working directory.
+// session.IsJevguardPath compares it with the configured directory, so a custom JEV_GUARD_HOME
+// is protected under any spelling that reaches it, including symlinks. A leading ~ is expanded
+// even when quoted, because PowerShell's file system provider expands it itself.
+func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 	if word == "" || len(word) > maxPathLikeBytes || !strings.ContainsAny(word, `/\~$%`) {
 		return false
 	}
 	candidates := []string{word}
-	if expanded := expandHomeWith(word, c.home); expanded != word {
-		candidates = append(candidates, expanded)
+	if expand || strings.HasPrefix(word, "~") {
+		if expanded := expandHomeWith(word, c.home); expanded != word {
+			candidates = append(candidates, expanded)
+		}
 	}
-	if strings.ContainsRune(word, '$') {
+	if expand && strings.ContainsRune(word, '$') {
 		candidates = append(candidates, os.ExpandEnv(word))
 	}
 	for _, candidate := range candidates {
@@ -218,21 +232,258 @@ func (c *commandCheck) wordReachesJevguard(word string) bool {
 
 // shellPatternTargetsJevguard checks a glob or brace pattern from a command (see
 // shellReader.read) and each part of it between shell operators, with Bash's {a..z} sequences
-// and [!...] classes rewritten for patternTargetsJevguard. A pattern too large to expand is
-// reported as over the limit rather than denied, since a command word need not be a filter.
+// and [!...] classes rewritten. Each part is denied when:
+//   - it singles out a protected file name (patternCheck); or
+//   - one of its brace alternatives without wildcards is a path into the security directory
+//     (pathReachesJevguard); or
+//   - one of its alternatives with wildcards singles out the configured security directory
+//     (patternSinglesOutSecurityDir), so a custom JEV_GUARD_HOME whose name says nothing is
+//     protected from /srv/guard-hom?/state and /srv/guard-{home,x}/state too.
+//
+// The variables a shell would expand in it are filled in from the hook's environment. A
+// pattern too large to expand is reported as over the limit rather than denied, since a
+// command word need not be a filter.
 func (c *commandCheck) shellPatternTargetsJevguard(pattern string) bool {
-	expanded := strings.ReplaceAll(expandBraceSequences(pattern), "[!", "[^")
+	expanded := strings.ReplaceAll(expandBraceSequences(expandPatternVariables(pattern)), "[!", "[^")
 	parts := append([]string{expanded}, strings.FieldsFunc(expanded, func(r rune) bool { return strings.ContainsRune(";|&<>()`=:", r) })...)
 	for _, part := range parts {
 		targets, ok := patternCheck(part)
 		if targets {
 			return true
 		}
-		if !ok {
+		alternatives, expandedOK := expandBraces(part, maxPatternExpansions)
+		if !ok || !expandedOK {
 			c.exceed("a glob pattern in a command is over the limit the check will read")
+			continue
+		}
+		for _, alternative := range alternatives {
+			if !hasGlobMeta(alternative) {
+				if c.pathReachesJevguard(unescapePattern(alternative), false) {
+					return true
+				}
+				continue
+			}
+			if c.patternSinglesOutSecurityDir(alternative) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// expandPatternVariables fills in the unescaped $NAME and ${NAME} references in a pattern from
+// the hook's environment, escaping wildcards in their values. A $ that was quoted literally is
+// escaped in the pattern (see wordBuilder.writeByte), so it stays as written.
+func expandPatternVariables(pattern string) string {
+	if !strings.ContainsRune(pattern, '$') {
+		return pattern
+	}
+	var out strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if c == '\\' && i+1 < len(pattern) {
+			out.WriteString(pattern[i : i+2])
+			i++
+			continue
+		}
+		if c != '$' || i+1 >= len(pattern) {
+			out.WriteByte(c)
+			continue
+		}
+		name, end := "", i+1
+		if pattern[end] == '{' {
+			close := strings.IndexByte(pattern[end:], '}')
+			if close < 0 {
+				out.WriteByte(c)
+				continue
+			}
+			name, end = pattern[end+1:end+close], end+close+1
+		} else {
+			for end < len(pattern) && (pattern[end] == '_' || isAlphaNumeric(pattern[end])) {
+				end++
+			}
+			name = pattern[i+1 : end]
+		}
+		if name == "" {
+			out.WriteByte(c)
+			continue
+		}
+		out.WriteString(escapePattern(filepath.ToSlash(os.Getenv(name))))
+		i = end - 1
+	}
+	return out.String()
+}
+
+func isAlphaNumeric(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// escapePattern escapes the characters of a literal path that a pattern would read as wildcards.
+func escapePattern(literal string) string {
+	var out strings.Builder
+	for i := 0; i < len(literal); i++ {
+		if literal[i] == '$' || strings.IndexByte(patternMeta, literal[i]) >= 0 {
+			out.WriteByte('\\')
+		}
+		out.WriteByte(literal[i])
+	}
+	return out.String()
+}
+
+// unescapePattern removes a pattern's escapes, giving the literal path it names.
+func unescapePattern(pattern string) string {
+	if !strings.ContainsRune(pattern, '\\') {
+		return pattern
+	}
+	var out strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] == '\\' && i+1 < len(pattern) {
+			i++
+		}
+		out.WriteByte(pattern[i])
+	}
+	return out.String()
+}
+
+// hasGlobMeta reports whether a pattern holds an unescaped *, ? or [.
+func hasGlobMeta(pattern string) bool {
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			i++
+		case '*', '?', '[':
+			return true
+		}
+	}
+	return false
+}
+
+// securityDirComponents returns the security directory's path components, as configured and
+// as the filesystem resolves it, lower-cased. They are computed once per call.
+func (c *commandCheck) securityDirComponents() [][]string {
+	if c.securityDirsRead {
+		return c.securityDirs
+	}
+	c.securityDirsRead = true
+	dirs := []string{session.GetJevguardDir()}
+	if resolved, err := filepath.EvalSymlinks(dirs[0]); err == nil && resolved != dirs[0] {
+		dirs = append(dirs, resolved)
+	}
+	for _, dir := range dirs {
+		if components := pathComponents(strings.ToLower(filepath.ToSlash(dir))); len(components) > 0 {
+			c.securityDirs = append(c.securityDirs, components)
+		}
+	}
+	return c.securityDirs
+}
+
+// pathComponents splits a cleaned slash path into its components; an absolute path's first
+// component is "" (or a drive such as "c:").
+func pathComponents(p string) []string {
+	p = path.Clean(p)
+	if p == "/" || p == "." {
+		return nil
+	}
+	return strings.Split(p, "/")
+}
+
+// patternSinglesOutSecurityDir reports whether a glob pattern reaches the security directory
+// or a file in it, and the pattern component that matches the directory's own name singles it
+// out: it is written out, or it is a wildcard that would not match the name with its letters
+// and digits replaced (secure-stor?, sec*, but not * or .*). Broad patterns such as /srv/* and
+// ~/.*/state are allowed, as for protected file names. Relative patterns are read against each
+// working directory, a leading ~ is expanded, and a backslash is read both as an escape and as
+// a Windows separator. Comparison ignores case. Symlinks inside the pattern are not followed.
+func (c *commandCheck) patternSinglesOutSecurityDir(pattern string) bool {
+	dirs := c.securityDirComponents()
+	if len(dirs) == 0 {
+		return false
+	}
+	lower := strings.ToLower(pattern)
+	for _, reading := range []string{lower, strings.ReplaceAll(lower, `\`, "/")} {
+		var absolute []string
+		switch {
+		case strings.HasPrefix(reading, "~"):
+			if c.home != "" && (reading == "~" || reading[1] == '/') {
+				absolute = append(absolute, escapePattern(strings.ToLower(filepath.ToSlash(c.home)))+reading[1:])
+			}
+		case strings.HasPrefix(reading, "/") || (len(reading) > 1 && reading[1] == ':'):
+			absolute = append(absolute, reading)
+		default:
+			for _, dir := range c.dirs {
+				absolute = append(absolute, escapePattern(strings.ToLower(filepath.ToSlash(dir)))+"/"+reading)
+			}
+		}
+		for _, candidate := range absolute {
+			components := pathComponents(candidate)
+			for _, dir := range dirs {
+				if componentsSingleOut(components, dir) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// componentsSingleOut matches pattern components against a directory's components, reading **
+// as any number of components. It reports whether some match covers the whole directory and
+// matches its last component with a component that singles it out (see
+// patternSinglesOutSecurityDir). It works in time proportional to the product of the lengths.
+func componentsSingleOut(pattern, dir []string) bool {
+	last := len(dir) - 1
+	// reach[i][j]: pattern[:i] can match dir[:j], for j up to the directory's parent.
+	reach := make([][]bool, len(pattern)+1)
+	for i := range reach {
+		reach[i] = make([]bool, last+1)
+	}
+	reach[0][0] = true
+	for j := 0; j <= last; j++ {
+		for i := 0; i <= len(pattern); i++ {
+			if !reach[i][j] || i == len(pattern) {
+				continue
+			}
+			if pattern[i] == "**" {
+				reach[i+1][j] = true // ** matching no component
+				if j < last {
+					reach[i][j+1] = true
+				}
+				continue
+			}
+			if j < last && componentMatches(pattern[i], dir[j]) {
+				reach[i+1][j+1] = true
+			}
+		}
+	}
+	for i := 0; i < len(pattern); i++ {
+		if reach[i][last] && pattern[i] != "**" && componentMatches(pattern[i], dir[last]) && componentSinglesOut(pattern[i], dir[last]) {
+			return true
+		}
+	}
+	return false
+}
+
+func componentMatches(pattern, name string) bool {
+	matched, err := path.Match(pattern, name)
+	return err == nil && matched
+}
+
+// componentSinglesOut reports whether a pattern component that matches name is specific to it:
+// it is not a wildcard, or it does not match name with every letter and digit replaced.
+func componentSinglesOut(pattern, name string) bool {
+	if !hasGlobMeta(pattern) {
+		return true
+	}
+	control := []byte(name)
+	for i, b := range control {
+		if isAlphaNumeric(b) {
+			control[i] = 'q'
+			if b == 'q' {
+				control[i] = 'z'
+			}
+		}
+	}
+	return !componentMatches(pattern, string(control))
 }
 
 // braceSequence matches Bash's {x..y} and {x..y..step} sequence expressions.

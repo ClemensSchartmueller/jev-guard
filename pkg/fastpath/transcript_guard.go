@@ -205,6 +205,13 @@ func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 	if g.overBudget != "" {
 		return ""
 	}
+	// A command nested too deeply to read is reported after the words that were read, so a
+	// denial among them still wins.
+	defer func() {
+		if reader.tooDeep {
+			g.exceed("a command nested too deeply")
+		}
+	}()
 	if len(words) > maxGuardWords || len(textWords) > maxGuardWords {
 		g.exceed("the number of words in a command")
 		return ""

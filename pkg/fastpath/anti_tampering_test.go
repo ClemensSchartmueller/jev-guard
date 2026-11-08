@@ -3,6 +3,7 @@ package fastpath
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -337,8 +338,8 @@ func TestCheckAntiTampering_WorkIsBounded(t *testing.T) {
 		{"interpreter scan repeat", strings.Repeat("python ", 200_000), true},
 		{"cmd repeat", strings.Repeat("cmd /c ", 100_000), true},
 		{"powershell repeat", strings.Repeat("pwsh ", 100_000), true},
-		{"nested bash -c", nestedShells, false},
-		{"wide bash -c", strings.Repeat(`bash -c "eval eval eval x"; `, 5000), false},
+		{"nested bash -c", nestedShells, true},
+		{"wide bash -c", strings.Repeat(`bash -c "eval eval x"; `, 5000), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Now()
@@ -374,5 +375,156 @@ func TestCheckAntiTampering_WorkIsBounded(t *testing.T) {
 		if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command}); !IsTamperingDenial(res) {
 			t.Errorf("CheckAntiTampering(%q) = %+v; want DENY", command, res)
 		}
+	}
+}
+
+// encodeShellLayers wraps a command in layers of bash -c $'\xNN...', each layer encoding every
+// byte of the one inside it, so no layer's text spells the command out.
+func encodeShellLayers(command string, layers int) string {
+	for range layers {
+		var b strings.Builder
+		for i := 0; i < len(command); i++ {
+			fmt.Fprintf(&b, `\x%02x`, command[i])
+		}
+		command = "bash -c $'" + b.String() + "'"
+	}
+	return command
+}
+
+// A command nested deeper than the reader goes is never reported as clean: both guards give
+// their limit ASK, and a denial found in what was read still wins.
+func TestCheckAntiTampering_EncodedNestingDepth(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws := t.TempDir()
+	const transcript = `cat ~/.gemini/antigravity/brain/x/.system_generated/logs/transcript.jsonl`
+	// At one layer past the limit, the innermost command is still read as a single word, which
+	// the transcript guard's text rule may deny; a denial is stricter than the floor. Two layers
+	// past, only the floor is left.
+	for layers := 1; layers <= 5; layers++ {
+		readable := layers <= maxShellNesting
+		floorOnly := layers > maxShellNesting+1
+		res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: encodeShellLayers(`cat ~/.jev\guard/state`, layers), Cwd: ws})
+		if readable && !IsTamperingDenial(res) {
+			t.Errorf("anti-tampering, %d layers: %+v; want DENY", layers, res)
+		}
+		if !readable && (res == nil || res.Decision != harness.DecisionAsk || res.Source != SourceAntiTamperingLimit) {
+			t.Errorf("anti-tampering, %d layers: %+v; want ASK %s", layers, res, SourceAntiTamperingLimit)
+		}
+
+		res = CheckTranscriptTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: encodeShellLayers(transcript, layers), Cwd: ws})
+		if readable && (res == nil || res.Decision != harness.DecisionDeny) {
+			t.Errorf("transcript guard, %d layers: %+v; want DENY", layers, res)
+		}
+		if !readable && (res == nil || (res.Decision != harness.DecisionDeny && res.Source != sourceTranscriptGuardLimit) ||
+			(floorOnly && res.Decision != harness.DecisionAsk)) {
+			t.Errorf("transcript guard, %d layers: %+v; want ASK %s (or DENY below %d)", layers, res, sourceTranscriptGuardLimit, maxShellNesting+2)
+		}
+	}
+
+	deep := encodeShellLayers("true", 5)
+	if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: `cat ~/.jev\guard/state; ` + deep, Cwd: ws}); !IsTamperingDenial(res) {
+		t.Errorf("denial next to deep nesting: %+v; want DENY", res)
+	}
+	escapedTranscript := `cat ~/.gemini/anti\gravity/brain/x/.sys\tem_generated/logs/trans\cript.jsonl; `
+	if res := CheckTranscriptTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: escapedTranscript + deep, Cwd: ws}); res == nil || res.Decision != harness.DecisionDeny {
+		t.Errorf("transcript guard, denial next to deep nesting: %+v; want DENY", res)
+	}
+	// Nesting within the limit is read completely and stays clean.
+	if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: encodeShellLayers("ls", maxShellNesting), Cwd: ws}); res != nil {
+		t.Errorf("readable nesting: %+v; want nil", res)
+	}
+}
+
+// Targeted globs and brace alternatives are checked against the configured security directory
+// itself, so a custom JEV_GUARD_HOME whose name says nothing is protected like ~/.jevguard.
+// Broad patterns stay allowed.
+func TestCheckAntiTampering_CustomSecurityDirectoryPatterns(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "secure-store")
+	ws := filepath.Join(root, "ws")
+	for _, dir := range []string{home, ws} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "state"), []byte("SENTINEL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JEV_GUARD_HOME", home)
+	r := filepath.ToSlash(root)
+	parent, base := path.Split(r)
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{"cat " + r + "/secure-stor?/state", true},
+		{"cat " + r + "/secure-{store,other}/state", true},
+		{"cat " + r + "/secure-*/state", true},
+		{"cat " + r + "/secure-st[o]re/state", true},
+		{"rm -rf " + r + "/secure-stor?", true},
+		{"cat " + r + "/s*/state", true},
+		{"cat " + r + "/**/secure-stor?/state", true},
+		{"cat " + parent + "*/secure-store/state", true},
+		{"cat " + parent + "{" + base + ",x}/secure-store/state", true},
+		{"cat ../secure-stor?/state", true},
+		{"cat ../secure-{store,x}/state", true},
+		{`cat "$JEV_GUARD_HOME"/stat?`, true},
+		{`cat "$JEV_GUARD_HOME"/{state,x}`, true},
+		{"Get-Content " + r + "/secure-stor?/state", true},
+		{`bash -c 'cat ` + r + `/secure-stor?/state'`, true},
+		{"ls " + r + "/*", false},
+		{"cat " + r + "/*/state", false},
+		{"cat " + r + "/.*/state", false},
+		{"cat " + r + "/secure-stor?x/state", false},
+		{"cat " + r + "/other-{a,b}/state", false},
+		{"cat '" + r + "/secure-stor?/state'", false},
+		{`cat '$JEV_GUARD_HOME'/stat?`, false},
+		{"ls *.go", false},
+		{"cat ./src/*.go ../ws/{a,b}.txt", false},
+	} {
+		res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: tc.command, Cwd: ws})
+		if tc.deny != IsTamperingDenial(res) || (!tc.deny && res != nil) {
+			t.Errorf("CheckAntiTampering(%q) = %+v; want deny=%t", tc.command, res, tc.deny)
+		}
+	}
+}
+
+// Only variables a shell would expand are filled in: a single-quoted or escaped $NAME is a
+// literal file name, and so is a word of an argument list.
+func TestCheckAntiTampering_VariableQuoting(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "secure-store")
+	ws := filepath.Join(root, "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "$REVIEW_PATH"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JEV_GUARD_HOME", home)
+	t.Setenv("REVIEW_PATH", home)
+	for _, tc := range []struct {
+		command string
+		deny    bool
+	}{
+		{`cat $REVIEW_PATH/state`, true},
+		{`cat "$REVIEW_PATH/state"`, true},
+		{`cat "$REVIEW_PATH"/state`, true},
+		{`cat ${REVIEW_PATH}/state`, true},
+		{`cat $"$REVIEW_PATH/state"`, true},
+		{`bash -c 'cat $REVIEW_PATH/state'`, true},
+		{`Get-Content "$REVIEW_PATH/state"`, true},
+		{`cat '$REVIEW_PATH/state'`, false},
+		{`cat '$REVIEW_PATH'/state`, false},
+		{`cat \$REVIEW_PATH/state`, false},
+		{`cat "\$REVIEW_PATH/state"`, false},
+		{`cat $'$REVIEW_PATH/state'`, false},
+		{"Get-Content '$REVIEW_PATH/state'", false},
+	} {
+		res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: tc.command, Cwd: ws})
+		if tc.deny != IsTamperingDenial(res) || (!tc.deny && res != nil) {
+			t.Errorf("CheckAntiTampering(%q) = %+v; want deny=%t", tc.command, res, tc.deny)
+		}
+	}
+	list := &harness.NormalizedToolCall{ToolName: "exec", Cwd: ws, RawArgs: map[string]interface{}{"command": []interface{}{"cat", "$REVIEW_PATH/state"}}}
+	if res := CheckAntiTampering(list); res != nil {
+		t.Errorf("argument list word: %+v; want nil", res)
 	}
 }

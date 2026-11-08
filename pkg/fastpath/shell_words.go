@@ -24,9 +24,28 @@ const (
 type shellReader struct {
 	bytes, tokens, payloads int
 	exhausted               bool
+	// tooDeep is set when a command a program will run was not read because it is nested
+	// deeper than maxShellNesting. Reading goes on, so a protected name found elsewhere is
+	// still reported, but the caller must not report the call as clean.
+	tooDeep bool
+	// expands holds the words (and word forms) holding a $ or % that some shell would expand:
+	// one that was not single-quoted or escaped (see wordBuilder.expands). Only these words get
+	// the hook's environment variables filled in, so '$X/state' stays the literal name it is.
+	expands map[string]bool
 }
 
-func newShellReader() *shellReader { return &shellReader{} }
+func newShellReader() *shellReader { return &shellReader{expands: map[string]bool{}} }
+
+// incomplete reports why part of what the reader was given was not read, or "" when all of it was.
+func (r *shellReader) incomplete() string {
+	switch {
+	case r.exhausted:
+		return "a command needs more work to read than the check will do"
+	case r.tooDeep:
+		return "a command nests commands a program will run deeper than the check will read"
+	}
+	return ""
+}
 
 // spend charges work to the budget and reports whether it is still within it.
 func (r *shellReader) spend(bytes, tokens int) bool {
@@ -68,7 +87,8 @@ func shellWords(command string) []string {
 // shell or PowerShell would expand as a glob or brace pattern because they hold an unquoted
 // *, ?, [ or (POSIX only) {. In a pattern, quoted and escaped characters are escaped with a
 // backslash, so a quoted '*' stays literal. Reading stops once the budget is spent; check
-// r.exhausted. With skipHeredocs set, heredoc bodies are left out: they are data unless a shell
+// r.incomplete. A command a program will run that is nested deeper than maxShellNesting is
+// not read and sets r.tooDeep; the rest is still read. With skipHeredocs set, heredoc bodies are left out: they are data unless a shell
 // reads them. Only the transcript guard's spelled-out-name rule uses that; path resolution still
 // sees those words, so a heredoc that a shell runs, or a marker misread as a heredoc, cannot
 // hide a real path.
@@ -85,23 +105,36 @@ func (r *shellReader) read(command string, skipHeredocs bool) (words, patterns [
 			text = stripHeredocBodies(text)
 		}
 		nest := func(payload string) {
-			if depth < maxShellNesting && !nested[payload] {
-				nested[payload] = true
-				visit(payload, depth+1)
+			if nested[payload] {
+				return
 			}
+			if depth >= maxShellNesting {
+				r.tooDeep = true
+				return
+			}
+			nested[payload] = true
+			visit(payload, depth+1)
 		}
-		posix, posixPatterns := posixWordsAndPatterns(text)
-		ps, psPatterns := powerShellWordsAndPatterns(text)
-		readings := [][]string{posix, ps, cmdWords(text), strings.Fields(text)}
+		posix, posixPatterns, posixExpands := posixRead(text, true)
+		ps, psPatterns, psExpands := powerShellRead(text, true)
+		cmd, cmdExpands := cmdRead(text)
+		fields := strings.Fields(text)
+		// Raw text: a $ in it is unquoted unless the word also holds a single quote.
+		fieldExpands := make([]bool, len(fields))
+		for i, word := range fields {
+			fieldExpands[i] = !strings.Contains(word, "'")
+		}
 		// An apostrophe is not a quote in cmd.exe, so a word holding one came from text that
 		// the other shells read as quoted. Its quotes would be removed wrongly here.
-		kept := readings[2][:0]
-		for _, word := range readings[2] {
+		kept, keptExpands := cmd[:0], cmdExpands[:0]
+		for i, word := range cmd {
 			if !strings.Contains(word, "'") {
 				kept = append(kept, word)
+				keptExpands = append(keptExpands, cmdExpands[i])
 			}
 		}
-		readings[2] = kept
+		readings := [][]string{posix, ps, kept, fields}
+		expands := [][]bool{posixExpands, psExpands, keptExpands, fieldExpands}
 		for _, pattern := range append(posixPatterns, psPatterns...) {
 			if !seenPatterns[pattern] {
 				seenPatterns[pattern] = true
@@ -111,16 +144,19 @@ func (r *shellReader) read(command string, skipHeredocs bool) (words, patterns [
 		if !r.spend(0, len(posixPatterns)+len(psPatterns)) {
 			return
 		}
-		for _, reading := range readings {
+		for n, reading := range readings {
 			if !r.spend(0, len(reading)) {
 				return
 			}
-			for _, word := range reading {
+			for k, word := range reading {
 				forms := wordForms(word)
 				if !r.spend(0, len(forms)) {
 					return
 				}
 				for _, form := range forms {
+					if expands[n][k] && strings.ContainsAny(form, "$%") {
+						r.expands[form] = true
+					}
 					if !seen[form] {
 						seen[form] = true
 						words = append(words, form)
@@ -476,6 +512,10 @@ type wordBuilder struct {
 	words   []string
 	current strings.Builder
 	started bool
+	// expanded[i] is set when words[i] holds a variable reference the shell expands: a $
+	// (POSIX, PowerShell) or % (cmd.exe) that was not quoted literally or escaped.
+	expanded []bool
+	expands  bool
 
 	track    bool // collect patterns
 	braces   bool // an unquoted { starts a brace expansion
@@ -487,14 +527,30 @@ type wordBuilder struct {
 // patternMeta are the characters escaped when they are literal in a pattern.
 const patternMeta = `*?[]{},\`
 
-// writeByte adds a literal character: one that was quoted or escaped.
+// writeByte adds a literal character: one that was quoted or escaped. A literal $ is also
+// escaped in a pattern, so that only a variable the shell expands is filled in.
 func (b *wordBuilder) writeByte(c byte) {
 	b.current.WriteByte(c)
 	b.started = true
 	if b.track {
-		if strings.IndexByte(patternMeta, c) >= 0 {
+		if c == '$' || strings.IndexByte(patternMeta, c) >= 0 {
 			b.pattern.WriteByte('\\')
 		}
+		b.pattern.WriteByte(c)
+	}
+}
+
+// writeExpanding adds a character that is quoted but where the shell still expands
+// variables, as in double quotes. A $ there starts a variable reference.
+func (b *wordBuilder) writeExpanding(c byte) {
+	if c != '$' {
+		b.writeByte(c)
+		return
+	}
+	b.current.WriteByte(c)
+	b.started = true
+	b.expands = true
+	if b.track {
 		b.pattern.WriteByte(c)
 	}
 }
@@ -515,6 +571,9 @@ func (b *wordBuilder) writeString(s string) {
 func (b *wordBuilder) writeRaw(c byte) {
 	b.current.WriteByte(c)
 	b.started = true
+	if c == '$' {
+		b.expands = true
+	}
 	if b.track {
 		b.pattern.WriteByte(c)
 		if c == '*' || c == '?' || c == '[' || (b.braces && c == '{') {
@@ -526,9 +585,11 @@ func (b *wordBuilder) writeRaw(c byte) {
 func (b *wordBuilder) flush() {
 	if b.started {
 		b.words = append(b.words, b.current.String())
+		b.expanded = append(b.expanded, b.expands)
 		b.current.Reset()
 		b.started = false
 	}
+	b.expands = false
 	if b.glob {
 		b.patterns = append(b.patterns, b.pattern.String())
 	}
@@ -539,16 +600,13 @@ func (b *wordBuilder) flush() {
 // posixWords splits like sh and bash: backslash escapes, single and double quotes, adjacent
 // segments, line continuations, and the $'...' and $"..." forms.
 func posixWords(s string) []string {
-	words, _ := posixRead(s, false)
+	words, _, _ := posixRead(s, false)
 	return words
 }
 
-// posixWordsAndPatterns is posixWords that also returns the glob and brace patterns.
-func posixWordsAndPatterns(s string) ([]string, []string) {
-	return posixRead(s, true)
-}
-
-func posixRead(s string, track bool) ([]string, []string) {
+// posixRead is posixWords that, with track set, also returns the glob and brace patterns. It
+// also reports which words hold a variable the shell expands (see wordBuilder.expanded).
+func posixRead(s string, track bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track, braces: true}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -585,15 +643,17 @@ func posixRead(s string, track bool) ([]string, []string) {
 					if s[i] == '\n' {
 						continue
 					}
+					b.writeByte(s[i])
+					continue
 				}
-				b.writeByte(s[i])
+				b.writeExpanding(s[i])
 			}
 		default:
 			b.writeRaw(c)
 		}
 	}
 	b.flush()
-	return b.words, b.patterns
+	return b.words, b.patterns, b.expanded
 }
 
 var ansiEscapes = map[byte]byte{'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': 10, 'r': 13, 't': 9, 'v': 11, '\\': '\\', '\'': '\'', '"': '"', '?': '?'}
@@ -706,17 +766,14 @@ func parseDigits(s string, base, width int) (uint64, int) {
 // quote is a literal quote, and a backslash is an ordinary character. The escape is read as
 // removing the backtick, so control escapes such as `n give the plain letter.
 func powerShellWords(s string) []string {
-	words, _ := powerShellRead(s, false)
+	words, _, _ := powerShellRead(s, false)
 	return words
 }
 
-// powerShellWordsAndPatterns is powerShellWords that also returns the wildcard patterns, which
-// cmdlets such as Get-Content expand themselves. PowerShell has no brace expansion.
-func powerShellWordsAndPatterns(s string) ([]string, []string) {
-	return powerShellRead(s, true)
-}
-
-func powerShellRead(s string, track bool) ([]string, []string) {
+// powerShellRead is powerShellWords that, with track set, also returns the wildcard patterns,
+// which cmdlets such as Get-Content expand themselves. PowerShell has no brace expansion. It
+// also reports which words hold a variable PowerShell expands (see wordBuilder.expanded).
+func powerShellRead(s string, track bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -745,6 +802,8 @@ func powerShellRead(s string, track bool) ([]string, []string) {
 			for i++; i < len(s); i++ {
 				if s[i] == '`' && i+1 < len(s) {
 					i++
+					b.writeByte(s[i])
+					continue
 				} else if s[i] == '"' {
 					if i+1 < len(s) && s[i+1] == '"' {
 						i++
@@ -752,22 +811,32 @@ func powerShellRead(s string, track bool) ([]string, []string) {
 						break
 					}
 				}
-				b.writeByte(s[i])
+				b.writeExpanding(s[i])
 			}
 		default:
 			b.writeRaw(c)
 		}
 	}
 	b.flush()
-	return b.words, b.patterns
+	return b.words, b.patterns, b.expanded
 }
 
 // cmdWords splits like cmd.exe: a caret escapes outside double quotes, and a backslash is ordinary.
 func cmdWords(s string) []string {
+	words, _ := cmdRead(s)
+	return words
+}
+
+// cmdRead is cmdWords that also reports which words hold a %, which cmd.exe expands as a
+// variable before it reads quotes and carets.
+func cmdRead(s string) (words []string, expanded []bool) {
 	var b wordBuilder
 	inQuotes := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c == '%' {
+			b.expands = true
+		}
 		switch {
 		case c == '"':
 			inQuotes = !inQuotes
@@ -786,5 +855,5 @@ func cmdWords(s string) []string {
 		}
 	}
 	b.flush()
-	return b.words
+	return b.words, b.expanded
 }

@@ -304,3 +304,39 @@ func TestEvalDeniesCustomHomeAndPatchTargets(t *testing.T) {
 		}
 	}
 }
+
+// A command nested deeper than the shell reader goes gets the limit floor whether fastpath is
+// on or off, and with the transcript guard on, instead of going to semantic judgment unfloored.
+func TestTraceGateEvaluationEncodedNestingDepthIsFloored(t *testing.T) {
+	e := newEvalEnv(t, `{"mode":"enforcing"}`)
+	ws := e.workspace()
+	encode := func(command string, layers int) string {
+		for range layers {
+			var b strings.Builder
+			for i := 0; i < len(command); i++ {
+				fmt.Fprintf(&b, `\x%02x`, command[i])
+			}
+			command = "bash -c $'" + b.String() + "'"
+		}
+		return command
+	}
+	for _, layers := range []int{4, 5} {
+		for _, fastpathOn := range []bool{true, false} {
+			for name, cfg := range map[string]*config.Config{
+				"default":            withFastpath(config.DefaultConfig(), fastpathOn),
+				"transcript guarded": withFastpath(transcriptOnConfig(), fastpathOn),
+			} {
+				for _, inner := range []string{`cat ~/.jev\guard/state`, `cat ~/.gemini/antigravity/brain/x/.system_generated/logs/transcript.jsonl`} {
+					call := &harness.NormalizedToolCall{ToolName: "Bash", Command: encode(inner, layers), Cwd: ws}
+					trace := traceGateEvaluation(call, cfg, true)
+					if trace.Final == nil || decisionRank(trace.Final.Decision) < decisionRank(harness.DecisionAsk) {
+						t.Errorf("%d layers, fastpath=%t, %s, %q: final=%+v; want at least ASK", layers, fastpathOn, name, inner, trace.Final)
+					}
+					if trace.Tampering == nil && trace.TamperingLimit == nil {
+						t.Errorf("%d layers, fastpath=%t, %s, %q: no anti-tampering verdict or floor", layers, fastpathOn, name, inner)
+					}
+				}
+			}
+		}
+	}
+}
