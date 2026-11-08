@@ -666,16 +666,18 @@ func TestCheckAntiTampering_BareWords(t *testing.T) {
 	}
 }
 
-// A name longer than 255 bytes is skipped only where no file system accepts it: macOS counts
-// names in characters or UTF-16 units, so a 100-character CJK name (300 bytes) is valid there.
+// A name longer than 255 bytes is skipped only past every file system's limit: Linux can
+// mount NTFS or exFAT (255 UTF-16 units) and macOS counts characters or UTF-16 units, so a
+// 100-character CJK name (300 bytes) can be valid there.
 func TestComponentTooLongFor(t *testing.T) {
 	cjk := strings.Repeat("界", 100)
 	for _, tc := range []struct {
 		goos, name string
 		want       bool
 	}{
-		{"linux", cjk, true},
+		{"linux", cjk, false},
 		{"linux", strings.Repeat("a", 255), false},
+		{"linux", strings.Repeat("a", 1021), true},
 		{"windows", cjk, false},
 		{"windows", strings.Repeat("a", 256), true},
 		{"darwin", cjk, false},
@@ -685,6 +687,22 @@ func TestComponentTooLongFor(t *testing.T) {
 	} {
 		if got := componentTooLongFor(tc.goos, tc.name); got != tc.want {
 			t.Errorf("componentTooLongFor(%s, %d bytes) = %t, want %t", tc.goos, len(tc.name), got, tc.want)
+		}
+	}
+}
+
+// A word with a name the file system rejects as too long (but under the skip bound) is looked
+// up, and the OS's name-too-long shows the command cannot open it: no ASK floor, no denial.
+func TestCheckAntiTampering_OSRejectedLongNameIsClean(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", filepath.Join(t.TempDir(), "secure-store"))
+	ws := t.TempDir()
+	long := strings.Repeat("a", 300)
+	if err := os.WriteFile(filepath.Join(ws, long), nil, 0o600); err == nil {
+		t.Skip("this file system accepts 300-byte names")
+	}
+	for _, command := range []string{"echo " + long, "cat ./" + long + "/x", `printf '%s' "` + long + `"`} {
+		if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws}); res != nil {
+			t.Errorf("CheckAntiTampering(%q...) = %+v; want nil", command[:20], res)
 		}
 	}
 }

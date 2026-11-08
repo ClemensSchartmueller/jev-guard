@@ -266,21 +266,20 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 	return false
 }
 
-// maxNameLength is the longest file name (one path component) the OS accepts on Linux
-// (NAME_MAX, 255 bytes) and Windows (255 UTF-16 code units).
+// maxNameLength is the longest file name (one path component) on Windows: 255 UTF-16 units.
 const maxNameLength = 255
 
-// maxNameBytesElsewhere bounds a file name on other systems. macOS HFS+ counts 255 UTF-16
-// units and APFS 255 characters, so a valid name can be longer than 255 bytes; no name of
-// 255 characters exceeds 4 bytes per character.
-const maxNameBytesElsewhere = 4 * maxNameLength
+// maxNameBytes bounds a file name on every other OS whatever file system is mounted: names
+// are limited to 255 bytes (ext4, XFS, btrfs), 255 UTF-16 units (NTFS, exFAT, HFS+; at most
+// 765 bytes) or 255 characters (APFS; at most 1,020 bytes).
+const maxNameBytes = 4 * maxNameLength
 
 // hasOverlongComponent reports whether a component of path is longer than any file name can
-// be on this OS. No file has such a name, so the OS fails to open the path (ENAMETOOLONG) and
-// there is nothing to protect. Such words are common in commands that are not paths at all (a
-// long quoted string holding a backslash), and resolving them would fail with a resolution
-// limit. On systems other than Linux and Windows only components no file system can hold are
-// skipped, so a long multibyte name that macOS accepts is still resolved.
+// be. No file has such a name, so the OS fails to open the path and there is nothing to
+// protect. Such words are common in commands that are not paths at all (a long quoted string
+// holding a backslash). The bound is deliberately above every file system's limit: a shorter
+// overlong name is looked up, and an OS name-too-long error then shows the command cannot
+// open it either (boundary.ErrOSNameTooLong, see isSecurityPath).
 func hasOverlongComponent(path string) bool {
 	start := 0
 	for i := 0; i <= len(path); i++ {
@@ -299,14 +298,10 @@ func componentTooLong(name string) bool {
 }
 
 func componentTooLongFor(goos, name string) bool {
-	switch goos {
-	case "linux":
-		return len(name) > maxNameLength
-	case "windows":
+	if goos == "windows" {
 		return len(name) > maxNameLength && len(utf16.Encode([]rune(name))) > maxNameLength
-	default:
-		return len(name) > maxNameBytesElsewhere
 	}
+	return len(name) > maxNameBytes
 }
 
 // readSecurityHome canonicalizes the security directory once per call.
