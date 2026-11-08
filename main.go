@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -431,7 +432,31 @@ func isLocalPathVerified(call *harness.NormalizedToolCall, contained bool) bool 
 	if !contained || !ok || target == "" || strings.TrimSpace(call.Command) != "" || strings.Contains(target, "://") {
 		return false
 	}
-	return harness.HasSingleTargetArg(call, key) && !isExecutionSensitivePath(target)
+	scope := newPathScope(call)
+	return harness.HasSingleTargetArg(call, key) && !scope.isExecutionSensitive(target) && pathProofResolvable(target, scope.cwd)
+}
+
+// pathProofResolvable withholds proof when an existing path component cannot
+// be resolved. CanonicalizePath falls back to lexical paths for dangling links;
+// a Write could follow such a link into configuration when creating its target.
+// Missing ordinary files remain eligible if their nearest existing parent resolves.
+func pathProofResolvable(target, cwd string) bool {
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(cwd, target)
+	}
+	for {
+		if _, err := os.Lstat(target); err == nil {
+			_, err = filepath.EvalSymlinks(target)
+			return err == nil
+		} else if !os.IsNotExist(err) {
+			return false
+		}
+		parent := filepath.Dir(target)
+		if parent == target {
+			return false
+		}
+		target = parent
+	}
 }
 
 func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {

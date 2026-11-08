@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
+	"jev-guard/pkg/policy"
 	"jev-guard/pkg/session"
 )
 
@@ -151,7 +151,7 @@ func taintEscalationReason(call *harness.NormalizedToolCall, result *harness.Eva
 	switch {
 	case result.Source == sourcePolicyIntentAllow:
 		return "allowed only by the explicitly_requested intent upgrade"
-	case isEgressCall(call):
+	case policy.IsEgressCall(call):
 		return "network egress"
 	case sensitive != nil && sensitive(call) != "":
 		return "sensitive file access"
@@ -159,49 +159,6 @@ func taintEscalationReason(call *harness.NormalizedToolCall, result *harness.Eva
 		return "write to an execution-sensitive path"
 	}
 	return ""
-}
-
-// egressTools are tools whose purpose is to reach the network.
-var egressTools = map[string]bool{
-	"WebFetch": true, "WebSearch": true, "read_url_content": true,
-}
-
-// egressCommands are command names (basename, lowercase, without .exe) that
-// send data off the machine. Matching is a best-effort token scan.
-var egressCommands = map[string]bool{
-	"curl": true, "wget": true, "nc": true, "ncat": true, "netcat": true, "socat": true,
-	"telnet": true, "ssh": true, "scp": true, "sftp": true, "rsync": true, "ftp": true,
-	"invoke-webrequest": true, "iwr": true, "invoke-restmethod": true, "irm": true,
-	"start-bitstransfer": true, "certutil": true, "bitsadmin": true,
-}
-
-// isEgressCall reports whether a call reaches the network: a web tool, a URL
-// target, or a command that names a network client or pushes/publishes.
-func isEgressCall(call *harness.NormalizedToolCall) bool {
-	if egressTools[call.ToolName] {
-		return true
-	}
-	target := strings.ToLower(strings.TrimSpace(call.TargetPath))
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		return true
-	}
-	tokens := commandTokens(call.Command)
-	for i, tok := range tokens {
-		name := strings.TrimSuffix(path.Base(strings.ReplaceAll(tok, `\`, "/")), ".exe")
-		if egressCommands[name] {
-			return true
-		}
-		if i+1 < len(tokens) {
-			next := tokens[i+1]
-			if (name == "git" && next == "push") || (name == "npm" || name == "pnpm" || name == "yarn" || name == "cargo") && next == "publish" {
-				return true
-			}
-		}
-		if strings.Contains(tok, "http://") || strings.Contains(tok, "https://") {
-			return true
-		}
-	}
-	return false
 }
 
 // writeTools are file tools that create or modify their target.
@@ -315,11 +272,6 @@ func isClaudeWorktree(root string) bool {
 	}
 	data, err := os.ReadFile(filepath.Join(root, ".git"))
 	return err == nil && strings.HasPrefix(string(data), "gitdir:")
-}
-
-// commandTokens splits a shell command like splitCommand and lowercases the result.
-func commandTokens(command string) []string {
-	return splitCommand(strings.ToLower(command))
 }
 
 // splitCommand splits a shell command on whitespace, quotes and shell

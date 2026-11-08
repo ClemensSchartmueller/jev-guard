@@ -240,7 +240,7 @@ When context awareness is enabled and an intent is ingested, TypeSafe AI classif
 | **Workspace boundary escape** (`../../` traversal) | **`force_ask`** | **`force_ask`** | **`force_ask`** |
 | **Anti-tampering** (`~/.jevguard/` access) | **DENY** | **DENY** | **DENY** |
 
-For file-path tools, a deterministic local proof that the target is inside the workspace overrides the model's containment probability. The local proof applies only to `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `write_to_file`, `replace_file_content`, and `view_file`, and only when the call has a single path argument. It never applies to execution-sensitive paths: the directories `.git`, `.github`, `.husky`, `.devcontainer`, `.claude`, `.codex`, `.cursor`, `.gemini`, `.agent`, `.agents`, `.windsurf`, `.vscode`, `.idea`, and `.jevguard`, and the files `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.mcp.json`, and `.envrc` (matched case-insensitively). Those always use the model's containment score. For other paths, a low `IsWorkspaceContained` score alone does not trigger a boundary-escape prompt. Shell commands are unaffected.
+For file-path tools, a deterministic local proof that the target is inside the workspace overrides the model's containment probability. The local proof applies only to `Read`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `write_to_file`, `replace_file_content`, and `view_file`, and only when the call has a single path argument. It never applies to execution-sensitive paths: the directories `.git`, `.github`, `.husky`, `.devcontainer`, `.claude`, `.codex`, `.cursor`, `.gemini`, `.agent`, `.agents`, `.windsurf`, `.vscode`, `.idea`, and `.jevguard`, and the files `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.mcp.json`, and `.envrc` (matched case-insensitively). Both the written path and its resolved location are checked, including sensitive ancestors above the workspace root. Ordinary files addressed by relative paths in a Claude Code worktree under `.claude/worktrees/<name>` can still receive local proof; sensitive paths inside that worktree cannot. Excluded paths use the model's containment score. For other paths, a low `IsWorkspaceContained` score alone does not trigger a boundary-escape prompt. Shell commands are unaffected.
 
 > [!IMPORTANT]
 > **The catastrophic ceiling.** Even when you explicitly ask for it, an action with a catastrophic blast radius (such as `rm -rf /` or recursive drive formatting) never runs automatically. `jev-guard` downgrades it from `DENY` to `force_ask`: Antigravity prompts you, so you have the final veto, while Claude Code and Codex block it. This rule takes precedence over all violation categories, including credential access.
@@ -261,12 +261,12 @@ Instead, intent's power is kept narrow by deterministic limits that hold whateve
 
 A call counts as network-capable when any of these hold:
 
-- The tool is an outbound fetch tool (`WebFetch`, `WebSearch`, `read_url_content`).
+- The tool is an outbound fetch tool (`WebFetch`, `WebSearch`, `read_url_content`), or its target is an HTTP(S) URL.
 - The shell command contains a network program as any command word, for example `curl`, `wget`, `nc`, `socat`, `ssh`, `scp`, `sftp`, `ftp`, `rsync`, `rclone`, `http`, `gh`, `aws`, `gsutil`, `gcloud`, `az`, `mail`, `sendmail`, `Invoke-WebRequest`, `Invoke-RestMethod`, `iwr`, `irm`, or `bitsadmin` (paths and `.exe` are stripped).
-- It contains `git push`, `git send-email`, or `npm publish`.
+- It contains `git push`, `git send-email`, or a publish subcommand for `npm`, `pnpm`, `yarn`, or `cargo`.
 - It contains a network marker: `://`, `/dev/tcp/`, `/dev/udp/`, `socket`, `urllib`, `requests.`, `http.client`, `fetch(`, `net/http`, `Net.WebClient`, `System.Net.`, or `-urlcache`.
 
-The heuristic is deliberately over-inclusive, since a false positive only turns an intent-authorized credential access into a prompt.
+The same heuristic is used for the credential-egress cap and session taint. It is deliberately over-inclusive: a false positive can require confirmation for intent-authorized credential access or an action in a tainted session (or add a note in taint audit mode).
 
 **Limits.** These rules are local and deterministic, not a complete defense:
 
