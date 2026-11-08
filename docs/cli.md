@@ -107,6 +107,8 @@ Use `boundary_status` to tell a skipped check from an uncontained target. `bound
 
 `tampering_denied` is `true` when anti-tampering denied the call. Anti-tampering runs before every other stage, so in that case `fastpath_ran` and `typesafe_ran` are `false`, `fastpath_decision` and `fastpath_reason` are omitted, and `boundary_status` is `skipped`. The verdict keeps `source: "fastpath_tampering"` for compatibility with existing audit logs.
 
+A command too large for anti-tampering to read word by word is not denied: `tampering_denied` is `false` and the later stages run as usual, but the final verdict is at least `ASK`. When their verdict was weaker, the final verdict is that `ASK`, with `source: "anti_tampering_limit"` (see [Anti-tampering](security-model.md#anti-tampering)). `--explain` shows it in the Anti-tampering stage as `floor: ask - ...`.
+
 ### Model field in `--json` output
 
 `typesafe_model` is the model id that TypeSafe reported as having answered. This can be a specific version even when the configured `model` is a floating alias such as `jev-latest`. The field is omitted when TypeSafe was not consulted (the fast path decided, `--offline`, or the request failed) or when the response did not report a model. `--explain` prints it as `model:` in the TypeSafe stage. `jev-guard doctor` shows the *configured* model.

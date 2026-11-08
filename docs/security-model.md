@@ -57,8 +57,19 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering, including tampering with the session cache files in `~/.jevguard`.
 
 - Every path-like argument is checked, not only the one used as the call's target. A `source` argument next to `dest` is also checked.
-- File-name filters (`glob`, `Includes`, `Excludes`, and the `pattern` of `Glob` and `find_by_name`) and shell command text are denied if they contain `.jevguard` or `jevguard.json`. Content search patterns, such as Grep's `pattern`, are not checked.
+- Shell commands are denied if their text contains `.jevguard` or `jevguard.json` (case-insensitive). Each word is also read the way a shell would read it and checked the same way, so escapes and quotes cannot hide the name: `cat ~/.jev\guard/state`, `cat ~/.jev"guard"/state`, `cat ~/.jev$'\x67'uard/state`, PowerShell's ``.jev`guard`` and cmd.exe's `.jev^guard` are all denied. This uses the same word reader as the [transcript guard](#antigravity-transcript-guard) (POSIX, PowerShell, and cmd.exe rules, strings that `sh -c`, `eval`, `powershell`, interpreters, `$(...)`, and backticks will run, and `command`/`CommandLine` argument lists), but it runs for every call, whether or not `antigravity_transcript_intent` is on.
+- File-name filters (`glob`, `Includes`, `Excludes`, and the `pattern` of `Glob` and `find_by_name`) are denied if they single out a protected file, compared case-insensitively after `{a,b}` alternatives are expanded:
+  - the filter contains `jevguard` once glob escapes and `[...]` brackets are removed, with or without wildcards (`.jevguard.json`, `*jevguard*.json`, `**/*JevGuard*`); or
+  - a path segment of the filter matches a protected name only because of the letters of `jevguard`, such as `.jev*` or `*jev?uard*`. The test is whether the segment still matches once `jevguard` in the name is replaced by other letters, so short filters made only of such letters (`*g*`) are denied too.
+
+  A filter longer than 4,096 bytes, or one with more than 64 `{...}` alternatives, is denied without being read. Content search patterns, such as Grep's `pattern`, are not checked.
 - The check runs before every other stage, including the aborted-session and session-read-error holds. It does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
+- **Work limits.** A command too large to read word by word gets `ASK` (source `anti_tampering_limit`, reason "could not be verified"), never `ALLOW`, unless its text alone already names a protected file, which is denied. The limits are the transcript guard's: 2 MiB per command (a string or an argument list) and 50,000 distinct words across a call's commands. Unlike a denial, this `ASK` is a floor, not a verdict: the later stages still run, and the call gets the stricter of their verdict and `ASK`. So a `DENY` from the transcript guard or TypeSafe AI stands, an aborted-session or session-read-error hold still applies, and a fast-path `ALLOW` becomes this `ASK`. In `audit` mode it is logged and the call allowed.
+
+**Known limits.** Anti-tampering reads names, not the files a call will reach:
+
+- Broad file-name filters such as `*`, `**/*`, `.*`, and `*.json` are allowed, because most searches use them. A `Grep` or `Glob` with such a filter in a directory that holds `.jevguard.json` can still read it, unless a later stage stops it.
+- In shell commands, it does not resolve names the shell computes: globs (`cat ~/.jev*/state`, `find ~ -name '*jevguard*'`), variables, brace expansion, and command output. It does not resolve symlinks either. Such a command goes on to the remaining checks.
 
 ### Antigravity transcript guard
 
