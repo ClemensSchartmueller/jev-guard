@@ -13,7 +13,8 @@ import (
 )
 
 // ErrResolutionLimit is matched (errors.Is) by every error that means a path was not resolved
-// because a resolution limit was reached: ErrPathTooLong and ErrWorkBudgetExhausted. Such a
+// because a resolution limit was reached: ErrPathTooLong, ErrWorkBudgetExhausted and
+// ErrUnverifiablePath. Such a
 // path is unverifiable. Callers must fail closed on it (ask, or treat the path as sensitive
 // and not contained), never treat it as contained or safe.
 var ErrResolutionLimit = errors.New("path resolution limit reached")
@@ -23,6 +24,13 @@ type limitError struct{ msg string }
 
 func (e *limitError) Error() string        { return e.msg }
 func (e *limitError) Is(target error) bool { return target == ErrResolutionLimit }
+
+// ErrUnverifiablePath is returned, wrapped, for a Windows extended-length or device
+// namespace path (\\?\, \\.\, \??\, in either slash spelling) with a "." or ".."
+// component. Win32 passes such a path to the filesystem without collapsing "." and "..", so
+// cleaning it lexically, as the walk does for ordinary Windows paths, could name another file
+// than the one the OS opens. It matches ErrResolutionLimit, so every caller fails closed on it.
+var ErrUnverifiablePath error = &limitError{"extended or device namespace path with . or .. components cannot be verified"}
 
 // ErrWorkBudgetExhausted is returned when resolving a path would exceed the work budget of
 // the current evaluation (see BeginEvaluation and WorkBudget).
@@ -200,7 +208,10 @@ func absInput(path string) (string, error) {
 	}
 	var abs string
 	if runtime.GOOS == "windows" {
-		// Win32 resolves "." and ".." lexically, so cleaning matches the OS there.
+		if hasNamespaceDotComponent(path) {
+			return "", fmt.Errorf("%w: %s", ErrUnverifiablePath, path)
+		}
+		// Win32 resolves "." and ".." lexically in ordinary paths, so cleaning matches the OS.
 		a, err := filepath.Abs(path)
 		if err != nil {
 			return "", err
@@ -221,6 +232,25 @@ func absInput(path string) (string, error) {
 	return abs, nil
 }
 
+// hasNamespaceDotComponent reports whether p, read as a Windows path, is in the extended-length
+// or device namespace (\\?\, \\.\ or \??\, with either slash) and has a "." or ".."
+// component after the prefix. Windows does not collapse those components in such a path.
+func hasNamespaceDotComponent(p string) bool {
+	if len(p) < 4 {
+		return false
+	}
+	prefix := strings.ReplaceAll(p[:4], "/", `\`)
+	if prefix != `\\?\` && prefix != `\\.\` && prefix != `\??\` {
+		return false
+	}
+	for _, c := range strings.FieldsFunc(p[4:], func(r rune) bool { return r == '/' || r == '\\' }) {
+		if c == "." || c == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // errTooLongLookup is the error for a lookup path over the limit, which a symlink target
 // spliced into the walk can produce from a short input.
 func errTooLongLookup(p string) error {
@@ -237,12 +267,12 @@ func isNameTooLong(err error) bool {
 // component at a time as the OS does (the walk of filepath.EvalSymlinks), charging each
 // lookup to the budget.
 //
-// When strict is false, a component that cannot be looked up (a file about to be created, a
-// file followed by more components, a symlink loop) and everything after it is taken as
-// written, as directories to be created: later components are appended without lookups, and
+// When strict is false, a component that does not exist (a file about to be created) and
+// everything after it is taken as written, as directories to be created: later components are appended without lookups, and
 // a ".." removes the last of them, so "missing/../link" still follows link. A dangling
 // symlink therefore resolves to its target, where writing through it creates the file.
-// Resolution limits are errors in both modes.
+// Resolution limits and every other lookup failure (a file followed by more components, a
+// symlink loop, EACCES) are errors in both modes: such a path is unverifiable.
 //
 // Every prefix of the input that is resolved completely is recorded, so a later path sharing
 // it starts its walk there: words of one command under the same deep directory cost one walk.
@@ -372,7 +402,9 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 			if isNameTooLong(err) {
 				return "", errTooLongLookup(dest)
 			}
-			if strict {
+			// Only a name that does not exist is one to be created; any other failure
+			// (EACCES, ELOOP, ENOTDIR, ...) leaves the path unverifiable.
+			if strict || !errors.Is(err, fs.ErrNotExist) {
 				return "", err
 			}
 			giveUp(before)
@@ -381,11 +413,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 
 		if fi.Mode()&fs.ModeSymlink == 0 {
 			if !fi.Mode().IsDir() && end < len(walk) {
-				if strict {
-					return "", syscall.ENOTDIR
-				}
-				giveUp(before)
-				continue
+				return "", syscall.ENOTDIR
 			}
 			destDir = fi.Mode().IsDir()
 			if fromInput {
@@ -398,11 +426,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 
 		linksWalked++
 		if linksWalked > maxLinksWalked {
-			if strict {
-				return "", errors.New("EvalSymlinks: too many links")
-			}
-			giveUp(before)
-			continue
+			return "", errors.New("EvalSymlinks: too many links")
 		}
 		if err := charge(&e.remaining, ResolvePathLength(dest)); err != nil {
 			return "", err
@@ -412,11 +436,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 			if isNameTooLong(err) {
 				return "", errTooLongLookup(dest)
 			}
-			if strict {
-				return "", err
-			}
-			giveUp(before)
-			continue
+			return "", err
 		}
 		if fromInput {
 			pending = component
@@ -518,7 +538,12 @@ func (e *evaluation) normalized(p string) (string, error) {
 		}
 		name, err := normBase(cur)
 		if err != nil {
-			name = filepath.Base(cur) // a race or an unsupported path: keep the walked spelling
+			// Without the on-disk spelling, a short-name alias cannot be recognized: fail,
+			// and cache nothing for this prefix or the ones below it.
+			if isNameTooLong(err) {
+				return "", errTooLongLookup(cur)
+			}
+			return "", err
 		}
 		if len(parent) > 0 && os.IsPathSeparator(parent[len(parent)-1]) {
 			e.normal[cur] = parent + name

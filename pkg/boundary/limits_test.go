@@ -224,18 +224,16 @@ func TestResolveSymlinkedAncestorWithMissingTail(t *testing.T) {
 	}
 }
 
+// A file followed by more components cannot be looked up (ENOTDIR): unverifiable, not a
+// name to be created.
 func TestResolveFileAncestor(t *testing.T) {
 	ws := realTempDir(t)
 	file := filepath.Join(ws, "file.txt")
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := CanonicalizePath(filepath.Join(file, "child"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(file, "child"); got != want {
-		t.Errorf("got %q, want %q", got, want)
+	if got, err := CanonicalizePath(filepath.Join(file, "child")); err == nil {
+		t.Errorf("got %q, want an error", got)
 	}
 }
 
@@ -287,7 +285,8 @@ func (i fakeInfo) Sys() any           { return nil }
 
 // TestResolveSymlinksFake exercises the walk on fixed path shapes, including Windows drive
 // and UNC paths, which only parse as such on Windows. Past a component that does not
-// resolve, the rest is taken as names to be created; ".." removes the last of them.
+// exist, the rest is taken as names to be created; ".." removes the last of them. Any other
+// lookup failure is an error (want "").
 func TestResolveSymlinksFake(t *testing.T) {
 	type tc struct {
 		name    string
@@ -325,14 +324,20 @@ func TestResolveSymlinksFake(t *testing.T) {
 			{"chain", "/ws/l1/x",
 				map[string]string{"/ws": "", "/ws/l1": "l2", "/ws/l2": "/real", "/real": ""}, "/real/x"},
 			{"link to a file, then a child", "/ws/f/child",
-				map[string]string{"/ws": "", "/ws/f": "/real/file", "/real": "", "/real/file": "file"}, "/real/file/child"},
-			{"link loop", "/ws/loop/x", map[string]string{"/ws": "", "/ws/loop": "/ws/loop"}, "/ws/loop/x"},
+				map[string]string{"/ws": "", "/ws/f": "/real/file", "/real": "", "/real/file": "file"}, ""},
+			{"link loop", "/ws/loop/x", map[string]string{"/ws": "", "/ws/loop": "/ws/loop"}, ""},
 		}
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fakeFS(t, c.entries)
 			got, err := newEvaluation().resolve(c.in, false)
+			if c.want == "" {
+				if err == nil {
+					t.Errorf("resolve(%q) = %q, want an error", c.in, got)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("resolve(%q): %v", c.in, err)
 			}

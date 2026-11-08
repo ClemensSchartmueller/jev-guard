@@ -3,6 +3,7 @@ package boundary
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -342,8 +343,8 @@ func TestWalkMatchesFilepathEvalSymlinks(t *testing.T) {
 		{in: filepath.Join(ws, "d", "tofile")},
 		{in: filepath.Join(ws, "d", "tofile", "child")},
 		{in: filepath.Join(ws, "d", "file", "child")},
-		{in: filepath.Join(ws, "d", "file") + s, canon: filepath.Join(ws, "d", "file")},
-		{in: filepath.Join(ws, "d", "file") + s + ".", canon: filepath.Join(ws, "d", "file")},
+		{in: filepath.Join(ws, "d", "file") + s},
+		{in: filepath.Join(ws, "d", "file") + s + "."},
 		{in: filepath.Join(ws, "d", "e", "up", "p")},
 		{in: filepath.Join(ws, "missing", "a", "b")},
 		// ".." applies to what the symlink before it resolved to, as the OS does.
@@ -381,11 +382,19 @@ func TestWalkMatchesFilepathEvalSymlinks(t *testing.T) {
 			if (err == nil) != (wantErr == nil) || (err == nil && got != filepath.Clean(want)) {
 				t.Errorf("pass %d: EvalSymlinks(%s) = %q, %v; want %q, %v", pass, in, got, err, want, wantErr)
 			}
+			canon, err := CanonicalizePath(in)
+			// Only a missing name is taken as one to be created; a path the OS fails to look
+			// up otherwise (a loop, a file with a child) is unverifiable in both modes.
+			if wantErr != nil && !errors.Is(wantErr, fs.ErrNotExist) {
+				if err == nil {
+					t.Errorf("pass %d: CanonicalizePath(%s) = %q, want an error like %v", pass, in, canon, wantErr)
+				}
+				continue
+			}
 			ref := c.canon
 			if ref == "" {
 				ref = reference(in)
 			}
-			canon, err := CanonicalizePath(in)
 			if err != nil {
 				t.Errorf("pass %d: CanonicalizePath(%s): %v", pass, in, err)
 			} else if canon != ref {
