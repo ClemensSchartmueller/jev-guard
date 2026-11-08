@@ -13,6 +13,12 @@ var outboundTools = map[string]bool{
 	"webfetch": true, "websearch": true, "read_url_content": true,
 }
 
+// IsOutboundTool reports whether a tool's only purpose is a network request, so
+// its target is a URL rather than a local path.
+func IsOutboundTool(toolName string) bool {
+	return outboundTools[strings.ToLower(toolName)]
+}
+
 // shellTools carry a free-form command that IsEgressCall inspects.
 var shellTools = map[string]bool{
 	"bash": true, "powershell": true, "exec_command": true, "run_command": true,

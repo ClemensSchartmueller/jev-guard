@@ -216,6 +216,7 @@ var writeTools = map[string]bool{
 // Paths are checked as spelled and as resolved (see pathScope), so a symlink
 // into .claude or a relative name used from inside .claude also counts.
 func touchesExecutionSensitivePath(call *harness.NormalizedToolCall) bool {
+	defer boundary.BeginEvaluation()()
 	scope := newPathScope(call)
 	if writeTools[call.ToolName] && scope.isExecutionSensitive(call.TargetPath) {
 		return true
@@ -274,10 +275,13 @@ func (s pathScope) isExecutionSensitive(p string) bool {
 		if s.cwd == "" {
 			return false
 		}
-		p = filepath.Join(s.cwd, p)
+		p = boundary.JoinPath(s.cwd, p) // not cleaned: ".." applies after symlinks, as in the OS
 	}
 	resolved, err := boundary.CanonicalizePath(p)
-	if err != nil || resolved == "" {
+	if err != nil {
+		return true // cannot be ruled out: a resolution limit, or an unresolvable path
+	}
+	if resolved == "" {
 		return false
 	}
 	root := ""
