@@ -165,7 +165,14 @@ func TestANSICNulTruncation(t *testing.T) {
 	if err != nil || runtime.GOOS == "windows" {
 		t.Skip("bash not available for the differential check")
 	}
+	// Bash before 4.2 (macOS ships 3.2) has no \u escape and keeps it literally. The reader
+	// follows newer Bash, which only adds denials, so skip those cases on an old bash.
+	probe, _ := exec.Command(bash, "--norc", "--noprofile", "-c", `printf '%s' $'\u0041'`).Output()
+	hasUnicodeEscapes := string(probe) == "A"
 	for input, want := range cases {
+		if strings.Contains(input, `\u`) && !hasUnicodeEscapes {
+			continue
+		}
 		out, err := exec.Command(bash, "--norc", "--noprofile", "-c", "printf '%s' "+input).Output()
 		if err != nil {
 			t.Fatalf("bash %q: %v", input, err)
