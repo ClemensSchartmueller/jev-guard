@@ -1,6 +1,8 @@
 package fastpath
 
 import (
+	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -141,5 +143,54 @@ func BenchmarkTranscriptGuardLargeCommand(b *testing.B) {
 	call := &harness.NormalizedToolCall{Command: sb.String(), Cwd: b.TempDir()}
 	for range b.N {
 		CheckTranscriptTampering(call)
+	}
+}
+
+// Bash truncates an ANSI-C quoted segment at the first decoded NUL and reads on.
+func TestANSICNulTruncation(t *testing.T) {
+	cases := map[string]string{
+		`a$'\0'b`:          "ab",
+		`a$'\x00ignored'b`: "ab",
+		`a$'\u0000x'b`:     "ab",
+		`a$'x\000y\'z'b`:   "axb",
+		`a$'\c@x'b`:        "ab",
+		`a$'\x61\x00'b`:    "aab",
+	}
+	for input, want := range cases {
+		if got := posixWords(input); !slices.Equal(got, []string{want}) {
+			t.Errorf("posixWords(%q) = %q; want [%q]", input, got, want)
+		}
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil || runtime.GOOS == "windows" {
+		t.Skip("bash not available for the differential check")
+	}
+	for input, want := range cases {
+		out, err := exec.Command(bash, "--norc", "--noprofile", "-c", "printf '%s' "+input).Output()
+		if err != nil {
+			t.Fatalf("bash %q: %v", input, err)
+		}
+		if string(out) != want {
+			t.Errorf("bash reads %q as %q; the reader expects %q", input, out, want)
+		}
+	}
+}
+
+func TestShellReaderPatterns(t *testing.T) {
+	for input, want := range map[string][]string{
+		`cat ~/.jev*/x`:         {"~/.jev*/x"},
+		`cat ~/.{jev,x}guard`:   {"~/.{jev,x}guard"},
+		`cat '*' "a*"`:          nil,
+		`cat a"*"*`:             {`a\**`},
+		`ls *.go`:               {"*.go"},
+		`echo x`:                nil,
+		`Get-Content a*`:        {"a*"},
+		"Get-Content 'a*'":      nil,
+		`find . -name '*.json'`: nil,
+	} {
+		_, patterns := newShellReader().read(input, false)
+		if !slices.Equal(patterns, want) {
+			t.Errorf("%q: patterns %q; want %q", input, patterns, want)
+		}
 	}
 }

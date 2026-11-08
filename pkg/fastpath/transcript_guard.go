@@ -144,6 +144,7 @@ func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 	}
 
 	var words, textWords []string
+	reader := newShellReader()
 	seenCommands := map[string]bool{}
 	addCommand := func(command string) bool {
 		if command == "" || seenCommands[command] {
@@ -159,9 +160,14 @@ func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 			g.exceed("a command")
 			return true
 		}
-		words = append(words, shellWords(command)...)
+		read, _ := reader.read(command, false)
+		words = append(words, read...)
 		// What a heredoc holds is data, so the spelled-out-name rule does not read it.
-		textWords = append(textWords, shellTextWords(command)...)
+		read, _ = reader.read(command, true)
+		textWords = append(textWords, read...)
+		if reader.exhausted {
+			g.exceed("a command")
+		}
 		return true
 	}
 	if !addCommand(call.Command) {
@@ -187,10 +193,13 @@ func (g *transcriptGuard) check(call *harness.NormalizedToolCall) string {
 		}
 		words = append(words, list...)
 		textWords = append(textWords, list...)
-		for _, payload := range commandPayloads(list) {
+		for _, payload := range reader.commandPayloads(list) {
 			if !addCommand(payload) {
 				return commandReason
 			}
+		}
+		if reader.exhausted {
+			g.exceed("a command")
 		}
 	}
 	if g.overBudget != "" {
@@ -546,7 +555,15 @@ func reversedComponents(p string, stack []string) []string {
 
 func expandHome(p string) string {
 	home, err := userHomeDir()
-	if err != nil || home == "" {
+	if err != nil {
+		return p
+	}
+	return expandHomeWith(p, home)
+}
+
+// expandHomeWith replaces a leading home-directory spelling (see homePrefixes) with home.
+func expandHomeWith(p, home string) string {
+	if home == "" {
 		return p
 	}
 	for _, prefix := range homePrefixes {

@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/fastpath"
@@ -21,6 +25,11 @@ var escapedTamperingCommands = []string{
 	`cat ~/.jev$'\x67'uard/state`,
 	"Get-Content ~/.jev`guard/state",
 	`bash -c 'cat ~/.jev\guard/state'`,
+	`cat ~/.jev$'\0'guard/state`,
+	`cat ~/.jev$'\x00ignored'guard/state`,
+	`cat ~/.jev$'\u0000'guard/state`,
+	`cat ~/.jev*/state`,
+	`cat ~/.{jev,x}guard/state`,
 }
 
 func TestTraceGateEvaluationDeniesEscapedTampering(t *testing.T) {
@@ -162,5 +171,136 @@ func TestEvalAntiTamperingLimit(t *testing.T) {
 	out := e.mustRun(append(args, "--explain")...)
 	if !strings.Contains(out, "] Anti-tampering\n    floor: ask - ") {
 		t.Errorf("explain does not show the limit floor:\n%.2000s", out)
+	}
+}
+
+// Commands that reach a custom security directory, and apply_patch headers that target any
+// security directory, are denied with the fast path on or off.
+func TestTraceGateEvaluationDeniesCustomHomeAndPatchTargets(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "jevguard-home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JEV_GUARD_HOME", home)
+	ws := filepath.Join(root, "ws")
+	if err := os.MkdirAll(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	patch := func(header string) map[string]interface{} {
+		return map[string]interface{}{"input": "*** Begin Patch\n" + header + "\n*** End Patch\n"}
+	}
+	calls := map[string]*harness.NormalizedToolCall{
+		"cat custom home":      {ToolName: "Bash", Command: "cat " + filepath.Join(home, "state"), Cwd: ws},
+		"cat relative":         {ToolName: "Bash", Command: "cat ../jevguard-home/state", Cwd: ws},
+		"exec list":            {ToolName: "exec_command", Cwd: ws, RawArgs: map[string]interface{}{"cmd": []interface{}{"rm", "-rf", home}}},
+		"patch delete":         {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Delete File: " + filepath.Join(home, "state"))},
+		"patch add":            {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Add File: " + filepath.Join(home, "config.json") + "\n+{}")},
+		"patch update":         {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Update File: ../jevguard-home/trust.json")},
+		"patch move":           {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Update File: a.txt\n*** Move to: " + filepath.Join(home, "state"))},
+		"patch default home":   {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Delete File: ~/.jevguard/state")},
+		"patch config in repo": {ToolName: "apply_patch", Cwd: ws, RawArgs: patch("*** Update File: .jevguard.json")},
+	}
+	for _, fastpathOn := range []bool{true, false} {
+		cfg := withFastpath(config.DefaultConfig(), fastpathOn)
+		for name, call := range calls {
+			call.UserIntent = "update my jev-guard state"
+			trace := traceGateEvaluation(call, cfg, true)
+			if trace.Final == nil || trace.Final.Decision != harness.DecisionDeny || trace.Final.Source != "fastpath_tampering" || trace.FastpathRan {
+				t.Errorf("fastpath=%t %s: trace=%+v final=%+v; want fastpath_tampering DENY", fastpathOn, name, trace, trace.Final)
+			}
+		}
+		clean := &harness.NormalizedToolCall{ToolName: "apply_patch", Cwd: ws, WorkspaceRoots: []string{ws}, RawArgs: patch("*** Update File: src/main.go")}
+		if trace := traceGateEvaluation(clean, cfg, true); trace.Tampering != nil || trace.TamperingLimit != nil {
+			t.Errorf("fastpath=%t workspace patch: trace=%+v; want no anti-tampering verdict", fastpathOn, trace)
+		}
+	}
+}
+
+// Hostile nesting is stopped by the shell-reading budget: the call gets the limit floor in
+// well under a second instead of running for minutes, with the fast path on or off.
+func TestTraceGateEvaluationBoundsShellWork(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws := t.TempDir()
+	nested := "x"
+	for range 10 {
+		nested = `bash -c "` + strings.ReplaceAll(strings.ReplaceAll(nested, `\`, `\\`), `"`, `\"`) + `"`
+	}
+	for _, fastpathOn := range []bool{true, false} {
+		for name, command := range map[string]string{
+			"eval repeat":    strings.Repeat("eval ", 2000),
+			"bash -c repeat": strings.Repeat("bash -c ", 20_000),
+		} {
+			start := time.Now()
+			final := traceGateEvaluation(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws}, withFastpath(config.DefaultConfig(), fastpathOn), true).Final
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Errorf("fastpath=%t %s: took %v", fastpathOn, name, elapsed)
+			}
+			if final == nil || decisionRank(final.Decision) < decisionRank(harness.DecisionAsk) {
+				t.Errorf("fastpath=%t %s: final=%+v; want at least ASK", fastpathOn, name, final)
+			}
+
+			// With the transcript guard on, its own limit keeps its source.
+			if !fastpathOn {
+				res := fastpath.CheckTranscriptTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws})
+				if res == nil || res.Decision != harness.DecisionAsk || res.Source != "transcript_guard_limit" {
+					t.Errorf("%s: transcript guard = %+v; want transcript_guard_limit ASK", name, res)
+				}
+			}
+		}
+		start := time.Now()
+		trace := traceGateEvaluation(&harness.NormalizedToolCall{ToolName: "Bash", Command: nested, Cwd: ws}, withFastpath(config.DefaultConfig(), fastpathOn), true)
+		if elapsed := time.Since(start); elapsed > 3*time.Second || trace.Tampering != nil {
+			t.Errorf("fastpath=%t nested bash -c: took %v, tampering=%+v", fastpathOn, elapsed, trace.Tampering)
+		}
+	}
+}
+
+// A force_ask from a later stage outranks the anti-tampering limit's ASK floor.
+func TestTraceGateEvaluationForceAskOutranksLimitFloor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.95},
+			"destructive_potential":{"type":"score","score":0.5,"confidence":0.95},
+			"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.95},
+			"intent_alignment":{"type":"choice","choice":"explicitly_requested","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	cfg := withFastpath(config.DefaultConfig(), false)
+	cfg.APIKey, cfg.BaseURL = "test-key", server.URL
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "rm -rf build " + strings.Repeat("a", 2<<20), Cwd: t.TempDir(), UserIntent: "delete the build folder"}
+	trace := traceGateEvaluation(call, cfg, false)
+	if trace.TamperingLimit == nil || !trace.SemanticRan {
+		t.Fatalf("trace=%+v; want the limit floor and the TypeSafe stage", trace)
+	}
+	if trace.Final == nil || trace.Final.Decision != harness.DecisionForceAsk || trace.Final.Source != "policy_jev_intent_catastrophic" {
+		t.Fatalf("final=%+v; want the policy's force_ask, not the ASK floor", trace.Final)
+	}
+}
+
+func TestEvalDeniesCustomHomeAndPatchTargets(t *testing.T) {
+	for _, userConfig := range []string{`{"fastpath_enabled": true}`, `{"fastpath_enabled": false}`} {
+		e := newEvalEnv(t, userConfig)
+		ws := e.workspace()
+		if err := os.MkdirAll(e.jevHome, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		rep := e.report("--cmd", "cat "+filepath.Join(e.jevHome, "state"), "--offline", "--cwd", ws)
+		requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+		for name, target := range map[string]string{"default": filepath.Join(e.root, ".jevguard", "state"), "custom": filepath.Join(e.jevHome, "state")} {
+			payload := filepath.Join(e.root, "patch-"+name+".json")
+			body := `{"tool_name":"apply_patch","tool_input":{"input":` + jsonString("*** Begin Patch\n*** Delete File: "+target+"\n*** End Patch") + `},"cwd":` + jsonString(ws) + `}`
+			if err := os.WriteFile(payload, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rep := e.report("--payload", payload, "--offline")
+			requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+			if !rep.TamperingDenied {
+				t.Errorf("%s %s patch: tampering_denied=false", userConfig, name)
+			}
+		}
 	}
 }
