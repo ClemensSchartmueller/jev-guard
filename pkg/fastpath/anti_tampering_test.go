@@ -637,6 +637,9 @@ func TestCheckAntiTampering_BareWords(t *testing.T) {
 	if err := os.Symlink(home, filepath.Join(ws, "store")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(filepath.Join(home, "state"), filepath.Join(ws, "-alias")); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		call *harness.NormalizedToolCall
@@ -646,9 +649,33 @@ func TestCheckAntiTampering_BareWords(t *testing.T) {
 		{"redirect", &harness.NormalizedToolCall{ToolName: "Bash", Command: "echo x >alias", Cwd: ws}},
 		{"argument list", &harness.NormalizedToolCall{ToolName: "exec", Cwd: ws, RawArgs: map[string]interface{}{"command": []interface{}{"cat", "alias"}}}},
 		{"nested", &harness.NormalizedToolCall{ToolName: "Bash", Command: `bash -c "cat alias"`, Cwd: ws}},
+		{"option-like name after --", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat -- -alias", Cwd: ws}},
 	} {
 		if res := CheckAntiTampering(tc.call); !IsTamperingDenial(res) {
 			t.Errorf("%s: %+v; want DENY", tc.name, res)
+		}
+	}
+}
+
+// A name longer than 255 bytes is skipped only where no file system accepts it: macOS counts
+// names in characters or UTF-16 units, so a 100-character CJK name (300 bytes) is valid there.
+func TestComponentTooLongFor(t *testing.T) {
+	cjk := strings.Repeat("界", 100)
+	for _, tc := range []struct {
+		goos, name string
+		want       bool
+	}{
+		{"linux", cjk, true},
+		{"linux", strings.Repeat("a", 255), false},
+		{"windows", cjk, false},
+		{"windows", strings.Repeat("a", 256), true},
+		{"darwin", cjk, false},
+		{"darwin", strings.Repeat("a", 300), false},
+		{"darwin", strings.Repeat("a", 1021), true},
+		{"freebsd", strings.Repeat("界", 341), true},
+	} {
+		if got := componentTooLongFor(tc.goos, tc.name); got != tc.want {
+			t.Errorf("componentTooLongFor(%s, %d bytes) = %t, want %t", tc.goos, len(tc.name), got, tc.want)
 		}
 	}
 }

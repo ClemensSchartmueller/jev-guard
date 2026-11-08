@@ -5,8 +5,10 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/harness"
@@ -203,7 +205,8 @@ func (c *commandCheck) wordReachesJevguard(word string) bool {
 // spelling) is checked as written; a bare word such as "alias" or "state" is checked only
 // against the working directories, since that is where a command would open it, so a bare
 // symlink into the security directory, or a plain file name while the working directory is
-// inside it, is caught. Flags (-x, --name) are not file operands and are skipped.
+// inside it, is caught. Option-like words are resolved as well, since after "--" they are
+// file operands.
 //
 // The configured directory is compared with by session.IsJevguardPathIn, so a custom
 // JEV_GUARD_HOME is protected under any spelling that reaches it, including symlinks. A
@@ -217,7 +220,9 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 		return false
 	}
 	bare := !strings.ContainsAny(word, `/\~$%`)
-	if bare && (len(c.dirs) == 0 || strings.HasPrefix(word, "-")) {
+	// Option-like words ("-x", "--name") are resolved too: after "--" they are file operands,
+	// and resolving a flag against the cached working directory costs one lookup.
+	if bare && len(c.dirs) == 0 {
 		return false
 	}
 	candidates := []string{word}
@@ -260,25 +265,47 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 	return false
 }
 
-// maxNameLength is the longest file name (one path component) the OS accepts: NAME_MAX, 255
-// bytes, on Linux and macOS, and 255 UTF-16 code units on Windows.
+// maxNameLength is the longest file name (one path component) the OS accepts on Linux
+// (NAME_MAX, 255 bytes) and Windows (255 UTF-16 code units).
 const maxNameLength = 255
 
+// maxNameBytesElsewhere bounds a file name on other systems. macOS HFS+ counts 255 UTF-16
+// units and APFS 255 characters, so a valid name can be longer than 255 bytes; no name of
+// 255 characters exceeds 4 bytes per character.
+const maxNameBytesElsewhere = 4 * maxNameLength
+
 // hasOverlongComponent reports whether a component of path is longer than any file name can
-// be. No file has such a name, so the OS fails to open the path (ENAMETOOLONG) and there is
-// nothing to protect. Such words are common in commands that are not paths at all (a long
-// quoted string holding a backslash), and resolving them would fail with a resolution limit.
+// be on this OS. No file has such a name, so the OS fails to open the path (ENAMETOOLONG) and
+// there is nothing to protect. Such words are common in commands that are not paths at all (a
+// long quoted string holding a backslash), and resolving them would fail with a resolution
+// limit. On systems other than Linux and Windows only components no file system can hold are
+// skipped, so a long multibyte name that macOS accepts is still resolved.
 func hasOverlongComponent(path string) bool {
 	start := 0
 	for i := 0; i <= len(path); i++ {
 		if i == len(path) || os.IsPathSeparator(path[i]) {
-			if i-start > maxNameLength && boundary.ResolvePathLength(path[start:i]) > maxNameLength {
+			if componentTooLong(path[start:i]) {
 				return true
 			}
 			start = i + 1
 		}
 	}
 	return false
+}
+
+func componentTooLong(name string) bool {
+	return componentTooLongFor(runtime.GOOS, name)
+}
+
+func componentTooLongFor(goos, name string) bool {
+	switch goos {
+	case "linux":
+		return len(name) > maxNameLength
+	case "windows":
+		return len(name) > maxNameLength && len(utf16.Encode([]rune(name))) > maxNameLength
+	default:
+		return len(name) > maxNameBytesElsewhere
+	}
 }
 
 // readSecurityHome canonicalizes the security directory once per call.
