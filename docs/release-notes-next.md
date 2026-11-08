@@ -1,6 +1,6 @@
-# Next release (draft)
+# v0.4.0 — Intent and Tool-Output Hardening
 
-Changes since v0.3.0. Assign a version and confirm CI before publishing.
+Changes since v0.3.0.
 
 ## Highlights
 
@@ -11,6 +11,9 @@ Changes since v0.3.0. Assign a version and confirm CI before publishing.
 
 ## Fixes
 
+- Close anti-tampering bypasses through shell escapes, wildcard globs, bare command words, and disabled fast-path checks. Bound shell scanning and filesystem resolution work, returning confirmation when a check cannot finish safely.
+- Add an offline policy regression corpus and name the existing policy thresholds without changing their values.
+
 - Use one network-egress heuristic for credential intent authorization and session taint (#76). Preserve URL-target and package-publish coverage while extending taint checks to the shared detector's cloud clients and inline network markers. Tainted sessions can therefore report or prompt on more network-capable calls.
 - Check resolved filesystem locations before granting local path proof (#74). Aliases into execution-sensitive directories such as `.claude/`, including new files beneath an aliased directory, retain the model's containment check. Ordinary files in Claude Code worktrees remain eligible for local proof.
 
@@ -19,7 +22,7 @@ Changes since v0.3.0. Assign a version and confirm CI before publishing.
 - Run `jev-guard init` for each configured harness and scope to install the updated hooks. Manual hook configurations should follow [the hook examples](hooks.md).
 - Existing users receive audit-only taint behavior by default. Review [tool-output taint](security-model.md#tool-output-taint) before enabling enforcement; its hook coverage is currently Claude Code only.
 - Antigravity transcript intent remains off by default. Enabling it explicitly trusts agents with shell access not to forge the transcript.
-- Provider-independent adapters in open PR #43 are outside this release draft.
+- Provider-independent adapters in open PR #43 are outside this release.
 
 ## Remaining issue scope
 
