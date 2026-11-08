@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -482,5 +483,51 @@ func TestWindowsCleansLexically(t *testing.T) {
 	got, err := EvalSymlinks(in)
 	if err != nil || !strings.EqualFold(got, want) {
 		t.Errorf("EvalSymlinks(%s) = %q, %v; want %q", in, got, err, want)
+	}
+}
+
+// An OS name-too-long error is still a resolution limit, and is marked as coming from the OS.
+func TestOSNameTooLongIsMarked(t *testing.T) {
+	ws := realTempDir(t)
+	orig := lstat
+	defer func() { lstat = orig }()
+	lstat = func(p string) (os.FileInfo, error) {
+		if strings.HasSuffix(p, "long") {
+			return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.ENAMETOOLONG}
+		}
+		return orig(p)
+	}
+	_, err := newEvaluation().resolve(filepath.Join(ws, "long"), false)
+	if runtime.GOOS == "windows" {
+		if !errors.Is(err, ErrPathTooLong) || errors.Is(err, ErrOSNameTooLong) {
+			t.Fatalf("err = %v; want only ErrPathTooLong on Windows", err)
+		}
+		return
+	}
+	if !errors.Is(err, ErrPathTooLong) || !errors.Is(err, ErrOSNameTooLong) {
+		t.Fatalf("err = %v; want ErrPathTooLong and ErrOSNameTooLong", err)
+	}
+}
+
+// A name-too-long for a lookup at the path limit is a whole-path failure (the limit counts the
+// NUL), which a shorter spelling can avoid: it must not be marked as an unopenable name.
+func TestOSNameTooLongAtPathLimitIsNotMarked(t *testing.T) {
+	base := string(filepath.Separator) + "w"
+	limit := MaxResolvePathLength()
+	for _, n := range []int{limit, limit - 1} {
+		p := base + strings.Repeat("a", n-len(base))
+		if got := ResolvePathLength(p); got != n {
+			t.Fatalf("built %d, want %d", got, n)
+		}
+		if err := errOSNameTooLong(p); errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+			t.Errorf("length %d: %v; want only ErrPathTooLong", n, err)
+		}
+	}
+	if err := errOSNameTooLongFor("linux", base+"/x"); !errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+		t.Errorf("short lookup: %v; want ErrOSNameTooLong and ErrPathTooLong", err)
+	}
+	// Windows converts the path before the API sees it, so its errors are never marked.
+	if err := errOSNameTooLongFor("windows", base+"/x"); errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+		t.Errorf("windows: %v; want only ErrPathTooLong", err)
 	}
 }

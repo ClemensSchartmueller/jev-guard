@@ -262,7 +262,7 @@ func evaluate(o *evalOptions, stdin io.Reader, stdout, stderr io.Writer) int {
 	intent := applyEvalIntent(call, cfg, o.intent)
 	var trace *gateTrace
 	// Anti-tampering outranks the aborted-session hold, as in the hook (gateHold).
-	if intent.Aborted && fastpath.CheckAntiTampering(call) == nil {
+	if intent.Aborted && !fastpath.IsTamperingDenial(fastpath.CheckAntiTampering(call)) {
 		trace = &gateTrace{Final: applyAuditMode(abortedSessionResult(), cfg.Mode)}
 	} else {
 		trace = traceGateEvaluation(call, cfg, o.offline)
@@ -323,7 +323,7 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 		TargetPath:                  call.TargetPath,
 		Cwd:                         call.Cwd,
 		WorkspaceRoots:              call.WorkspaceRoots,
-		TamperingDenied:             t.Tampering != nil,
+		TamperingDenied:             fastpath.IsTamperingDenial(t.Tampering),
 		FastpathRan:                 t.FastpathRan,
 		TypeSafeRan:                 t.SemanticRan,
 		WouldSendToJudge:            t.WouldSendToJudge,
@@ -415,6 +415,8 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	switch {
 	case t.Tampering != nil:
 		fmt.Fprintf(w, "    verdict: %s - %s\n", t.Tampering.Decision, t.Tampering.Reason)
+	case t.TamperingLimit != nil:
+		fmt.Fprintf(w, "    floor: %s - %s (later stages still run; the final verdict is at least %s)\n", t.TamperingLimit.Decision, t.TamperingLimit.Reason, t.TamperingLimit.Decision)
 	case in.Aborted:
 		fmt.Fprintln(w, "    no jev-guard files touched")
 	default:

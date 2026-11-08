@@ -161,9 +161,10 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 
 // gateHold returns a verdict that stops the call before the gate runs. Anti-tampering
 // comes first: its DENY is stronger than any session hold and must not be downgraded
-// to a hold the user could approve.
+// to a hold the user could approve. Its ASK for a command too large to check is not a
+// hold: traceGateEvaluation applies it as a floor.
 func gateHold(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
-	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
+	if tampering := fastpath.CheckAntiTampering(call); fastpath.IsTamperingDenial(tampering) {
 		return tampering
 	}
 	return applySessionContext(call, cfg, stderr)
@@ -217,7 +218,8 @@ func readStandardInput() ([]byte, error) {
 // gateTrace records the intermediate results of the gate pipeline so that both the
 // hook path and `jev-guard eval --explain` share a single implementation.
 type gateTrace struct {
-	Tampering        *harness.EvaluationResult
+	Tampering        *harness.EvaluationResult // an anti-tampering DENY, which decided the call
+	TamperingLimit   *harness.EvaluationResult // anti-tampering's ASK floor for a command too large to check
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
 	BoundaryRan      bool
@@ -264,17 +266,50 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 }
 
 // traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.
-// When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
+// When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict
+// (unless the anti-tampering limit set a floor).
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
 	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
-	trace := &gateTrace{}
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
-	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {
-		trace.Tampering = tampering
-		trace.Final = applyAuditMode(tampering, cfg.Mode)
-		return trace
+	tampering := fastpath.CheckAntiTampering(call)
+	if fastpath.IsTamperingDenial(tampering) {
+		return &gateTrace{Tampering: tampering, Final: applyAuditMode(tampering, cfg.Mode)}
 	}
+	if tampering == nil {
+		return traceGateStages(call, cfg, offline, cfg.Mode)
+	}
+	// The command was too large for anti-tampering to read. Its ASK is a floor, not a verdict:
+	// the later stages still run, so a DENY from them stands, and nothing weaker than ASK does.
+	trace := traceGateStages(call, cfg, offline, "")
+	trace.TamperingLimit = tampering
+	if trace.Final == nil || decisionRank(trace.Final.Decision) < decisionRank(tampering.Decision) {
+		floor := *tampering
+		if trace.Final != nil {
+			floor.TaintNote = trace.Final.TaintNote
+		}
+		trace.Final = &floor
+	}
+	trace.Final = applyAuditMode(trace.Final, cfg.Mode)
+	return trace
+}
 
+// decisionRank orders decisions from least to most restrictive.
+func decisionRank(d harness.Decision) int {
+	switch d {
+	case harness.DecisionAsk:
+		return 1
+	case harness.DecisionForceAsk:
+		return 2
+	case harness.DecisionDeny:
+		return 3
+	}
+	return 0
+}
+
+// traceGateStages runs the stages after anti-tampering. mode is the audit mode applied to
+// the final verdict.
+func traceGateStages(call *harness.NormalizedToolCall, cfg *config.Config, offline bool, mode string) *gateTrace {
+	trace := &gateTrace{}
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
 	if resolver != nil {
@@ -288,13 +323,13 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		fastFilter := fastpath.NewFilter(checker, cfg)
 		if fastResult := fastFilter.Evaluate(call); fastResult != nil {
 			trace.Fastpath = fastResult
-			trace.Final = applyAuditMode(applyTaint(call, fastResult, cfg, sensitiveChecker(cfg)), cfg.Mode)
+			trace.Final = applyAuditMode(applyTaint(call, fastResult, cfg, sensitiveChecker(cfg)), mode)
 			return trace
 		}
 	} else if cfg.IsAntigravityTranscriptIntentEnabled() {
 		// With the opt-in on, the transcript is an authorization input whether or not the fast path runs.
 		if result := fastpath.CheckTranscriptTampering(call); result != nil {
-			trace.Final = applyAuditMode(result, cfg.Mode)
+			trace.Final = applyAuditMode(result, mode)
 			return trace
 		}
 	}
@@ -313,7 +348,7 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		PathVerified: isLocalPathVerified(call, trace.Contained),
 		Egress:       policy.IsEgressCall(call),
 	}, trace.EvalErr)
-	trace.Final = applyAuditMode(applyTaint(call, resolved, cfg, sensitiveChecker(cfg)), cfg.Mode)
+	trace.Final = applyAuditMode(applyTaint(call, resolved, cfg, sensitiveChecker(cfg)), mode)
 	return trace
 }
 

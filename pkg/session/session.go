@@ -580,15 +580,48 @@ func ScanSessions() (*SessionScan, error) {
 // an unverifiable path must not downgrade it to an ASK the user could approve. A path over
 // the OS limit cannot be opened anyway, so denying it blocks nothing that could have run.
 func IsJevguardPath(targetPath string) bool {
+	if strings.TrimSpace(targetPath) == "" {
+		return false
+	}
+	home, err := CanonicalJevguardDir()
+	if err != nil {
+		return true
+	}
+	in, err := IsJevguardPathIn(home, targetPath)
+	return in || err != nil
+}
+
+// CanonicalJevguardDir returns the jev-guard directory (GetJevguardDir) with its symlinks
+// resolved, or as configured when it cannot be resolved for another reason (such as not
+// existing yet). The error matches boundary.ErrResolutionLimit when a resolution limit was
+// reached. Callers checking many paths in one evaluation resolve it once and pass it to
+// IsJevguardPathIn.
+func CanonicalJevguardDir() (string, error) {
+	cleanHome := GetJevguardDir()
+	canonHome, err := boundary.CanonicalizePath(cleanHome)
+	if errors.Is(err, boundary.ErrResolutionLimit) {
+		return "", err
+	}
+	if err == nil && canonHome != "" {
+		return canonHome, nil
+	}
+	return cleanHome, nil
+}
+
+// IsJevguardPathIn is IsJevguardPath against home, the result of CanonicalJevguardDir. It
+// reports true for a path that names a protected file or lies inside home once its symlinks
+// are resolved, and an error matching boundary.ErrResolutionLimit, with false, when the path
+// could not be resolved within a resolution limit. The caller decides how to fail closed.
+func IsJevguardPathIn(home, targetPath string) (bool, error) {
 	trimmed := strings.TrimSpace(targetPath)
 	if trimmed == "" {
-		return false
+		return false, nil
 	}
 
 	// Expand ~ to user home directory
 	if strings.HasPrefix(trimmed, "~") {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			trimmed = boundary.JoinPath(home, strings.TrimLeft(strings.TrimPrefix(trimmed, "~"), `/\`))
+		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+			trimmed = boundary.JoinPath(userHome, strings.TrimLeft(strings.TrimPrefix(trimmed, "~"), `/\`))
 		}
 	}
 
@@ -596,17 +629,8 @@ func IsJevguardPath(targetPath string) bool {
 	normalized := strings.ToLower(filepath.ToSlash(filepath.Clean(trimmed)))
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == ".jevguard" || segment == ".jevguard.json" || segment == "jevguard.json" || segment == ".jevguard.log" {
-			return true
+			return true, nil
 		}
-	}
-
-	cleanHome := GetJevguardDir()
-	canonHome, err := boundary.CanonicalizePath(cleanHome)
-	if errors.Is(err, boundary.ErrResolutionLimit) {
-		return true
-	}
-	if err == nil && canonHome != "" {
-		cleanHome = canonHome
 	}
 
 	// CanonicalizePath makes a relative path absolute itself, keeping its ".." components
@@ -614,7 +638,7 @@ func IsJevguardPath(targetPath string) bool {
 	absTarget := trimmed
 	canonTarget, err := boundary.CanonicalizePath(absTarget)
 	if errors.Is(err, boundary.ErrResolutionLimit) {
-		return true
+		return false, err
 	}
 	if err == nil && canonTarget != "" {
 		absTarget = canonTarget
@@ -622,5 +646,5 @@ func IsJevguardPath(targetPath string) bool {
 		absTarget = abs
 	}
 
-	return boundary.IsSubPath(cleanHome, absTarget)
+	return boundary.IsSubPath(home, absTarget), nil
 }

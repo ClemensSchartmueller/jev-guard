@@ -257,6 +257,32 @@ func errTooLongLookup(p string) error {
 	return fmt.Errorf("%w: a lookup of length %d, limit %d", ErrPathTooLong, ResolvePathLength(p), MaxResolvePathLength())
 }
 
+// ErrOSNameTooLong is wrapped, together with ErrPathTooLong, when the OS rejected a lookup as
+// too long although the lookup, with its terminating NUL, is shorter than the OS path limit
+// (MaxResolvePathLength, which counts the NUL on Linux and macOS). The whole path then fits,
+// so the OS rejected a single name in it (a component, or a symlink target's component, over
+// the file system's name limit), and any open that reaches that name fails the same way,
+// whatever spelling or working directory it uses. A rejection of a lookup at the path limit
+// is a whole-path failure that a shorter relative or symlinked spelling can avoid: it is only
+// ErrPathTooLong.
+var ErrOSNameTooLong = errors.New("the operating system rejected a name as too long")
+
+// errOSNameTooLong classifies an OS name-too-long error for lookup path p.
+//
+// Windows errors are never marked: os.Lstat converts the path (adding a \\?\ or UNC prefix)
+// and Windows expands namespaces at run time, so the length the OS saw is not the length of p,
+// and a whole-path failure cannot be told apart from a name that is too long.
+func errOSNameTooLong(p string) error {
+	return errOSNameTooLongFor(runtime.GOOS, p)
+}
+
+func errOSNameTooLongFor(goos, p string) error {
+	if goos == "windows" || ResolvePathLength(p)+1 >= MaxResolvePathLength() {
+		return errTooLongLookup(p)
+	}
+	return fmt.Errorf("%w: %w: a lookup of length %d", ErrPathTooLong, ErrOSNameTooLong, ResolvePathLength(p))
+}
+
 // isNameTooLong reports an OS error for a path or name over the OS limit. It must not be
 // mistaken for a missing component: the OS follows symlinks without that limit.
 func isNameTooLong(err error) bool {
@@ -400,7 +426,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 		fi, err := lstat(dest)
 		if err != nil {
 			if isNameTooLong(err) {
-				return "", errTooLongLookup(dest)
+				return "", errOSNameTooLong(dest)
 			}
 			// Only a name that does not exist is one to be created; any other failure
 			// (EACCES, ELOOP, ENOTDIR, ...) leaves the path unverifiable.
@@ -434,7 +460,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 		link, err := readlink(dest)
 		if err != nil {
 			if isNameTooLong(err) {
-				return "", errTooLongLookup(dest)
+				return "", errOSNameTooLong(dest)
 			}
 			return "", err
 		}
