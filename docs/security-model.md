@@ -6,6 +6,7 @@ This page describes what `jev-guard` checks, in what order, and why. For a short
 - [Local fast path](#local-fast-path)
 - [Semantic evaluation with TypeSafe AI](#semantic-evaluation-with-typesafe-ai)
 - [Context-aware intent](#context-aware-intent)
+- [Intent per agent](#intent-per-agent)
 - [Intent policy matrix](#intent-policy-matrix)
 - [Threat: injected instructions in the prompt](#threat-injected-instructions-in-the-prompt)
 - [Behavior per agent](#behavior-per-agent)
@@ -25,7 +26,7 @@ MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-gua
 
 ## Local fast path
 
-Before any network call, a local filter (under 1 ms) runs these checks. Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to skip it and send every call to TypeSafe AI.
+Before any network call, a local filter (under 1 ms) runs these checks. Set `"fastpath_enabled": false` in `~/.jevguard/.jevguard.json` to skip it and send every call to TypeSafe AI. [Anti-tampering](#anti-tampering) is the exception: it always runs first, even with the fast path disabled.
 
 ### Sensitive file protection
 
@@ -52,7 +53,44 @@ One exception: a Claude Code `Read` of a file that Claude Code itself saved for 
 
 ### Anti-tampering
 
-Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering. `~/.jevguard` lives outside project workspaces, and the fast path denies any tool call that tries to touch session cache files. Any shell command whose text contains `.jevguard` or `jevguard.json` is also denied.
+Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguard.log`, or `~/.jevguard/` is blocked (`DENY`). This prevents secret exposure and policy tampering, including tampering with the session cache files in `~/.jevguard`.
+
+- Every path-like argument is checked, not only the one used as the call's target. A `source` argument next to `dest` is also checked.
+- File-name filters (`glob`, `Includes`, `Excludes`, and the `pattern` of `Glob` and `find_by_name`) and shell command text are denied if they contain `.jevguard` or `jevguard.json`. Content search patterns, such as Grep's `pattern`, are not checked.
+- The check runs before every other stage, including the aborted-session and session-read-error holds. It does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
+
+### Antigravity transcript guard
+
+This guard runs only if you turn on `antigravity_transcript_intent` (see [Intent per agent](#intent-per-agent)). With it off, which is the default, nothing here runs for any agent, so these rules have no cost and cause no denials. With it on, the guard runs for every agent, because any agent on the machine could forge the transcript, and it also runs when `fastpath_enabled` is false.
+
+The guard denies access to the transcript (`DENY`, source `fastpath_tampering`), because an agent that could write it could forge your authorization. This covers any path into `.gemini/antigravity/brain/<id>/.system_generated/` in the target, another path argument, or a working directory. Each path is checked as written and as the filesystem resolves it, from its exact bytes, so a symlink to the transcript or to a parent directory is denied too, including when the final file does not exist yet. Other files under `brain/<id>/`, such as `task.md`, are not affected for file tools.
+
+Commands and other arguments get these checks:
+
+- **Text.** Any command whose text contains `antigravity/brain`, `.system_generated`, or `transcript.jsonl` is denied. This is broad on purpose, so an unrelated `cat transcript.jsonl` is denied too, and so is a commit message that spells one out.
+- **Words.** Each word is read the way a shell would read it, then checked against the same text and resolved, and is denied if it leads anywhere under `.gemini/antigravity/brain`. The shell that will run the command is unknown, so the command is read under POSIX rules (backslashes, single and double quotes, adjacent segments, `$'...'`, `$"..."`), PowerShell rules (backtick), and cmd.exe rules (caret), and every reading is checked. `~`, `$HOME`, `$PWD`, and variables set in the hook's environment are expanded. On Windows, Git Bash's `/c/Users/...` spelling is also read as a drive. Words are also split at operators, `=`, `,`, and `:`, and values attached to a short flag (`-ofile`) or an `@` are checked.
+- **Strings a program will run.** A quoted string is read as a command only when a recognized program will run it, up to 3 levels deep: `sh`, `bash`, and similar shells with `-c`, `cmd /c`, `powershell` and `pwsh`, `eval`, `su -c`, the `-c` or `-e` flags of `python`, `node`, `perl`, `ruby`, `php -r`, and `lua`, and `$(...)` or backticks outside single quotes. Other quoted text stays text, as does a heredoc's body for the text check. A command list such as `["bash", "-lc", "..."]` holds literal words, read the same way.
+- **Other arguments.** File names in `apply_patch` headers count as paths. Any other one-line argument counts if it resolves into the transcript directory and its parent directory exists, so file content that only mentions the path is not denied.
+
+A command run from a working directory under the brain directory is denied as well.
+
+**Work limits.** A command or path argument too large to check gets `ASK` (source `transcript_guard_limit`, reason "could not be verified"). As with every other verdict, audit mode logs this as `[AUDIT-MODE: ask]` and allows the call. The limits apply to each recognized command and path argument, not to the total size of a call, so oversized text in nested or other arguments gets no limit verdict. They are 2 MiB per command (a string or an argument list), 1 MiB per path argument, 50,000 distinct words, 1,000,000 path components, 60,000 filesystem lookups, and 64 symlink hops per path, so a very large heredoc can hit them. A symlink loop also gets this `ASK`.
+
+**This does not make shell commands safe, and turning the setting on trusts your agents not to forge a transcript.** `jev-guard` reads a command's text and does not run a shell. It cannot see the following, and such a command goes on to the remaining checks. Each of the first group is run by a test in a real `bash`: the command passes the guard, writes a record through a symlink to the transcript, and that record is accepted as your intent.
+
+- A path computed when the command runs: a variable set in the command or differing from the hook's environment, a substitution's output, or a decoded string (`f=da; cat "work/${f}ta"`).
+- A glob or a brace expansion that matches a symlink (`printf x >> work/d*`, `tee -a work/{d,e}ata`).
+- A symlink made earlier in the same command.
+- A relative path after a `cd` in the same command (`cd work && cat data`), when the directory itself does not lead under the brain directory.
+- A script file, or a path built inside a program string, including programs that are not recognized (`sh work/run.sh`, `awk '... ("work/da" "ta")'`).
+- A hard link to the transcript, which looks like an ordinary file.
+
+These are also not modeled, and have not been run:
+
+- A multi-line path in an argument other than the known path arguments.
+- PowerShell control escapes such as `` `n ``, which are read as the plain letter, a word that holds both an apostrophe and cmd.exe quoting, and other shells' own quoting rules, such as `fish`.
+- Windows name rewriting: trailing dots and spaces, 8.3 short names, and `::$DATA` streams. These depend on the file system.
+- Git Bash mount paths other than a drive, such as `/tmp`.
 
 ### Trusted commands and read tools
 
@@ -85,11 +123,42 @@ Fail-safe: if the API key is missing, the endpoint is unsafe, the response is no
 
 This feature is optional. Disable it with `"context_awareness_enabled": false` in `~/.jevguard/.jevguard.json`. When the cache is cold, `jev-guard` falls back to strict stateless checks.
 
-- **Intent ingestion.** Claude Code's `UserPromptSubmit` hook sends the active prompt to an ephemeral session cache in `~/.jevguard/sessions/`. Antigravity's documented hook payload does not include prompt text, so its generated hooks use stateless tool-level gating.
-- **Scope.** Intent covers a single reply. Claude Code's `Stop` hook runs `jev-guard end-turn` to clear it; `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn`, so background work stays held until the TTL expires or the next prompt arrives.
+- **Intent ingestion.** Claude Code's and Codex CLI's `UserPromptSubmit` hooks send the active prompt to an ephemeral session cache in `~/.jevguard/sessions/`. Antigravity's hook payload has no prompt text, so it gets no intent by default. If you opt in, `jev-guard` reads the latest explicit user request from the conversation transcript at each `PreToolUse` instead. See [Intent per agent](#intent-per-agent).
+- **Scope.** Intent covers a single reply. In Claude Code and Codex, the `Stop` hook runs `jev-guard end-turn` to clear it; `intent_ttl_minutes` (default 30) is only a backstop. An abort ("stop") survives `end-turn`, so background work stays held until the TTL expires or the next prompt arrives. A session abort holds the call whichever turn it was recorded in.
 - **Fail closed on unreadable sessions.** If a session file exists but cannot be read or decoded (permissions, corrupt JSON, or retries exhausted), the gate holds the call with `force_ask` (source `session_read_error`) and prints a diagnostic to stderr, because a recorded abort cannot be ruled out. `end-turn` keeps such a file too. The next ingested prompt or `jev-guard clear-intent` replaces it. Audit mode rewrites this hold to `ALLOW` like any other, and nothing is read when `context_awareness_enabled` is false.
 - **Fewer needless prompts.** When you explicitly ask for an action (for example *"Delete the build directory"* or *"Set PORT=3000 in .env"*), TypeSafe AI confirms that the call matches your intent and allows it, so you are not asked again.
 - **Catastrophic ceiling.** Even with a matching intent, catastrophic deletions or unbounded disk destruction (`destructive_potential > 2.5`) are capped at `force_ask`, never `ALLOW`.
+
+### Intent per agent
+
+| | Claude Code | Codex CLI | Antigravity |
+| :--- | :--- | :--- | :--- |
+| **Intent source** | `UserPromptSubmit` hook | `UserPromptSubmit` hook | None by default; opt in to read the conversation transcript at `PreToolUse` |
+| **Turn scoping** | Numeric turn when the payload has one; `Stop` clears the session | Exact match on the string `turn_id`; `Stop` clears the session | The latest user message in that conversation; no `Stop` hook and no TTL |
+| **Stop/abort prompt** | Holds until the TTL expires or the next prompt | Holds until the TTL expires or the next prompt | Holds while it is the latest user message |
+| **Setting** | `context_awareness_enabled` turns it off | `context_awareness_enabled` turns it off | `antigravity_transcript_intent: true` turns it on; off by default. It also needs `context_awareness_enabled` |
+
+**Codex.** `ingest` stores the `turn_id` of the `UserPromptSubmit` event, and `PreToolUse` uses that intent only when its own `turn_id` is the same, so the intent of an interrupted or older turn is never applied. If either the stored session or the call has a string `turn_id`, both must have the same one, or the call gets no intent. A `turn_id` that names no turn, such as an empty string or a JSON object, never gives intent on either side; `null` counts as no `turn_id`. A call without one therefore cannot pick up a keyed session's prompt, whichever agent sent it. A recorded abort still holds across any such mismatch. A payload with a string `turn_id` is reported as harness `codex`; other Codex payloads are reported as `claude-code`.
+
+**Antigravity is opt-in.** With `antigravity_transcript_intent` off, which is the default, no transcript is read and Antigravity calls are gated without intent. Claude Code and Codex intent do not depend on this setting.
+
+Setting it to `true` in `~/.jevguard/.jevguard.json` unlocks intent-based decisions for Antigravity: fewer prompts when you asked for the action, and a stop in your latest message holds the call. It also turns on the [transcript guard](#antigravity-transcript-guard) for every agent. **An agent with shell access can still forge a transcript through the guard's documented limits, and a forged record counts as your own request, so turning this on trusts your agents not to do that.** Only your user config can set it. A project config cannot, even a trusted one, and an invalid value means off, with a diagnostic. `jev-guard doctor`, `status`, `config show`, and `eval --explain` report it.
+
+The transcript is `~/.gemini/antigravity/brain/<conversationId>/.system_generated/logs/transcript.jsonl`, and the intent is its last `USER_INPUT` / `USER_EXPLICIT` record. The payload's `transcriptPath` is used only if it resolves to exactly that location for the payload's conversation ID and is a regular file. At most the last 8 MB are scanned, and text over 8 KB is unusable.
+
+This format is undocumented and can change, so the feature fails closed:
+
+- If the latest user record is unusable (empty, not text, malformed, truncated, or over the size cap), the call has no intent, and older messages and the session cache are not used as a fallback. It is gated as if no intent existed, and a diagnostic goes to stderr.
+- If the canonical location is redirected, the call also has no intent, and the file it leads to is not read. That means the location, or any directory between it and your home directory, is a symlink (or on Windows, a junction). This includes a `.gemini` directory symlinked from a dotfiles repository, which then gets no transcript intent. Your home directory itself may be a symlink.
+- If the transcript is unavailable (wrong path, unreadable, or no user record in the scanned window), the transcript adds nothing. Only a turn-matched intent from an explicit `jev-guard ingest` can still apply.
+
+Limits:
+
+- An unusable latest record is not treated as a stop, because every long prompt would then hold every call. A stop that cannot be read is therefore not honored.
+- Without a `Stop` hook, transcript intent lasts until the next user message, including for background work after the reply ends.
+- Transcript text can include anything you pasted, like any other prompt.
+
+Agent access to the transcript is denied, within its limits (see [Antigravity transcript guard](#antigravity-transcript-guard)).
 
 ## Intent policy matrix
 
