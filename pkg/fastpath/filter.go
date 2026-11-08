@@ -55,6 +55,7 @@ func NewDefaultFilter() *Filter {
 // Anti-tampering is not part of the filter: callers run CheckAntiTampering first,
 // regardless of whether the fast path is enabled.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
+	defer boundary.BeginEvaluation()()
 	if f.protectTranscript {
 		if result := CheckTranscriptTampering(call); result != nil {
 			return result
@@ -117,8 +118,9 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	return nil
 }
 
-// sourceBoundaryLimit is reported when a path is too long for the resolver to check
-// (boundary.ErrPathTooLong). The call is asked about whatever its intent.
+// sourceBoundaryLimit is reported when a path could not be resolved within the resolver's
+// limits (boundary.ErrResolutionLimit: a path too long for the OS, or the work budget of the
+// evaluation spent). The call is asked about whatever its intent.
 const sourceBoundaryLimit = "boundary_limit"
 
 func boundaryLimitResult(prefix string, err error) *harness.EvaluationResult {
@@ -137,6 +139,7 @@ func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationRes
 	if call == nil {
 		return nil
 	}
+	defer boundary.BeginEvaluation()()
 
 	reason := ""
 	if session.IsJevguardPath(call.TargetPath) || hasJevguardArg(call) {
@@ -212,9 +215,10 @@ func stringArgValues(raw interface{}) []string {
 }
 
 // SensitiveReason reports why a call touches a sensitive file or credential
-// pattern, or "" if it does not. The gate reuses it for tainted sessions. A path too long
-// to resolve counts as sensitive, since it cannot be ruled out.
+// pattern, or "" if it does not. The gate reuses it for tainted sessions. A path that cannot
+// be resolved within the resolver's limits counts as sensitive, since it cannot be ruled out.
 func (f *Filter) SensitiveReason(call *harness.NormalizedToolCall) string {
+	defer boundary.BeginEvaluation()()
 	reason, err := f.checkSensitive(call)
 	if err != nil {
 		return "Sensitive file access could not be verified: " + err.Error()
@@ -223,7 +227,7 @@ func (f *Filter) SensitiveReason(call *harness.NormalizedToolCall) string {
 }
 
 // checkSensitive returns a sensitive-file reason, or an error wrapping
-// boundary.ErrPathTooLong when a path could not be resolved to check it.
+// boundary.ErrResolutionLimit when a path could not be resolved to check it.
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error) {
 	if reason := f.checkResolvedXDGConfig(call); reason != "" {
 		return reason, nil
@@ -333,7 +337,7 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, er
 	}
 	for _, c := range candidates {
 		resolved, err := boundary.CanonicalizePath(joinCwd(c, cwd))
-		if errors.Is(err, boundary.ErrPathTooLong) {
+		if errors.Is(err, boundary.ErrResolutionLimit) {
 			return "", err
 		}
 		if err != nil || resolved == "" {
@@ -580,7 +584,7 @@ func normalizePathSeparators(value string) string {
 }
 
 // checkBoundaryEscape returns why the target escapes the workspace, or an error wrapping
-// boundary.ErrPathTooLong when it is too long to resolve.
+// boundary.ErrResolutionLimit when it could not be resolved within the limits.
 func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) (string, error) {
 	target := strings.TrimSpace(call.TargetPath)
 	if target == "" || isURL(target) {
@@ -597,7 +601,7 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) (string, 
 	}
 
 	contained, err := checker.IsPathContained(target, call.Cwd)
-	if errors.Is(err, boundary.ErrPathTooLong) {
+	if errors.Is(err, boundary.ErrResolutionLimit) {
 		return "", err
 	}
 	if err != nil {
@@ -627,7 +631,8 @@ func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) Bounda
 }
 
 // isTrustedOperation reports whether the call is a trusted read. A non-nil error means a
-// command argument was too long to resolve (boundary.ErrPathTooLong); the caller must ask.
+// command argument could not be resolved within the limits (boundary.ErrResolutionLimit);
+// the caller must ask.
 func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) (bool, error) {
 	if isSafeReadTool(call) {
 		return true, nil
@@ -700,7 +705,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 				}
 				if isPotentialPath(val) {
 					contained, err := checker.IsPathContained(val, call.Cwd)
-					if errors.Is(err, boundary.ErrPathTooLong) {
+					if errors.Is(err, boundary.ErrResolutionLimit) {
 						return false, err
 					}
 					if err != nil || !contained {
@@ -716,7 +721,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 		}
 		if isPotentialPath(cleanArg) {
 			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
-			if errors.Is(err, boundary.ErrPathTooLong) {
+			if errors.Is(err, boundary.ErrResolutionLimit) {
 				return false, err
 			}
 			if err != nil || !contained {

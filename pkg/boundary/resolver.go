@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 // Resolver checks whether target paths reside safely inside declared workspace boundaries.
@@ -21,7 +22,7 @@ func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 	tooLong := false
 	for _, root := range declaredRoots {
 		cleanRoot, err := canonicalizePath(root)
-		if errors.Is(err, ErrPathTooLong) {
+		if errors.Is(err, ErrResolutionLimit) {
 			tooLong = true
 		}
 		if err == nil && cleanRoot != "" {
@@ -29,7 +30,7 @@ func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 		}
 	}
 
-	// A declared root too long to resolve must not be replaced by the cwd or Git root, which
+	// A declared root that could not be resolved within the limits must not be replaced by the cwd or Git root, which
 	// could be broader. With no usable root, nothing is contained.
 	if len(roots) == 0 && !tooLong {
 		effectiveCwd := cwd
@@ -69,8 +70,8 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	cleanTarget, err := canonicalizePath(absPath)
-	if errors.Is(err, ErrPathTooLong) {
-		return false, err // the path itself is too long to repeat in a message
+	if errors.Is(err, ErrResolutionLimit) {
+		return false, err // the path itself may be too long to repeat in a message
 	}
 	if err != nil {
 		return false, fmt.Errorf("unable to resolve path %s: %w", targetPath, err)
@@ -127,29 +128,53 @@ func IsSubPath(parent, child string) bool {
 	return isSubPath(parent, child)
 }
 
-// ErrPathTooLong is returned, wrapped, for a path longer than MaxResolvePathBytes. Such a
+// ErrPathTooLong is returned, wrapped, for a path longer than MaxResolvePathLength. Such a
 // path is not resolved: callers must treat it as unverifiable (not contained, ASK), never as
-// contained or safe.
-var ErrPathTooLong = errors.New("path is too long to resolve")
+// contained or safe. It matches ErrResolutionLimit.
+var ErrPathTooLong error = &limitError{"path is too long to resolve"}
 
-// MaxResolvePathBytes is the longest absolute, cleaned path the resolver will look up: 32,767
-// on Windows (the extended-length path limit, counted here in UTF-8 bytes, which is never less
-// than the UTF-16 units Windows counts) and 4,096 elsewhere (Linux PATH_MAX; macOS allows only
-// 1,024). The OS cannot open a longer path, so there is nothing to resolve. The same values
-// bound filesystem lookups in the fastpath transcript guard.
-func MaxResolvePathBytes() int {
-	return maxResolvePathBytesForOS(runtime.GOOS)
+// MaxResolvePathLength is the longest absolute, cleaned path the resolver will look up, in the
+// units the OS counts (see ResolvePathLength): 32,767 UTF-16 code units on Windows (the
+// extended-length path limit) and 4,096 bytes elsewhere (Linux PATH_MAX; macOS allows only
+// 1,024). The OS cannot open a longer path, so there is nothing to resolve. This limit is
+// separate from the evaluation's work budget (WorkBudget).
+func MaxResolvePathLength() int {
+	return maxResolvePathLengthForOS(runtime.GOOS)
 }
 
-func maxResolvePathBytesForOS(goos string) int {
+func maxResolvePathLengthForOS(goos string) int {
 	if goos == "windows" {
 		return 32767
 	}
 	return 4096
 }
 
-// evalSymlinks is a seam so tests can count filesystem resolutions.
-var evalSymlinks = filepath.EvalSymlinks
+// ResolvePathLength is the length of p in the units MaxResolvePathLength counts: UTF-16 code
+// units on Windows, where a 3-byte UTF-8 character such as a CJK ideograph is one unit, and
+// bytes elsewhere.
+func ResolvePathLength(p string) int {
+	return pathLengthForOS(p, runtime.GOOS)
+}
+
+func pathLengthForOS(p, goos string) int {
+	if goos != "windows" {
+		return len(p)
+	}
+	n := 0
+	for _, r := range p {
+		n += utf16Units(r)
+	}
+	return n
+}
+
+// utf16Units is the UTF-16 length of r. Invalid UTF-8 decodes as U+FFFD, one unit, which is
+// also what it becomes when the path is passed to Windows.
+func utf16Units(r rune) int {
+	if l := utf16.RuneLen(r); l > 0 {
+		return l
+	}
+	return 1
+}
 
 func canonicalizePath(path string) (string, error) {
 	if runtime.GOOS != "windows" && isWindowsDriveAbs(path) {
@@ -175,70 +200,21 @@ func canonicalizePath(path string) (string, error) {
 	if err := checkPathLength(clean); err != nil {
 		return "", err
 	}
-	return resolveSymlinks(clean), nil
+	return withEvaluation(func(e *evaluation) (string, error) {
+		return e.resolve(clean, false)
+	})
 }
 
 func checkPathLength(clean string) error {
-	if limit := MaxResolvePathBytes(); len(clean) > limit {
-		return fmt.Errorf("%w: %d bytes, limit %d", ErrPathTooLong, len(clean), limit)
+	// A path's UTF-16 length never exceeds its UTF-8 length, so most paths need no count.
+	limit := MaxResolvePathLength()
+	if len(clean) <= limit {
+		return nil
+	}
+	if n := ResolvePathLength(clean); n > limit {
+		return fmt.Errorf("%w: length %d, limit %d", ErrPathTooLong, n, limit)
 	}
 	return nil
-}
-
-// resolveSymlinks evaluates symlinks in an absolute, cleaned path. When the whole path does
-// not resolve (a file about to be created), the deepest ancestor that does is resolved and the
-// rest is appended as written.
-//
-// A cleaned path has no ".." components, so whether a prefix resolves is monotonic in its
-// length: EvalSymlinks walks the components in order, so a prefix that fails makes every
-// longer prefix fail the same way. The deepest resolvable ancestor is therefore found by
-// binary search over the separator positions, with O(log n) EvalSymlinks calls, and the result
-// is built with one concatenation. The previous one-ancestor-at-a-time walk was quadratic.
-func resolveSymlinks(path string) string {
-	if realPath, err := evalSymlinks(path); err == nil {
-		return filepath.Clean(realPath)
-	}
-
-	volume := len(filepath.VolumeName(path))
-	// ends[i] is where ancestor i ends; ancestors are ordered from the root down.
-	var ends []int
-	for i := volume; i < len(path); i++ {
-		if os.IsPathSeparator(path[i]) {
-			ends = append(ends, i)
-		}
-	}
-	ancestor := func(i int) string {
-		end := ends[i]
-		if end == volume {
-			return path[:end+1] // the root keeps its separator: "/" or `C:\`
-		}
-		return path[:end]
-	}
-
-	// Find the largest i whose ancestor resolves; ok holds its resolution.
-	lo, hi := 0, len(ends) // the answer lies in [lo-1, hi-1]
-	best, bestReal := -1, ""
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		if realParent, err := evalSymlinks(ancestor(mid)); err == nil {
-			best, bestReal = mid, realParent
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if best < 0 {
-		return path
-	}
-
-	rest := path[ends[best]+1:]
-	if rest == "" {
-		return filepath.Clean(bestReal)
-	}
-	if len(bestReal) > 0 && os.IsPathSeparator(bestReal[len(bestReal)-1]) {
-		return filepath.Clean(bestReal + rest)
-	}
-	return filepath.Clean(bestReal + string(filepath.Separator) + rest)
 }
 
 func isSubPath(parent, child string) bool {

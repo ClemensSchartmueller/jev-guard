@@ -572,6 +572,13 @@ func ScanSessions() (*SessionScan, error) {
 }
 
 // IsJevguardPath checks if a given file path is located inside ~/.jevguard or targets the security cache.
+//
+// It also reports true when the path, or the jev-guard directory, cannot be canonicalized
+// because a resolution limit was reached (boundary.ErrResolutionLimit: the path is too long
+// for the OS, or the evaluation's resolution budget is spent). Such a path could be a symlink
+// or junction alias of the jev-guard directory, and anti-tampering is an unconditional DENY:
+// an unverifiable path must not downgrade it to an ASK the user could approve. A path over
+// the OS limit cannot be opened anyway, so denying it blocks nothing that could have run.
 func IsJevguardPath(targetPath string) bool {
 	trimmed := strings.TrimSpace(targetPath)
 	if trimmed == "" {
@@ -594,7 +601,11 @@ func IsJevguardPath(targetPath string) bool {
 	}
 
 	cleanHome := GetJevguardDir()
-	if canonHome, err := boundary.CanonicalizePath(cleanHome); err == nil && canonHome != "" {
+	canonHome, err := boundary.CanonicalizePath(cleanHome)
+	if errors.Is(err, boundary.ErrResolutionLimit) {
+		return true
+	}
+	if err == nil && canonHome != "" {
 		cleanHome = canonHome
 	}
 
@@ -604,7 +615,11 @@ func IsJevguardPath(targetPath string) bool {
 			absTarget = abs
 		}
 	}
-	if canonTarget, err := boundary.CanonicalizePath(absTarget); err == nil && canonTarget != "" {
+	canonTarget, err := boundary.CanonicalizePath(absTarget)
+	if errors.Is(err, boundary.ErrResolutionLimit) {
+		return true
+	}
+	if err == nil && canonTarget != "" {
 		absTarget = canonTarget
 	}
 

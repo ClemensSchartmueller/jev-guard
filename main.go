@@ -76,6 +76,9 @@ func runGate(initErr error) int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
+	// One path resolution budget for every check of this call (see boundary.BeginEvaluation).
+	defer boundary.BeginEvaluation()()
+
 	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
@@ -263,6 +266,7 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 // traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict.
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
+	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
 	trace := &gateTrace{}
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
 	if tampering := fastpath.CheckAntiTampering(call); tampering != nil {

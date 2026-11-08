@@ -2,6 +2,8 @@ package fastpath
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,5 +94,72 @@ func TestFastPath_OverLimitSensitiveCandidateFailsClosed(t *testing.T) {
 	call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: target, Cwd: ws}
 	if reason := filter.SensitiveReason(call); reason == "" {
 		t.Fatal("SensitiveReason must not clear a path it could not resolve")
+	}
+}
+
+// nestedDirs creates depth nested directories named "a" under parent and returns the deepest.
+func nestedDirs(t *testing.T, parent string, depth int) string {
+	t.Helper()
+	dir := filepath.Join(parent, strings.TrimSuffix(strings.Repeat("a/", depth), "/"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Review of PR #79: with 1,500 existing nested directories, `echo <nested>/z0 ... <nested>/z99`
+// (each word under the length limit) took 86.8 s and ended ALLOW; ten words took 7.6 s. The
+// shared prefix is now resolved once per evaluation, so the call is cheap and stays trusted.
+func TestFastPath_ManyWordsUnderDeepExistingPrefix(t *testing.T) {
+	ws := limitWorkspace(t)
+	rel, err := filepath.Rel(ws, nestedDirs(t, ws, 1500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("echo")
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&b, " %s/z%d", rel, i)
+	}
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: b.String(), Cwd: ws, WorkspaceRoots: []string{ws}}
+	start := time.Now()
+	res := NewDefaultFilter().Evaluate(call)
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second { // was 87 s
+		t.Errorf("100 deep words took %v", elapsed)
+	}
+	if res == nil || res.Decision != harness.DecisionAllow || res.Source != "fastpath_trusted" {
+		t.Fatalf("expected trusted ALLOW for in-workspace words, got %+v", res)
+	}
+	t.Logf("100 words, %d bytes: %v", len(call.Command), elapsed)
+}
+
+// Words under distinct deep trees share no prefix to reuse. The evaluation's resolution
+// budget bounds them, and running out of it asks instead of allowing.
+func TestFastPath_ExhaustedResolutionBudgetAsks(t *testing.T) {
+	ws := limitWorkspace(t)
+	var b strings.Builder
+	b.WriteString("echo")
+	for i := 0; i < 8; i++ {
+		dir := nestedDirs(t, filepath.Join(ws, fmt.Sprint(i)), 1500)
+		rel, err := filepath.Rel(ws, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&b, " %s/z", rel)
+	}
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: b.String(), Cwd: ws, WorkspaceRoots: []string{ws}}
+	start := time.Now()
+	res := NewDefaultFilter().Evaluate(call)
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second {
+		t.Errorf("evaluation took %v", elapsed)
+	}
+	if res == nil || res.Decision != harness.DecisionAsk || res.Source != sourceBoundaryLimit {
+		t.Fatalf("expected ASK from %s, got %+v", sourceBoundaryLimit, res)
+	}
+	t.Logf("8 distinct deep trees: %v, %s", elapsed, res.Reason)
+	if !strings.Contains(res.Reason, "budget") {
+		t.Errorf("reason does not name the budget: %s", res.Reason)
 	}
 }

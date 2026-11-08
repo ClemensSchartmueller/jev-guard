@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
@@ -253,6 +254,9 @@ func evaluate(o *evalOptions, stdin io.Reader, stdout, stderr io.Writer) int {
 	if o.cwd != "" && o.payloadFile != "" {
 		call.Cwd = o.cwd
 	}
+
+	// One path resolution budget for the whole evaluation, as in the hook (runGate).
+	defer boundary.BeginEvaluation()()
 
 	cfg := evalLoadConfig(call)
 	intent := applyEvalIntent(call, cfg, o.intent)

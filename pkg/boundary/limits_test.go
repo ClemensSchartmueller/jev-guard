@@ -2,6 +2,7 @@ package boundary
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,33 +11,16 @@ import (
 	"time"
 )
 
-// countEvalSymlinks replaces the evalSymlinks seam with one that counts calls.
-func countEvalSymlinks(t *testing.T) *int {
+// countLookups wraps the lstat seam to count filesystem lookups.
+func countLookups(t *testing.T) *int {
 	t.Helper()
 	calls := 0
-	orig := evalSymlinks
-	evalSymlinks = func(p string) (string, error) {
+	orig := lstat
+	lstat = func(p string) (os.FileInfo, error) {
 		calls++
 		return orig(p)
 	}
-	t.Cleanup(func() { evalSymlinks = orig })
-	return &calls
-}
-
-// fakeEvalSymlinks resolves exactly the given paths (and nothing else). The map
-// must be closed under prefixes, as the real filesystem is for cleaned paths.
-func fakeEvalSymlinks(t *testing.T, resolved map[string]string) *int {
-	t.Helper()
-	calls := 0
-	orig := evalSymlinks
-	evalSymlinks = func(p string) (string, error) {
-		calls++
-		if real, ok := resolved[p]; ok {
-			return real, nil
-		}
-		return "", os.ErrNotExist
-	}
-	t.Cleanup(func() { evalSymlinks = orig })
+	t.Cleanup(func() { lstat = orig })
 	return &calls
 }
 
@@ -49,14 +33,38 @@ func realTempDir(t *testing.T) string {
 	return dir
 }
 
-func TestMaxResolvePathBytesForOS(t *testing.T) {
-	if got := maxResolvePathBytesForOS("windows"); got != 32767 {
+func TestMaxResolvePathLengthForOS(t *testing.T) {
+	if got := maxResolvePathLengthForOS("windows"); got != 32767 {
 		t.Errorf("windows limit = %d, want 32767", got)
 	}
 	for _, goos := range []string{"linux", "darwin", "freebsd"} {
-		if got := maxResolvePathBytesForOS(goos); got != 4096 {
+		if got := maxResolvePathLengthForOS(goos); got != 4096 {
 			t.Errorf("%s limit = %d, want 4096", goos, got)
 		}
+	}
+}
+
+// Windows counts its path limit in UTF-16 code units, not UTF-8 bytes: a CJK ideograph is
+// three bytes but one unit, so a valid path can exceed 32,767 bytes (review of PR #79).
+func TestPathLengthCountsUTF16OnWindows(t *testing.T) {
+	cjk := `\\?\C:\` + strings.Repeat(strings.Repeat("界", 100)+`\`, 120)
+	if got, want := pathLengthForOS(cjk, "windows"), 7+120*101; got != want {
+		t.Errorf("windows length = %d, want %d UTF-16 units", got, want)
+	}
+	if got := pathLengthForOS(cjk, "windows"); got > maxResolvePathLengthForOS("windows") {
+		t.Errorf("a %d-unit path is over the Windows limit", got)
+	}
+	if len(cjk) <= maxResolvePathLengthForOS("windows") {
+		t.Fatalf("test path is only %d bytes", len(cjk))
+	}
+	if got := pathLengthForOS("a😀", "windows"); got != 3 {
+		t.Errorf("surrogate pair length = %d, want 3", got)
+	}
+	if got := pathLengthForOS("a\xff", "windows"); got != 2 {
+		t.Errorf("invalid UTF-8 length = %d, want 2", got)
+	}
+	if got := pathLengthForOS(cjk, "linux"); got != len(cjk) {
+		t.Errorf("linux length = %d, want %d bytes", got, len(cjk))
 	}
 }
 
@@ -68,7 +76,7 @@ func TestPathologicalPathIsBoundedAndNotContained(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls := countEvalSymlinks(t)
+	calls := countLookups(t)
 	word := strings.Repeat("a/", 32*1024) // 64 KiB, inside the workspace lexically
 
 	start := time.Now()
@@ -85,25 +93,25 @@ func TestPathologicalPathIsBoundedAndNotContained(t *testing.T) {
 		t.Errorf("error repeats the path: %.80s...", err.Error())
 	}
 	if *calls != 0 {
-		t.Errorf("over-limit path made %d EvalSymlinks calls, want 0", *calls)
+		t.Errorf("over-limit path made %d lookups, want 0", *calls)
 	}
 	if elapsed > time.Second {
 		t.Errorf("rejecting a 64 KiB path took %v", elapsed)
 	}
 }
 
-// TestDeepMissingTailUsesLogarithmicLookups checks the work bound inside the limit: the
-// deepest existing ancestor is found by binary search, not one parent at a time.
-func TestDeepMissingTailUsesLogarithmicLookups(t *testing.T) {
+// TestDeepMissingTailStopsAtFirstMissingComponent checks the work bound inside the limit:
+// the walk stops at the first missing component instead of looking up every ancestor.
+func TestDeepMissingTailStopsAtFirstMissingComponent(t *testing.T) {
 	ws := realTempDir(t)
-	budget := MaxResolvePathBytes() - len(ws) - 2
+	budget := MaxResolvePathLength() - len(ws) - 2
 	components := budget / 2
 	tail := strings.TrimSuffix(strings.Repeat("a"+string(filepath.Separator), components), string(filepath.Separator))
 	target := ws + string(filepath.Separator) + tail
-	if len(target) > MaxResolvePathBytes() {
+	if len(target) > MaxResolvePathLength() {
 		t.Fatalf("test path is %d bytes, over the limit", len(target))
 	}
-	calls := countEvalSymlinks(t)
+	calls := countLookups(t)
 
 	got, err := CanonicalizePath(target)
 	if err != nil {
@@ -112,13 +120,8 @@ func TestDeepMissingTailUsesLogarithmicLookups(t *testing.T) {
 	if got != filepath.Clean(target) {
 		t.Errorf("got %.80s..., want the path as written", got)
 	}
-	separators := strings.Count(target, string(filepath.Separator))
-	maxCalls := 2
-	for n := 1; n < separators+1; n *= 2 {
-		maxCalls++
-	}
-	if *calls > maxCalls {
-		t.Errorf("%d EvalSymlinks calls for %d components, want at most %d", *calls, separators, maxCalls)
+	if maxCalls := strings.Count(ws, string(filepath.Separator)) + 1; *calls > maxCalls {
+		t.Errorf("%d lookups for a workspace of depth %d, want at most %d", *calls, maxCalls-1, maxCalls)
 	}
 }
 
@@ -233,41 +236,97 @@ func TestResolveFileAncestor(t *testing.T) {
 	}
 }
 
-// TestResolveSymlinksFake exercises the ancestor search on fixed path shapes, including
-// Windows drive and UNC paths, which only parse as such on Windows.
+// fakeFS backs the lstat and readlink seams: "" is a directory, "file" a file, and any
+// other value a symlink to it. normalize is the identity, as on Unix.
+func fakeFS(t *testing.T, entries map[string]string) *int {
+	t.Helper()
+	calls := 0
+	origLstat, origReadlink, origNormalize := lstat, readlink, normalize
+	lstat = func(p string) (os.FileInfo, error) {
+		calls++
+		v, ok := entries[p]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		mode := fs.ModeDir
+		switch v {
+		case "":
+		case "file":
+			mode = 0
+		default:
+			mode = fs.ModeSymlink
+		}
+		return fakeInfo{name: filepath.Base(p), mode: mode}, nil
+	}
+	readlink = func(p string) (string, error) {
+		v, ok := entries[p]
+		if !ok || v == "" || v == "file" {
+			return "", os.ErrInvalid
+		}
+		return v, nil
+	}
+	normalize = func(p string) (string, error) { return p, nil }
+	t.Cleanup(func() { lstat, readlink, normalize = origLstat, origReadlink, origNormalize })
+	return &calls
+}
+
+type fakeInfo struct {
+	name string
+	mode fs.FileMode
+}
+
+func (i fakeInfo) Name() string       { return i.name }
+func (i fakeInfo) Size() int64        { return 0 }
+func (i fakeInfo) Mode() fs.FileMode  { return i.mode }
+func (i fakeInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i fakeInfo) Sys() any           { return nil }
+
+// TestResolveSymlinksFake exercises the walk on fixed path shapes, including Windows drive
+// and UNC paths, which only parse as such on Windows. A path that does not resolve keeps
+// the deepest input prefix that does, with the rest as written.
 func TestResolveSymlinksFake(t *testing.T) {
 	type tc struct {
-		name     string
-		in       string
-		resolved map[string]string
-		want     string
+		name    string
+		in      string
+		entries map[string]string
+		want    string
 	}
 	var cases []tc
 	if runtime.GOOS == "windows" {
 		cases = []tc{
-			{"drive root only", `C:\ws\a\b`, map[string]string{`C:\`: `C:\`}, `C:\ws\a\b`},
+			{"drive root only", `C:\ws\a\b`, nil, `C:\ws\a\b`},
 			{"drive symlinked ancestor", `C:\ws\link\a\b`,
-				map[string]string{`C:\`: `C:\`, `C:\ws`: `C:\ws`, `C:\ws\link`: `D:\real`}, `D:\real\a\b`},
-			{"unc", `\\srv\share\ws\a`,
-				map[string]string{`\\srv\share\`: `\\srv\share\`, `\\srv\share\ws`: `\\srv\share\ws`}, `\\srv\share\ws\a`},
-			{"nothing resolves", `C:\ws\a`, map[string]string{}, `C:\ws\a`},
+				map[string]string{`C:\ws`: "", `C:\ws\link`: `D:\real`, `D:\real`: ""}, `D:\real\a\b`},
+			{"unc", `\\srv\share\ws\a`, map[string]string{`\\srv\share\ws`: ""}, `\\srv\share\ws\a`},
 		}
 	} else {
 		cases = []tc{
-			{"root only", "/ws/a/b", map[string]string{"/": "/"}, "/ws/a/b"},
+			{"nothing resolves", "/ws/a/b", nil, "/ws/a/b"},
 			{"symlinked ancestor", "/ws/link/a/b",
-				map[string]string{"/": "/", "/ws": "/ws", "/ws/link": "/real"}, "/real/a/b"},
-			{"link to root", "/ws/link/a",
-				map[string]string{"/": "/", "/ws": "/ws", "/ws/link": "/"}, "/a"},
-			{"whole path", "/ws/a", map[string]string{"/": "/", "/ws": "/ws", "/ws/a": "/other"}, "/other"},
-			{"nothing resolves", "/ws/a", map[string]string{}, "/ws/a"},
+				map[string]string{"/ws": "", "/ws/link": "/real", "/real": ""}, "/real/a/b"},
+			{"dangling symlink is kept as written", "/ws/link/a",
+				map[string]string{"/ws": "", "/ws/link": "/real/missing", "/real": ""}, "/ws/link/a"},
+			{"link to root", "/ws/link/a", map[string]string{"/ws": "", "/ws/link": "/"}, "/a"},
+			{"whole path", "/ws/a", map[string]string{"/ws": "", "/ws/a": "/other", "/other": ""}, "/other"},
+			{"relative link with dot-dot", "/ws/d/l/x",
+				map[string]string{"/ws": "", "/ws/d": "", "/ws/d/l": "../real", "/ws/real": ""}, "/ws/real/x"},
+			{"chain", "/ws/l1/x",
+				map[string]string{"/ws": "", "/ws/l1": "l2", "/ws/l2": "/real", "/real": ""}, "/real/x"},
+			{"link to a file, then a child", "/ws/f/child",
+				map[string]string{"/ws": "", "/ws/f": "/real/file", "/real": "", "/real/file": "file"}, "/real/file/child"},
+			{"link loop", "/ws/loop/x", map[string]string{"/ws": "", "/ws/loop": "/ws/loop"}, "/ws/loop/x"},
 		}
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			fakeEvalSymlinks(t, c.resolved)
-			if got := resolveSymlinks(c.in); got != c.want {
-				t.Errorf("resolveSymlinks(%q) = %q, want %q", c.in, got, c.want)
+			fakeFS(t, c.entries)
+			got, err := newEvaluation().resolve(c.in, false)
+			if err != nil {
+				t.Fatalf("resolve(%q): %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("resolve(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
 	}
@@ -275,7 +334,7 @@ func TestResolveSymlinksFake(t *testing.T) {
 
 func TestOverLimitDeclaredRootDoesNotFallBackToCwd(t *testing.T) {
 	ws := realTempDir(t)
-	longRoot := filepath.Join(ws, strings.Repeat("r", MaxResolvePathBytes()))
+	longRoot := filepath.Join(ws, strings.Repeat("r", MaxResolvePathLength()))
 	resolver, err := NewResolver([]string{longRoot}, ws)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +353,7 @@ func TestOverLimitDeclaredRootDoesNotFallBackToCwd(t *testing.T) {
 
 func TestOverLimitCwdHasNoRoot(t *testing.T) {
 	ws := realTempDir(t)
-	longCwd := filepath.Join(ws, strings.Repeat("c", MaxResolvePathBytes()))
+	longCwd := filepath.Join(ws, strings.Repeat("c", MaxResolvePathLength()))
 	if root := FindGitRoot(longCwd); root != "" {
 		t.Errorf("FindGitRoot = %q, want none", root)
 	}
@@ -311,7 +370,7 @@ func TestOverLimitWindowsDrivePathOnOtherOS(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("lexical drive-path branch is for non-Windows hosts")
 	}
-	_, err := CanonicalizePath(`C:\` + strings.Repeat(`a\`, MaxResolvePathBytes()))
+	_, err := CanonicalizePath(`C:\` + strings.Repeat(`a\`, MaxResolvePathLength()))
 	if !errors.Is(err, ErrPathTooLong) {
 		t.Errorf("err = %v, want ErrPathTooLong", err)
 	}

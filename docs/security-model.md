@@ -50,15 +50,19 @@ Read tools (`Read`, `view_file`, `read_file`, `Glob`, `Grep`, `LS`, and similar)
 
 Path traversals and directory escapes (`../../`) are resolved locally for write and read operations. This prevents access to, or exfiltration of, files outside the workspace, such as `/etc/shadow` or `C:\Windows\system.ini`. Path case is preserved on Linux and matched case-insensitively on Windows. If a path cannot be resolved, the check fails closed.
 
-**Path length limit.** The resolver looks up a path only if, once made absolute and cleaned, it is at most 4,096 bytes long (32,767 bytes on Windows). These are the longest paths the operating system can open: `PATH_MAX` on Linux (macOS allows only 1,024), and the extended-length path limit on Windows, which counts UTF-16 units, so counting UTF-8 bytes never allows more. The transcript guard uses the same values for its filesystem lookups. A longer path is not resolved and is never treated as inside the workspace:
+**Path length limit.** The resolver looks up a path only if, once made absolute and cleaned, it is at most 4,096 bytes long on Linux and macOS (`PATH_MAX` on Linux; macOS allows only 1,024), or 32,767 UTF-16 code units on Windows (the extended-length path limit). Windows counts UTF-16 units, not UTF-8 bytes: a CJK character is three bytes but one unit, so a path the OS can open may be far longer than 32,767 bytes, and the resolver counts it the way Windows does. These are the longest paths the operating system can open.
 
-- a target path, a trusted command's argument, or a path checked for sensitive files gets `ASK` (source `boundary_limit`, reason "cannot be verified"), whatever the intent;
-- with `fastpath_enabled` false, a target path over the limit is not contained, so policy asks (source `policy_boundary`);
-- in a tainted session, a path over the limit counts as execution-sensitive and as a sensitive file;
-- a declared workspace root over the limit is dropped without falling back to the Git root or working directory, so nothing is inside it;
-- anti-tampering still checks such a path as written. On Linux and macOS the OS cannot follow a symlink in it, and the other checks above still ask.
+**Resolution work budget.** Symlinks are resolved by walking a path one component at a time, as the OS does (the walk of `filepath.EvalSymlinks`), and every lookup is charged the length of the path it passes to the OS (bytes; UTF-16 units on Windows), because the OS walks that path component by component. All path resolution for one tool call draws on one budget of 4 MiB of such lookups, about 0.2 s on the slowest shape: the target path, trusted-command arguments, sensitive-file checks, workspace roots, the taint checks, the Claude Code tool-result exemption and anti-tampering all share it, so they cannot each spend a full budget. Prefixes resolved once are reused for the rest of the call, so many words under one deep directory cost one walk of it. The walk stops at the first missing component (a file about to be created) and at 255 symlinks, and a chain of symlinks into deep directories is bounded by the same budget. A single path within the length limit fits the budget unless nearly all its components are one character long.
 
-There is no separate limit on the number of path components. Resolving a path whose tail does not exist yet (a file about to be created) finds the deepest existing ancestor by binary search, so a path within the length limit costs at most 13 symlink resolutions (16 on Windows), and the work is linear in its length. Audit mode reports a `boundary_limit` `ASK` like any other verdict.
+A path over the length limit, or one the call's budget no longer covers, is not resolved and is never treated as inside the workspace:
+
+- a target path, a trusted command's argument, or a path checked for sensitive files gets `ASK` (source `boundary_limit`, reason "cannot be verified", naming the length limit or the exhausted budget), whatever the intent;
+- with `fastpath_enabled` false, such a target path is not contained, so policy asks (source `policy_boundary`);
+- in a tainted session, such a path counts as execution-sensitive and as a sensitive file;
+- a declared workspace root that cannot be resolved is dropped without falling back to the Git root or working directory, so nothing is inside it;
+- anti-tampering treats such a path as a jev-guard path and **denies** the call (source `fastpath_tampering`). An unverifiable path could be a symlink or junction alias of `~/.jevguard`, and anti-tampering is an unconditional `DENY` that must not be downgraded to an `ASK` the user could approve. A path over the OS limit cannot be opened anyway, and the budget is reached only by pathological calls, which can be retried with fewer or shallower paths.
+
+The transcript guard keeps its own lookup bounds. Audit mode reports a `boundary_limit` `ASK` like any other verdict.
 
 One exception: a Claude Code `Read` of a file that Claude Code itself saved for the current session, exactly `~/.claude/projects/<project>/<session_id>/tool-results/<file>` with no symlinks leading out, is not treated as a boundary escape.
 
@@ -68,6 +72,7 @@ Any read, write, or modification of `.jevguard.json`, `jevguard.json`, `.jevguar
 
 - Every path-like argument is checked, not only the one used as the call's target. A `source` argument next to `dest` is also checked.
 - File-name filters (`glob`, `Includes`, `Excludes`, and the `pattern` of `Glob` and `find_by_name`) and shell command text are denied if they contain `.jevguard` or `jevguard.json`. Content search patterns, such as Grep's `pattern`, are not checked.
+- A path that cannot be resolved within the [path length limit or resolution budget](#workspace-boundary-enforcement) is denied: it could be an alias of `~/.jevguard`.
 - The check runs before every other stage, including the aborted-session and session-read-error holds. It does not depend on `fastpath_enabled` or user intent. In `audit` mode the denial is logged and the call allowed, as with every other verdict.
 
 ### Antigravity transcript guard
