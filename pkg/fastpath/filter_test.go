@@ -468,13 +468,11 @@ func TestFastPath_AntiTampering(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("JEV_GUARD_HOME", tempHome)
 
-	filter := NewDefaultFilter()
-
 	callTarget := &harness.NormalizedToolCall{
 		ToolName:   "write_to_file",
 		TargetPath: tempHome + "/sessions/override.json",
 	}
-	resTarget := filter.Evaluate(callTarget)
+	resTarget := CheckAntiTampering(callTarget)
 	if resTarget == nil || resTarget.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for writing to jevguard home, got %+v", resTarget)
 	}
@@ -483,7 +481,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName: "run_command",
 		Command:  "cat ~/.jevguard/sessions/default.json",
 	}
-	resCmd := filter.Evaluate(callCmd)
+	resCmd := CheckAntiTampering(callCmd)
 	if resCmd == nil || resCmd.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for command accessing .jevguard, got %+v", resCmd)
 	}
@@ -492,7 +490,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "write_to_file",
 		TargetPath: ".jevguard/sessions/malicious.json",
 	}
-	resRelTarget := filter.Evaluate(callRelTarget)
+	resRelTarget := CheckAntiTampering(callRelTarget)
 	if resRelTarget == nil || resRelTarget.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for relative path targeting .jevguard, got %+v", resRelTarget)
 	}
@@ -501,7 +499,7 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "view_file",
 		TargetPath: ".jevguard.json",
 	}
-	resConfig := filter.Evaluate(callConfig)
+	resConfig := CheckAntiTampering(callConfig)
 	if resConfig == nil || resConfig.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for reading .jevguard.json, got %+v", resConfig)
 	}
@@ -510,9 +508,32 @@ func TestFastPath_AntiTampering(t *testing.T) {
 		ToolName:   "read_file",
 		TargetPath: "jevguard.json",
 	}
-	resConfigAlt := filter.Evaluate(callConfigAlt)
+	resConfigAlt := CheckAntiTampering(callConfigAlt)
 	if resConfigAlt == nil || resConfigAlt.Decision != harness.DecisionDeny {
 		t.Fatalf("expected DENY for reading jevguard.json, got %+v", resConfigAlt)
+	}
+}
+
+func TestCheckAntiTampering_ScansAllPathAndPatternArgs(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name string
+		call *harness.NormalizedToolCall
+		deny bool
+	}{
+		{"Grep glob filter", &harness.NormalizedToolCall{ToolName: "Grep", TargetPath: ".", RawArgs: map[string]interface{}{"pattern": "api_key", "path": ".", "glob": ".jevguard.json"}}, true},
+		{"Glob pattern", &harness.NormalizedToolCall{ToolName: "Glob", RawArgs: map[string]interface{}{"pattern": "**/.jevguard/**"}}, true},
+		{"grep_search Includes list", &harness.NormalizedToolCall{ToolName: "grep_search", TargetPath: "/ws", RawArgs: map[string]interface{}{"SearchPath": "/ws", "Query": "key", "Includes": []interface{}{"*.go", ".jevguard.json"}}}, true},
+		{"source beside dest", &harness.NormalizedToolCall{ToolName: "copy_file", TargetPath: "out.json", RawArgs: map[string]interface{}{"dest": "out.json", "source": "~/.jevguard/.jevguard.json"}}, true},
+		{"Grep content pattern only", &harness.NormalizedToolCall{ToolName: "Grep", TargetPath: ".", RawArgs: map[string]interface{}{"pattern": "jevguard.json", "path": "."}}, false},
+		{"example config", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: ".jevguard.json.example", RawArgs: map[string]interface{}{"file_path": ".jevguard.json.example"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := CheckAntiTampering(tc.call)
+			if tc.deny != (res != nil) || (res != nil && res.Decision != harness.DecisionDeny) {
+				t.Fatalf("CheckAntiTampering = %+v; want deny=%t", res, tc.deny)
+			}
+		})
 	}
 }
 

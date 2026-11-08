@@ -205,7 +205,7 @@ func TestEvalExplainShowsStages(t *testing.T) {
 	e := newEvalEnv(t, "")
 	ws := e.workspace()
 	viaFlag := e.mustRun("--cmd", "cat .env", "--offline", "--explain", "--cwd", ws)
-	for _, stage := range []string{"Config", "Normalized tool call", "Intent", "Boundary", "Fastpath", "TypeSafe", "Decision", "Harness output", "Hook exit code"} {
+	for _, stage := range []string{"Config", "Normalized tool call", "Intent", "Anti-tampering", "Boundary", "Fastpath", "TypeSafe", "Decision", "Harness output", "Hook exit code"} {
 		if !strings.Contains(viaFlag, "] "+stage+"\n") {
 			t.Errorf("explain output missing stage %q:\n%s", stage, viaFlag)
 		}
@@ -360,6 +360,35 @@ func TestEvalIntentDefersSensitiveToTypeSafe(t *testing.T) {
 		t.Errorf("--intent=TEXT differs: %+v vs %+v", eq, with)
 	}
 	requireVerdict(t, e.report("--cmd", "cat .env", "--offline", "--cwd", ws), harness.DecisionAsk, "fastpath_sensitive")
+}
+
+func TestEvalAntiTamperingWithFastpathDisabled(t *testing.T) {
+	e := newEvalEnv(t, `{"fastpath_enabled": false}`)
+	args := []string{"--cmd", "cat ~/.jevguard/.jevguard.json", "--intent", "show me my jev-guard config", "--offline", "--cwd", e.workspace()}
+	rep := e.report(args...)
+	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+	if !rep.TamperingDenied || rep.FastpathRan || rep.WouldSendToJudge {
+		t.Errorf("expected anti-tampering to decide before fastpath and TypeSafe, got %+v", rep)
+	}
+	out := e.mustRun(append(args, "--explain")...)
+	for _, want := range []string{
+		"] Anti-tampering\n    verdict: deny - ",
+		"] Boundary\n    skipped (anti-tampering decided)\n",
+		"] Fastpath\n    skipped (anti-tampering decided)\n",
+		"] TypeSafe\n    not consulted (anti-tampering decided)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("explain missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestEvalAntiTamperingOutranksAbortedSession(t *testing.T) {
+	e := newEvalEnv(t, "")
+	ws := e.workspace()
+	rep := e.report("--cmd", "cat ~/.jevguard/.jevguard.json", "--intent", "stop", "--offline", "--cwd", ws)
+	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+	requireVerdict(t, e.report("--cmd", "ls", "--intent", "stop", "--offline", "--cwd", ws), harness.DecisionForceAsk, sourceSessionAborted)
 }
 
 func TestEvalIntentExplain(t *testing.T) {

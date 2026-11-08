@@ -98,7 +98,13 @@ On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything
  Agent wants to run a tool
             │
             ▼
- ┌──────────────────────┐   tampering with jev-guard            ⛔ DENY
+ ┌──────────────────────┐
+ │  Anti-tampering      │── touches jev-guard's own files ──────▶ ⛔ DENY
+ │  (always on)         │
+ └──────────┬───────────┘
+            │ everything else
+            ▼
+ ┌──────────────────────┐
  │  Local fast path     │── sensitive file / workspace escape ──▶ ⚠️ ASK
  │  (< 1 ms, offline)   │── trusted read-only command ─────────▶ ✅ ALLOW
  └──────────┬───────────┘

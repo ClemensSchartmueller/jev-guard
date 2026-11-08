@@ -47,16 +47,9 @@ func NewDefaultFilter() *Filter {
 
 // Evaluate checks the tool call against local invariants and latency cache.
 // Returns nil if semantic analysis by TypeSafe AI (Jev) is needed.
+// Anti-tampering is not part of the filter: callers run CheckAntiTampering first,
+// regardless of whether the fast path is enabled.
 func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationResult {
-	if reason := f.checkAntiTampering(call); reason != "" {
-		return &harness.EvaluationResult{
-			Decision:   harness.DecisionDeny,
-			Reason:     reason,
-			Source:     "fastpath_tampering",
-			Confidence: 1.0,
-		}
-	}
-
 	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
@@ -101,21 +94,85 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	return nil
 }
 
-func (f *Filter) checkAntiTampering(call *harness.NormalizedToolCall) string {
+// CheckAntiTampering denies any access to jev-guard's own configuration, log, or
+// session state. It is a hard invariant: it runs before every other check and does
+// not depend on fastpath_enabled or user intent. Returns nil when the call is clean.
+func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
 	if call == nil {
-		return ""
+		return nil
 	}
 
-	if session.IsJevguardPath(call.TargetPath) {
-		return "Direct access to jev-guard security directory or configuration file is prohibited"
+	reason := ""
+	if session.IsJevguardPath(call.TargetPath) || hasJevguardArg(call) {
+		reason = "Direct access to jev-guard security directory or configuration file is prohibited"
+	} else if mentionsJevguard(call.Command) {
+		reason = "Access to jev-guard configuration or session state via command is prohibited"
+	} else {
+		return nil
 	}
 
-	lowerCmd := strings.ToLower(call.Command)
-	if strings.Contains(lowerCmd, ".jevguard") || strings.Contains(lowerCmd, "jevguard.json") {
-		return "Access to jev-guard configuration or session state via command is prohibited"
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionDeny,
+		Reason:     reason,
+		Source:     "fastpath_tampering",
+		Confidence: 1.0,
 	}
+}
 
-	return ""
+// fileNamePatternArgKeys are arguments that select files by glob rather than by path,
+// such as Grep's glob filter or grep_search's Includes. Matched case-insensitively.
+var fileNamePatternArgKeys = map[string]bool{"glob": true, "includes": true, "excludes": true}
+
+// hasJevguardArg checks every path-like argument, not just the one chosen as
+// TargetPath, so a second path (such as "source" next to "dest") cannot slip through.
+// File-name patterns are matched by substring because a glob need not name the file exactly.
+func hasJevguardArg(call *harness.NormalizedToolCall) bool {
+	for _, key := range harness.PathArgKeys {
+		for _, value := range stringArgValues(call.RawArgs[key]) {
+			if session.IsJevguardPath(value) {
+				return true
+			}
+		}
+	}
+	tool := strings.ToLower(strings.TrimSpace(call.ToolName))
+	for key, raw := range call.RawArgs {
+		lowerKey := strings.ToLower(key)
+		isPattern := fileNamePatternArgKeys[lowerKey] || (lowerKey == "pattern" && (tool == "glob" || tool == "find_by_name"))
+		if !isPattern {
+			continue
+		}
+		for _, value := range stringArgValues(raw) {
+			if mentionsJevguard(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mentionsJevguard(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, ".jevguard") || strings.Contains(lower, "jevguard.json")
+}
+
+// stringArgValues returns the string values of a raw argument: the value itself, or
+// the string elements of a list.
+func stringArgValues(raw interface{}) []string {
+	switch v := raw.(type) {
+	case string:
+		return []string{v}
+	case []interface{}:
+		var out []string
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	case []string:
+		return v
+	}
+	return nil
 }
 
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {

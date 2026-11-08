@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"jev-guard/pkg/boundary"
@@ -42,6 +43,93 @@ func TestTraceGateEvaluationPreservesVerifiedBoundaryEvidence(t *testing.T) {
 			trace := traceGateEvaluation(tc.call, cfg, false)
 			if !trace.SemanticRan || trace.EvalErr != nil || trace.Final == nil || trace.Final.Decision != tc.want {
 				t.Fatalf("trace=%+v final=%+v; want %s", trace, trace.Final, tc.want)
+			}
+		})
+	}
+}
+
+func TestTraceGateEvaluationDeniesTamperingWithFastpathDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.95},
+			"destructive_potential":{"type":"score","score":0.05,"confidence":0.95},
+			"violation_category":{"type":"choice","choice":"none","confidence":0.95},
+			"intent_alignment":{"type":"choice","choice":"explicitly_requested","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	disabled := false
+	cfg := config.DefaultConfig()
+	cfg.APIKey, cfg.BaseURL, cfg.FastpathEnabled = "test-key", server.URL, &disabled
+	home := t.TempDir()
+	t.Setenv("JEV_GUARD_HOME", home)
+	shell := &harness.NormalizedToolCall{
+		ToolName:   "Bash",
+		Command:    "cat ~/.jevguard/.jevguard.json",
+		Cwd:        t.TempDir(),
+		UserIntent: "show me my jev-guard config",
+	}
+	configPath := filepath.Join(home, "config.json")
+	read := &harness.NormalizedToolCall{
+		ToolName:   "Read",
+		TargetPath: configPath,
+		Cwd:        t.TempDir(),
+		UserIntent: "show me my jev-guard config",
+		RawArgs:    map[string]interface{}{"file_path": configPath},
+	}
+	for _, tc := range []struct {
+		call    *harness.NormalizedToolCall
+		offline bool
+	}{{shell, false}, {shell, true}, {read, false}} {
+		call, offline := tc.call, tc.offline
+		trace := traceGateEvaluation(call, cfg, offline)
+		if trace.Final == nil || trace.Final.Decision != harness.DecisionDeny || trace.Final.Source != "fastpath_tampering" {
+			t.Fatalf("%s offline=%t final=%+v; want fastpath_tampering DENY", call.ToolName, offline, trace.Final)
+		}
+		if trace.FastpathRan || trace.SemanticRan || trace.WouldSendToJudge {
+			t.Fatalf("%s offline=%t trace=%+v; anti-tampering must decide before fastpath and TypeSafe", call.ToolName, offline, trace)
+		}
+	}
+
+	cfg.Mode = "audit"
+	audited := traceGateEvaluation(shell, cfg, true).Final
+	if audited.Decision != harness.DecisionAllow || audited.Source != "fastpath_tampering" || !strings.HasPrefix(audited.Reason, "[AUDIT-MODE: deny] ") {
+		t.Fatalf("audit mode final=%+v; want ALLOW with [AUDIT-MODE: deny] reason", audited)
+	}
+}
+
+func TestGateHoldPutsAntiTamperingBeforeSessionHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"aborted session", func(t *testing.T) {
+			if err := session.SaveSession(&session.SessionState{SessionID: "s1", Prompt: "stop"}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unreadable session", func(t *testing.T) {
+			if err := os.WriteFile(session.SessionFilePath("s1"), []byte("{not json"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("JEV_GUARD_HOME", t.TempDir())
+			if err := os.MkdirAll(session.GetSessionsDir(), 0700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t)
+			cfg := config.DefaultConfig()
+			var stderr bytes.Buffer
+			tampering := &harness.NormalizedToolCall{SessionID: "s1", ToolName: "Bash", Command: "cat ~/.jevguard/.jevguard.json"}
+			if hold := gateHold(tampering, cfg, &stderr); hold == nil || hold.Decision != harness.DecisionDeny || hold.Source != "fastpath_tampering" {
+				t.Fatalf("tampering hold = %+v; want fastpath_tampering DENY", hold)
+			}
+			clean := &harness.NormalizedToolCall{SessionID: "s1", ToolName: "Bash", Command: "ls"}
+			if hold := gateHold(clean, cfg, &stderr); hold == nil || hold.Decision != harness.DecisionForceAsk {
+				t.Fatalf("clean hold = %+v; want the session hold", hold)
 			}
 		})
 	}
