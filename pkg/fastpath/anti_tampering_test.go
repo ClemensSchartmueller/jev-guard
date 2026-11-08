@@ -593,7 +593,10 @@ func TestCheckAntiTampering_DeepCwdShortWordsAreBounded(t *testing.T) {
 	defer boundary.SetWorkBudgetForTesting(64 << 10)()
 	home := os.Getenv("JEV_GUARD_HOME")
 	words := strings.TrimPrefix(b.String(), "cat ")
-	res = CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat " + filepath.Join(home, "state") + " " + words, Cwd: shallow})
+	// Use one quoted path spelling across shell readers. An unquoted Windows path is
+	// stripped of backslashes by the POSIX reader, which can exhaust this deliberately
+	// small budget before the Windows reader reaches the protected path.
+	res = CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat \"" + filepath.ToSlash(filepath.Join(home, "state")) + "\" " + words, Cwd: shallow})
 	if !IsTamperingDenial(res) {
 		t.Errorf("denial before the budget ran out: %+v; want DENY", res)
 	}
