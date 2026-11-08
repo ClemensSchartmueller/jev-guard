@@ -317,8 +317,22 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	return trace
 }
 
+// isNetworkURL reports whether target has a URL scheme other than file://.
+func isNetworkURL(target string) bool {
+	lower := strings.ToLower(strings.TrimSpace(target))
+	return strings.Contains(lower, "://") && !strings.HasPrefix(lower, "file://")
+}
+
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
 	if strings.TrimSpace(call.TargetPath) == "" {
+		return true
+	}
+	// A fetch tool's target is a network URL, not a local path, so there is nothing to
+	// contain. Resolving it as a path fails on Windows (`?` is not a valid name character)
+	// and would turn every WebFetch into a boundary escape. Only outbound tools get this:
+	// any other tool's "x://../.." target is still resolved, because the OS reads it as a
+	// relative path.
+	if policy.IsOutboundTool(call.ToolName) && isNetworkURL(call.TargetPath) {
 		return true
 	}
 	if checker == nil {
