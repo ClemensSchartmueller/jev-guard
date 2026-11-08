@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -482,5 +483,22 @@ func TestWindowsCleansLexically(t *testing.T) {
 	got, err := EvalSymlinks(in)
 	if err != nil || !strings.EqualFold(got, want) {
 		t.Errorf("EvalSymlinks(%s) = %q, %v; want %q", in, got, err, want)
+	}
+}
+
+// An OS name-too-long error is still a resolution limit, and is marked as coming from the OS.
+func TestOSNameTooLongIsMarked(t *testing.T) {
+	ws := realTempDir(t)
+	orig := lstat
+	defer func() { lstat = orig }()
+	lstat = func(p string) (os.FileInfo, error) {
+		if strings.HasSuffix(p, "long") {
+			return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.ENAMETOOLONG}
+		}
+		return orig(p)
+	}
+	_, err := newEvaluation().resolve(filepath.Join(ws, "long"), false)
+	if !errors.Is(err, ErrPathTooLong) || !errors.Is(err, ErrOSNameTooLong) {
+		t.Fatalf("err = %v; want ErrPathTooLong and ErrOSNameTooLong", err)
 	}
 }

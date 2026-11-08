@@ -583,11 +583,20 @@ func TestCheckAntiTampering_DeepCwdShortWordsAreBounded(t *testing.T) {
 	if res == nil || res.Decision != harness.DecisionAsk || res.Source != SourceAntiTamperingLimit {
 		t.Errorf("exhausted budget: %+v; want ASK %s", res, SourceAntiTamperingLimit)
 	}
-	// A denial found before the budget ran out still wins.
+	// A denial found before the budget runs out still wins. A shallow working directory and a
+	// small budget keep this independent of how much the deep walk costs on each OS: the
+	// protected path needs a few KiB, and the 2,048 words after it need far more than 64 KiB.
+	restore()
+	shallow := t.TempDir()
+	defer boundary.SetWorkBudgetForTesting(64 << 10)()
 	home := os.Getenv("JEV_GUARD_HOME")
-	res = CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat " + filepath.Join(home, "state") + " " + b.String(), Cwd: deep})
+	words := strings.TrimPrefix(b.String(), "cat ")
+	res = CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat " + filepath.Join(home, "state") + " " + words, Cwd: shallow})
 	if !IsTamperingDenial(res) {
 		t.Errorf("denial before the budget ran out: %+v; want DENY", res)
+	}
+	if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: "cat " + words, Cwd: shallow}); res == nil || res.Source != SourceAntiTamperingLimit {
+		t.Errorf("the words alone must exhaust the small budget: %+v", res)
 	}
 }
 

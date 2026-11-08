@@ -1,6 +1,7 @@
 package fastpath
 
 import (
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
@@ -328,6 +329,12 @@ func (c *commandCheck) isSecurityPath(path string) bool {
 		return false
 	}
 	in, err := session.IsJevguardPathIn(c.securityHome, path)
+	if errors.Is(err, boundary.ErrOSNameTooLong) {
+		// The OS rejected a name in the path as too long, within the path length limit, so
+		// the command cannot open this path either (common for long non-path words on
+		// macOS, whose name limit is not a byte count).
+		return false
+	}
 	if err != nil {
 		c.exceed("a path in a command could not be resolved: " + err.Error())
 		return false

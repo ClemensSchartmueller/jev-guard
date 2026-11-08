@@ -257,6 +257,16 @@ func errTooLongLookup(p string) error {
 	return fmt.Errorf("%w: a lookup of length %d, limit %d", ErrPathTooLong, ResolvePathLength(p), MaxResolvePathLength())
 }
 
+// ErrOSNameTooLong is wrapped, together with ErrPathTooLong, when the OS itself rejected a
+// lookup within MaxResolvePathLength as too long. The lookup is within the path limit, so the
+// OS rejected a single name in it (a component, or a symlink target's component, over the
+// file system's name limit), and any open of the same path fails the same way.
+var ErrOSNameTooLong = errors.New("the operating system rejected a name as too long")
+
+func errOSNameTooLong(p string) error {
+	return fmt.Errorf("%w: %w: a lookup of length %d", ErrPathTooLong, ErrOSNameTooLong, ResolvePathLength(p))
+}
+
 // isNameTooLong reports an OS error for a path or name over the OS limit. It must not be
 // mistaken for a missing component: the OS follows symlinks without that limit.
 func isNameTooLong(err error) bool {
@@ -400,7 +410,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 		fi, err := lstat(dest)
 		if err != nil {
 			if isNameTooLong(err) {
-				return "", errTooLongLookup(dest)
+				return "", errOSNameTooLong(dest)
 			}
 			// Only a name that does not exist is one to be created; any other failure
 			// (EACCES, ELOOP, ENOTDIR, ...) leaves the path unverifiable.
@@ -434,7 +444,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 		link, err := readlink(dest)
 		if err != nil {
 			if isNameTooLong(err) {
-				return "", errTooLongLookup(dest)
+				return "", errOSNameTooLong(dest)
 			}
 			return "", err
 		}
@@ -541,7 +551,7 @@ func (e *evaluation) normalized(p string) (string, error) {
 			// Without the on-disk spelling, a short-name alias cannot be recognized: fail,
 			// and cache nothing for this prefix or the ones below it.
 			if isNameTooLong(err) {
-				return "", errTooLongLookup(cur)
+				return "", errOSNameTooLong(cur)
 			}
 			return "", err
 		}
