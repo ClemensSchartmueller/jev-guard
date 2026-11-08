@@ -37,7 +37,10 @@ func TestMaxResolvePathLengthForOS(t *testing.T) {
 	if got := maxResolvePathLengthForOS("windows"); got != 32767 {
 		t.Errorf("windows limit = %d, want 32767", got)
 	}
-	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+	if got := maxResolvePathLengthForOS("darwin"); got != 1024 {
+		t.Errorf("darwin limit = %d, want 1024", got)
+	}
+	for _, goos := range []string{"linux", "freebsd"} {
 		if got := maxResolvePathLengthForOS(goos); got != 4096 {
 			t.Errorf("%s limit = %d, want 4096", goos, got)
 		}
@@ -237,11 +240,11 @@ func TestResolveFileAncestor(t *testing.T) {
 }
 
 // fakeFS backs the lstat and readlink seams: "" is a directory, "file" a file, and any
-// other value a symlink to it. normalize is the identity, as on Unix.
+// other value a symlink to it. normalization is off, as on Unix.
 func fakeFS(t *testing.T, entries map[string]string) *int {
 	t.Helper()
 	calls := 0
-	origLstat, origReadlink, origNormalize := lstat, readlink, normalize
+	origLstat, origReadlink, origNormBase := lstat, readlink, normBase
 	lstat = func(p string) (os.FileInfo, error) {
 		calls++
 		v, ok := entries[p]
@@ -265,8 +268,8 @@ func fakeFS(t *testing.T, entries map[string]string) *int {
 		}
 		return v, nil
 	}
-	normalize = func(p string) (string, error) { return p, nil }
-	t.Cleanup(func() { lstat, readlink, normalize = origLstat, origReadlink, origNormalize })
+	normBase = nil
+	t.Cleanup(func() { lstat, readlink, normBase = origLstat, origReadlink, origNormBase })
 	return &calls
 }
 
@@ -283,8 +286,8 @@ func (i fakeInfo) IsDir() bool        { return i.mode.IsDir() }
 func (i fakeInfo) Sys() any           { return nil }
 
 // TestResolveSymlinksFake exercises the walk on fixed path shapes, including Windows drive
-// and UNC paths, which only parse as such on Windows. A path that does not resolve keeps
-// the deepest input prefix that does, with the rest as written.
+// and UNC paths, which only parse as such on Windows. Past a component that does not
+// resolve, the rest is taken as names to be created; ".." removes the last of them.
 func TestResolveSymlinksFake(t *testing.T) {
 	type tc struct {
 		name    string
@@ -305,8 +308,16 @@ func TestResolveSymlinksFake(t *testing.T) {
 			{"nothing resolves", "/ws/a/b", nil, "/ws/a/b"},
 			{"symlinked ancestor", "/ws/link/a/b",
 				map[string]string{"/ws": "", "/ws/link": "/real", "/real": ""}, "/real/a/b"},
-			{"dangling symlink is kept as written", "/ws/link/a",
-				map[string]string{"/ws": "", "/ws/link": "/real/missing", "/real": ""}, "/ws/link/a"},
+			// Writing through a dangling symlink creates its target.
+			{"dangling symlink resolves to its target", "/ws/link/a",
+				map[string]string{"/ws": "", "/ws/link": "/real/missing", "/real": ""}, "/real/missing/a"},
+			// ".." applies after the symlink before it is followed, also past a missing name.
+			{"dotdot after symlink", "/ws/link/../f",
+				map[string]string{"/ws": "", "/ws/link": "/real/deep", "/real": "", "/real/deep": "", "/real/f": "file"}, "/real/f"},
+			{"dotdot after missing name", "/ws/new/../link/../f",
+				map[string]string{"/ws": "", "/ws/link": "/real/deep", "/real": "", "/real/deep": ""}, "/real/f"},
+			{"missing names popped by dotdot", "/ws/new/x/../../f",
+				map[string]string{"/ws": ""}, "/ws/f"},
 			{"link to root", "/ws/link/a", map[string]string{"/ws": "", "/ws/link": "/"}, "/a"},
 			{"whole path", "/ws/a", map[string]string{"/ws": "", "/ws/a": "/other", "/other": ""}, "/other"},
 			{"relative link with dot-dot", "/ws/d/l/x",

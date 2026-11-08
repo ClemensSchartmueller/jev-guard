@@ -368,7 +368,7 @@ func joinCwd(p, cwd string) string {
 	if filepath.IsAbs(p) || strings.TrimSpace(cwd) == "" {
 		return p
 	}
-	return filepath.Join(cwd, p)
+	return boundary.JoinPath(cwd, p) // not cleaned: ".." applies after symlinks, as in the OS
 }
 
 // repoGitConfigReason is reported for Git config files inside a repository's Git directory

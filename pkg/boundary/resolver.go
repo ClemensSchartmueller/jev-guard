@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -112,10 +111,10 @@ func normalizeSeparators(p string) string {
 	return strings.ReplaceAll(p, "\\", "/")
 }
 
+// joinPaths joins rel to base without cleaning: the walk applies ".." where the OS does, after
+// the symlink before it is followed.
 func joinPaths(base, rel string) string {
-	cleanBase := normalizeSeparators(base)
-	cleanRel := normalizeSeparators(rel)
-	return path.Join(cleanBase, cleanRel)
+	return JoinPath(normalizeSeparators(base), normalizeSeparators(rel))
 }
 
 // CanonicalizePath canonicalizes a path, evaluating symlinks and cleaning separators.
@@ -135,16 +134,21 @@ var ErrPathTooLong error = &limitError{"path is too long to resolve"}
 
 // MaxResolvePathLength is the longest absolute, cleaned path the resolver will look up, in the
 // units the OS counts (see ResolvePathLength): 32,767 UTF-16 code units on Windows (the
-// extended-length path limit) and 4,096 bytes elsewhere (Linux PATH_MAX; macOS allows only
-// 1,024). The OS cannot open a longer path, so there is nothing to resolve. This limit is
-// separate from the evaluation's work budget (WorkBudget).
+// extended-length path limit), 1,024 bytes on macOS (PATH_MAX there) and 4,096 bytes
+// elsewhere (Linux PATH_MAX). The OS cannot look up a longer path, so there is nothing to
+// resolve; and the walk must not mistake the OS's "name too long" for a missing component.
+// Every lookup the walk makes, including after a symlink target is spliced in, is checked
+// against it. This limit is separate from the evaluation's work budget (WorkBudget).
 func MaxResolvePathLength() int {
 	return maxResolvePathLengthForOS(runtime.GOOS)
 }
 
 func maxResolvePathLengthForOS(goos string) int {
-	if goos == "windows" {
+	switch goos {
+	case "windows":
 		return 32767
+	case "darwin", "ios":
+		return 1024
 	}
 	return 4096
 }
@@ -185,23 +189,12 @@ func canonicalizePath(path string) (string, error) {
 		return normalizeSeparators(clean), nil
 	}
 
-	// Check the length before filepath.Abs: on Windows, Abs itself fails on a very long
-	// path, and that error must not hide the limit from callers that fail closed on it.
-	// Making a path absolute never shortens it below its cleaned relative form by more
-	// than its ".." components, so this only rejects paths far beyond the limit.
-	if err := checkPathLength(filepath.Clean(path)); err != nil {
-		return "", err
-	}
-	abs, err := filepath.Abs(path)
+	abs, err := absInput(path)
 	if err != nil {
 		return "", err
 	}
-	clean := filepath.Clean(abs)
-	if err := checkPathLength(clean); err != nil {
-		return "", err
-	}
 	return withEvaluation(func(e *evaluation) (string, error) {
-		return e.resolve(clean, false)
+		return e.resolve(abs, false)
 	})
 }
 

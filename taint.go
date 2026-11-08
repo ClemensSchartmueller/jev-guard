@@ -275,7 +275,7 @@ func (s pathScope) isExecutionSensitive(p string) bool {
 		if s.cwd == "" {
 			return false
 		}
-		p = filepath.Join(s.cwd, p)
+		p = boundary.JoinPath(s.cwd, p) // not cleaned: ".." applies after symlinks, as in the OS
 	}
 	resolved, err := boundary.CanonicalizePath(p)
 	if err != nil {

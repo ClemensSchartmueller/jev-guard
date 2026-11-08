@@ -2,10 +2,12 @@ package boundary
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -27,15 +29,24 @@ func (e *limitError) Is(target error) bool { return target == ErrResolutionLimit
 var ErrWorkBudgetExhausted error = &limitError{"path resolution work budget exhausted"}
 
 // WorkBudget bounds the filesystem work spent resolving paths for one evaluation. Each lookup
-// (Lstat or Readlink, and on Windows the final normalization) is charged the length of the path
-// it passes to the OS, in ResolvePathLength units (bytes; UTF-16 code units on Windows), since
-// the OS walks that path component by component: resolving an existing path of n components
-// costs about n times its length (half its length times its depth). The budget is separate
-// from the per-path length limit (MaxResolvePathLength). On the slowest shape (one-letter
-// components) 4 MiB of lookups take about 0.2 s on Linux. It fits any single path within the
-// length limit whose components average more than two bytes; an ordinary path of a few hundred
-// bytes costs a few kilobytes, and prefixes already resolved in the evaluation cost nothing.
+// (Lstat or Readlink) is charged the length of the path it passes to the OS, in
+// ResolvePathLength units (bytes; UTF-16 code units on Windows), since the OS walks that path
+// component by component: resolving an existing path of n components costs about n times its
+// length (half its length times its depth). The budget is separate from the per-path length
+// limit (MaxResolvePathLength). On the slowest shape (one-letter components) 4 MiB of lookups
+// take about 0.2 s on Linux. It fits any single path within the length limit whose components
+// average more than two bytes; an ordinary path of a few hundred bytes costs a few kilobytes,
+// and prefixes already resolved in the evaluation cost nothing.
+//
+// On Windows every resolved path is also normalized (letter case, short names), one
+// FindFirstFile lookup per component, as filepath.EvalSymlinks does. Normalization is cached
+// per prefix like the walk and charged the same way, to a second budget of the same size: it
+// never looks up more than the walk did, so a path that fits the walk budget on another OS
+// fits on Windows too.
 const WorkBudget = 4 << 20
+
+// workBudget is WorkBudget; tests lower it to exercise exhaustion without deep trees.
+var workBudget int64 = WorkBudget
 
 // maxLinksWalked matches filepath.EvalSymlinks.
 const maxLinksWalked = 255
@@ -44,40 +55,38 @@ const maxLinksWalked = 255
 var (
 	lstat    = os.Lstat
 	readlink = os.Readlink
-	// normalize gives a symlink-free path its canonical spelling. On Windows that is
-	// filepath.EvalSymlinks (letter case, short names), as before the walk was metered.
-	normalize = defaultNormalize
+	// normBase returns the on-disk spelling of the last component of a symlink-free absolute
+	// path: on Windows, FindFirstFile, as filepath.EvalSymlinks normalizes (letter case,
+	// short names). nil elsewhere: the walked spelling is canonical.
+	normBase = defaultNormBase
 )
 
-func defaultNormalize(p string) (string, error) {
-	if runtime.GOOS == "windows" {
-		return filepath.EvalSymlinks(p)
-	}
-	return p, nil
-}
-
 // evaluation is the shared state of the path resolutions made for one gate evaluation: the
-// remaining work budget and the resolutions of path prefixes already walked.
+// remaining work budgets and the resolutions of path prefixes already walked.
 type evaluation struct {
-	remaining int64
-	prefixes  map[string]*prefixNode // keyed by volume, including its root separator
-	normal    map[string]string      // normalize results by walked path
+	remaining     int64
+	normRemaining int64
+	prefixes      map[string]*prefixNode // keyed by volume, including its root separator
+	normal        map[string]string      // normalized spellings by walked (cleaned) prefix
 }
 
-// prefixNode is a trie of path components: the resolution of every prefix of an input path
-// that has been walked completely.
+// prefixNode is a trie of input path components, as written (".." included; empty and "."
+// components, which name the same directory, are skipped): the resolution of every prefix of
+// an input path that has been walked completely. A node for a non-directory is only reused
+// at the end of a path: the OS fails a lookup that continues below a file (ENOTDIR).
 type prefixNode struct {
 	resolved string
+	dir      bool
 	children map[string]*prefixNode
 }
 
-func (n *prefixNode) child(component, resolved string) *prefixNode {
+func (n *prefixNode) child(component, resolved string, dir bool) *prefixNode {
 	if n.children == nil {
 		n.children = make(map[string]*prefixNode)
 	}
 	c := n.children[component]
 	if c == nil {
-		c = &prefixNode{resolved: resolved}
+		c = &prefixNode{resolved: resolved, dir: dir}
 		n.children[component] = c
 	}
 	return c
@@ -85,15 +94,17 @@ func (n *prefixNode) child(component, resolved string) *prefixNode {
 
 func newEvaluation() *evaluation {
 	return &evaluation{
-		remaining: WorkBudget,
-		prefixes:  make(map[string]*prefixNode),
-		normal:    make(map[string]string),
+		remaining:     workBudget,
+		normRemaining: workBudget,
+		prefixes:      make(map[string]*prefixNode),
+		normal:        make(map[string]string),
 	}
 }
 
 var (
-	evalMu sync.Mutex
-	active *evaluation
+	evalMu      sync.Mutex
+	active      *evaluation
+	activeHolds int
 )
 
 // BeginEvaluation starts a shared resolution scope: until the returned function is called,
@@ -101,25 +112,31 @@ var (
 // work budget of WorkBudget and reuses the prefixes already resolved. Call it once per
 // tool call evaluated, so the checks that resolve the call's paths (anti-tampering, sensitive
 // files, boundary, trusted-command arguments, taint) cannot each spend a full budget. A call
-// made while a scope is active joins it and returns a no-op. Outside any scope, each resolution
-// gets a budget of its own.
+// made while a scope is active joins it; the scope ends when the last holder calls its end
+// function (each end function takes effect once). Outside any scope, each resolution gets a
+// budget of its own.
 //
-// The scope is process-wide: the gate evaluates one call per process. Evaluations running
-// concurrently in one process would share the budget, which can only make them ask more.
+// The scope is process-wide. The CLI evaluates one tool call per process, so there is only
+// ever one evaluation. Evaluations overlapping in one process would join one scope: they
+// share one budget and one prefix cache until the last of them ends, which can only make
+// them ask more, never give one of them a fresh budget.
 func BeginEvaluation() (end func()) {
 	evalMu.Lock()
 	defer evalMu.Unlock()
-	if active != nil {
-		return func() {}
+	if active == nil {
+		active = newEvaluation()
 	}
-	e := newEvaluation()
-	active = e
+	activeHolds++
+	var once sync.Once
 	return func() {
-		evalMu.Lock()
-		defer evalMu.Unlock()
-		if active == e {
-			active = nil
-		}
+		once.Do(func() {
+			evalMu.Lock()
+			defer evalMu.Unlock()
+			activeHolds--
+			if activeHolds == 0 {
+				active = nil
+			}
+		})
 	}
 }
 
@@ -134,69 +151,131 @@ func withEvaluation(fn func(e *evaluation) (string, error)) (string, error) {
 	return fn(e)
 }
 
-func (e *evaluation) charge(n int) error {
-	if int64(n) > e.remaining {
-		e.remaining = 0
+func charge(remaining *int64, n int) error {
+	if int64(n) > *remaining {
+		*remaining = 0
 		return ErrWorkBudgetExhausted
 	}
-	e.remaining -= int64(n)
+	*remaining -= int64(n)
 	return nil
 }
 
-// EvalSymlinks is filepath.EvalSymlinks for an absolute path, metered by the evaluation's work
-// budget and the path length limit: it fails when any component does not exist, and with an
-// error matching ErrResolutionLimit when a limit is reached.
+// EvalSymlinks is filepath.EvalSymlinks, metered by the evaluation's work budget and the path
+// length limit: it fails when any component does not exist, and with an error matching
+// ErrResolutionLimit when a limit is reached. A relative path is resolved from the current
+// directory. The result is absolute.
+//
+// The path is walked as written: like the OS on Unix, a ".." applies to what the component
+// before it resolved to, so "link/../f" is "f" next to the symlink's target, not next to the
+// symlink. On Windows, where Win32 itself removes "." and ".." lexically before the
+// filesystem sees the path, the path is cleaned first, as the OS does.
 func EvalSymlinks(path string) (string, error) {
-	if !filepath.IsAbs(path) {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return "", err
-		}
-		path = abs
-	}
-	clean := filepath.Clean(path)
-	if err := checkPathLength(clean); err != nil {
+	abs, err := absInput(path)
+	if err != nil {
 		return "", err
 	}
 	return withEvaluation(func(e *evaluation) (string, error) {
-		return e.resolve(clean, true)
+		return e.resolve(abs, true)
 	})
 }
 
-// resolve evaluates symlinks in an absolute, cleaned path, one component at a time as the OS
-// does (the walk of filepath.EvalSymlinks), charging each lookup to the budget. When strict is
-// false and a component cannot be resolved (a file about to be created), the deepest ancestor
-// that resolves is returned with the rest of the path appended as written.
+// JoinPath returns p, made absolute against base when it is relative, without cleaning it:
+// ".." components must stay for the walk to apply them where the OS does (after the
+// symlink before them is followed). An absolute p is returned as is.
+func JoinPath(base, p string) string {
+	if filepath.IsAbs(p) || base == "" {
+		return p
+	}
+	if os.IsPathSeparator(base[len(base)-1]) {
+		return base + p
+	}
+	return base + string(filepath.Separator) + p
+}
+
+// absInput makes path absolute for the walk, checking the length limit before and after.
+// The check before is conservative: making a path absolute never shortens it.
+func absInput(path string) (string, error) {
+	if err := checkPathLength(path); err != nil {
+		return "", err
+	}
+	var abs string
+	if runtime.GOOS == "windows" {
+		// Win32 resolves "." and ".." lexically, so cleaning matches the OS there.
+		a, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		abs = filepath.Clean(a)
+	} else if filepath.IsAbs(path) {
+		abs = path
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		abs = JoinPath(cwd, path)
+	}
+	if err := checkPathLength(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// errTooLongLookup is the error for a lookup path over the limit, which a symlink target
+// spliced into the walk can produce from a short input.
+func errTooLongLookup(p string) error {
+	return fmt.Errorf("%w: a lookup of length %d, limit %d", ErrPathTooLong, ResolvePathLength(p), MaxResolvePathLength())
+}
+
+// isNameTooLong reports an OS error for a path or name over the OS limit. It must not be
+// mistaken for a missing component: the OS follows symlinks without that limit.
+func isNameTooLong(err error) bool {
+	return errors.Is(err, syscall.ENAMETOOLONG) || isWindowsNameTooLong(err)
+}
+
+// resolve evaluates symlinks in path, an absolute path as written (not cleaned), one
+// component at a time as the OS does (the walk of filepath.EvalSymlinks), charging each
+// lookup to the budget.
+//
+// When strict is false, a component that cannot be looked up (a file about to be created, a
+// file followed by more components, a symlink loop) and everything after it is taken as
+// written, as directories to be created: later components are appended without lookups, and
+// a ".." removes the last of them, so "missing/../link" still follows link. A dangling
+// symlink therefore resolves to its target, where writing through it creates the file.
+// Resolution limits are errors in both modes.
 //
 // Every prefix of the input that is resolved completely is recorded, so a later path sharing
 // it starts its walk there: words of one command under the same deep directory cost one walk.
 func (e *evaluation) resolve(path string, strict bool) (string, error) {
 	sep := string(filepath.Separator)
-	volLen := len(filepath.VolumeName(path))
-	if volLen < len(path) && os.IsPathSeparator(path[volLen]) {
-		volLen++
-	}
-	rootKey := path[:volLen]
+	rootKey, volLen := volumePrefix(path)
 	node := e.prefixes[rootKey]
 	if node == nil {
-		node = &prefixNode{resolved: rootKey}
+		node = &prefixNode{resolved: rootKey, dir: true}
 		e.prefixes[rootKey] = node
 	}
 
-	// Start after the deepest prefix already resolved. good is where the unresolved part
-	// of the input begins; goodDest is the resolution of the input before it.
-	good, goodDest := volLen, node.resolved
+	// Start after the deepest prefix already resolved.
+	good := volLen
 	for start := volLen; start < len(path); {
+		for start < len(path) && os.IsPathSeparator(path[start]) {
+			start++
+		}
 		end := start
 		for end < len(path) && !os.IsPathSeparator(path[end]) {
 			end++
 		}
-		next := node.children[path[start:end]]
-		if next == nil {
-			break
+		if end == start {
+			break // trailing separators after a directory
 		}
-		node, good, goodDest = next, end, next.resolved
-		start = end + 1
+		if component := path[start:end]; component != "." {
+			next := node.children[component]
+			if next == nil || (!next.dir && end < len(path)) {
+				break
+			}
+			node = next
+		}
+		good, start = end, end
 	}
 
 	// The walk below is filepath's walkSymlinks over walk (the unresolved input, possibly with
@@ -204,39 +283,27 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 	// in walk; components before it come from symlink targets.
 	walk := path[good:]
 	origStart := 0
-	inputIndex := func(i int) int { return len(path) - len(walk) + i }
-	dest := goodDest
+	dest := node.resolved
+	destDir := node.dir
 	vol, vLen := volumePrefix(dest)
 	pending := "" // an input component that is a symlink still being resolved
 	linksWalked := 0
+	recording := true
+	// missing holds, for each component appended without a lookup (non-strict mode), the
+	// length of dest before it.
+	var missing []int
 
-	// settle records the input components resolved completely once the walk reaches pos.
+	// settle records the input component pending once the walk reaches pos.
 	settle := func(pos int) {
-		if pending != "" && pos >= origStart {
-			node = node.child(pending, dest)
-			good, goodDest = inputIndex(origStart), dest
+		if recording && pending != "" && pos >= origStart {
+			node = node.child(pending, dest, destDir)
 			pending = ""
 		}
 	}
-	fail := func(err error) (string, error) {
-		if strict || errors.Is(err, ErrResolutionLimit) {
-			return "", err
-		}
-		rest := path[good:]
-		for len(rest) > 0 && os.IsPathSeparator(rest[0]) {
-			rest = rest[1:]
-		}
-		base, nerr := e.normalized(goodDest)
-		if nerr != nil {
-			return "", nerr
-		}
-		if rest == "" {
-			return filepath.Clean(base), nil
-		}
-		if len(base) > 0 && os.IsPathSeparator(base[len(base)-1]) {
-			return filepath.Clean(base + rest), nil
-		}
-		return filepath.Clean(base + sep + rest), nil
+	// giveUp ends lookups at the component just appended to dest (non-strict mode).
+	giveUp := func(before int) {
+		recording, pending = false, ""
+		missing = append(missing, before)
 	}
 
 	for start, end := 0, 0; start < len(walk); start = end {
@@ -252,13 +319,18 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 			break
 		}
 		component := walk[start:end]
-		fromInput := start >= origStart && pending == ""
+		fromInput := recording && start >= origStart && pending == ""
 
 		if component == "." {
 			settle(end)
 			continue
 		}
 		if component == ".." {
+			if n := len(missing); n > 0 {
+				dest = dest[:missing[n-1]]
+				missing = missing[:n-1]
+				continue
+			}
 			r := len(dest) - 1
 			for r >= vLen && !os.IsPathSeparator(dest[r]) {
 				r--
@@ -271,46 +343,80 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 			} else {
 				dest = dest[:r]
 			}
+			destDir = true
+			if fromInput {
+				node = node.child("..", dest, true)
+			}
 			settle(end)
 			continue
 		}
 
+		before := len(dest)
 		if len(dest) > len(filepath.VolumeName(dest)) && !os.IsPathSeparator(dest[len(dest)-1]) {
 			dest += sep
 		}
 		dest += component
+		if len(missing) > 0 {
+			missing = append(missing, before)
+			continue
+		}
 
-		if err := e.charge(ResolvePathLength(dest)); err != nil {
+		if checkPathLength(dest) != nil {
+			return "", errTooLongLookup(dest)
+		}
+		if err := charge(&e.remaining, ResolvePathLength(dest)); err != nil {
 			return "", err
 		}
 		fi, err := lstat(dest)
 		if err != nil {
-			return fail(err)
+			if isNameTooLong(err) {
+				return "", errTooLongLookup(dest)
+			}
+			if strict {
+				return "", err
+			}
+			giveUp(before)
+			continue
 		}
 
 		if fi.Mode()&fs.ModeSymlink == 0 {
+			if !fi.Mode().IsDir() && end < len(walk) {
+				if strict {
+					return "", syscall.ENOTDIR
+				}
+				giveUp(before)
+				continue
+			}
+			destDir = fi.Mode().IsDir()
 			if fromInput {
-				node = node.child(component, dest)
-				good, goodDest = inputIndex(end), dest
+				node = node.child(component, dest, destDir)
 			} else {
 				settle(end)
-			}
-			if !fi.Mode().IsDir() && end < len(walk) {
-				return fail(syscall.ENOTDIR)
 			}
 			continue
 		}
 
 		linksWalked++
 		if linksWalked > maxLinksWalked {
-			return fail(errors.New("too many links"))
+			if strict {
+				return "", errors.New("EvalSymlinks: too many links")
+			}
+			giveUp(before)
+			continue
 		}
-		if err := e.charge(ResolvePathLength(dest)); err != nil {
+		if err := charge(&e.remaining, ResolvePathLength(dest)); err != nil {
 			return "", err
 		}
 		link, err := readlink(dest)
 		if err != nil {
-			return fail(err)
+			if isNameTooLong(err) {
+				return "", errTooLongLookup(dest)
+			}
+			if strict {
+				return "", err
+			}
+			giveUp(before)
+			continue
 		}
 		if fromInput {
 			pending = component
@@ -322,6 +428,7 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 			origStart = len(link) + origStart - end
 		}
 		walk = link + walk[end:]
+		destDir = true
 
 		if v := len(filepath.VolumeName(link)); v > 0 {
 			if v < len(link) && os.IsPathSeparator(link[v]) {
@@ -348,7 +455,23 @@ func (e *evaluation) resolve(path string, strict bool) (string, error) {
 		}
 	}
 	settle(len(walk)) // len(walk) >= origStart, so a pending symlink is recorded
-	return e.normalized(filepath.Clean(dest))
+
+	if len(missing) == 0 {
+		return e.normalized(filepath.Clean(dest))
+	}
+	// Normalize the part that exists; the rest is plain names (no "." or "..") as written.
+	base, err := e.normalized(filepath.Clean(dest[:missing[0]]))
+	if err != nil {
+		return "", err
+	}
+	rest := dest[missing[0]:]
+	for len(rest) > 0 && os.IsPathSeparator(rest[0]) {
+		rest = rest[1:]
+	}
+	if len(base) > 0 && os.IsPathSeparator(base[len(base)-1]) {
+		return filepath.Clean(base + rest), nil
+	}
+	return filepath.Clean(base + sep + rest), nil
 }
 
 // volumePrefix returns the volume of an absolute path including its root separator, and its length.
@@ -360,43 +483,77 @@ func volumePrefix(p string) (string, int) {
 	return p[:v], v
 }
 
-// normalized applies normalize to a walked path, once per path in the evaluation, charging
-// a walk of it to the budget when normalize touches the filesystem.
+// normalized returns the canonical spelling of p, a cleaned, symlink-free absolute path. On
+// Windows that is what filepath.EvalSymlinks returns for it (each component's on-disk
+// spelling), built one prefix at a time and cached per prefix, so words under one deep
+// directory normalize it once; each FindFirstFile is charged to the normalization budget.
+// Elsewhere p is canonical already.
 func (e *evaluation) normalized(p string) (string, error) {
+	if normBase == nil {
+		return p, nil
+	}
 	if got, ok := e.normal[p]; ok {
 		return got, nil
 	}
-	if runtime.GOOS == "windows" {
-		if err := e.charge(walkCost(p)); err != nil {
+	// Collect the prefixes not yet normalized, deepest first.
+	var todo []string
+	q := p
+	for {
+		if _, ok := e.normal[q]; ok {
+			break
+		}
+		vol := filepath.VolumeName(q)
+		if rest := q[len(vol):]; rest == "" || rest == "." || rest == `\` || rest == "/" || baseIsDotDot(q) {
+			e.normal[q] = normVolumeName(vol) + rest
+			break
+		}
+		todo = append(todo, q)
+		q = filepath.Dir(q)
+	}
+	for i := len(todo) - 1; i >= 0; i-- {
+		cur := todo[i]
+		parent := e.normal[filepath.Dir(cur)]
+		if err := charge(&e.normRemaining, ResolvePathLength(cur)); err != nil {
 			return "", err
 		}
+		name, err := normBase(cur)
+		if err != nil {
+			name = filepath.Base(cur) // a race or an unsupported path: keep the walked spelling
+		}
+		if len(parent) > 0 && os.IsPathSeparator(parent[len(parent)-1]) {
+			e.normal[cur] = parent + name
+		} else {
+			e.normal[cur] = parent + string(filepath.Separator) + name
+		}
 	}
-	got, err := normalize(p)
-	if err != nil {
-		got = p // a race or an unsupported path: keep the walked spelling
-	}
-	got = filepath.Clean(got)
-	e.normal[p] = got
-	return got, nil
+	return e.normal[p], nil
 }
 
-// walkCost is what looking up every prefix of p costs: the sum of the prefix lengths, in
-// ResolvePathLength units.
-func walkCost(p string) int {
-	cost, length := 0, 0
-	if runtime.GOOS != "windows" {
-		for i := 1; i < len(p); i++ {
-			if os.IsPathSeparator(p[i]) {
-				cost += i
-			}
-		}
-		return cost + len(p)
+func baseIsDotDot(p string) bool {
+	i := strings.LastIndexAny(p, `/\`)
+	return p[i+1:] == ".."
+}
+
+// normVolumeName is filepath's: a drive letter is upper-cased, a UNC volume kept.
+func normVolumeName(p string) string {
+	volume := filepath.VolumeName(p)
+	if len(volume) > 2 {
+		return volume
 	}
-	for i, r := range p {
-		if i > 0 && os.IsPathSeparator(p[i]) {
-			cost += length
-		}
-		length += utf16Units(r)
+	return strings.ToUpper(volume)
+}
+
+// SetWorkBudgetForTesting sets the work budget of evaluations begun afterwards, so tests can
+// exhaust it without trees too deep for every platform's path limit, and returns a function
+// restoring it. Tests only.
+func SetWorkBudgetForTesting(n int64) (restore func()) {
+	evalMu.Lock()
+	defer evalMu.Unlock()
+	old := workBudget
+	workBudget = n
+	return func() {
+		evalMu.Lock()
+		defer evalMu.Unlock()
+		workBudget = old
 	}
-	return cost + length
 }

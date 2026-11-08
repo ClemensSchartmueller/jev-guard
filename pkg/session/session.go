@@ -588,7 +588,7 @@ func IsJevguardPath(targetPath string) bool {
 	// Expand ~ to user home directory
 	if strings.HasPrefix(trimmed, "~") {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			trimmed = filepath.Join(home, strings.TrimPrefix(trimmed, "~"))
+			trimmed = boundary.JoinPath(home, strings.TrimLeft(strings.TrimPrefix(trimmed, "~"), `/\`))
 		}
 	}
 
@@ -609,18 +609,17 @@ func IsJevguardPath(targetPath string) bool {
 		cleanHome = canonHome
 	}
 
+	// CanonicalizePath makes a relative path absolute itself, keeping its ".." components
+	// for the walk to apply after the symlinks before them, as the OS does.
 	absTarget := trimmed
-	if !filepath.IsAbs(absTarget) {
-		if abs, err := filepath.Abs(absTarget); err == nil {
-			absTarget = abs
-		}
-	}
 	canonTarget, err := boundary.CanonicalizePath(absTarget)
 	if errors.Is(err, boundary.ErrResolutionLimit) {
 		return true
 	}
 	if err == nil && canonTarget != "" {
 		absTarget = canonTarget
+	} else if abs, err := filepath.Abs(absTarget); err == nil {
+		absTarget = abs
 	}
 
 	return boundary.IsSubPath(cleanHome, absTarget)
