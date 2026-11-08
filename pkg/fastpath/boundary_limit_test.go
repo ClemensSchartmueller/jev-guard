@@ -200,3 +200,20 @@ func TestFastPath_DotDotAfterSymlinkLeavesWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// An unresolvable declared root must not broaden into the cwd and ALLOW a sibling read.
+func TestFastPath_UnresolvableDeclaredRootNeverAllowsSibling(t *testing.T) {
+	ws := limitWorkspace(t)
+	if err := os.WriteFile(filepath.Join(ws, "file"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "sibling"), []byte("outside declared root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	declared := filepath.Join(ws, "file", "child")
+	call := &harness.NormalizedToolCall{ToolName: "Read", TargetPath: filepath.Join(ws, "sibling"), Cwd: ws, WorkspaceRoots: []string{declared}}
+	got := NewDefaultFilter().Evaluate(call)
+	if got != nil && got.Decision == harness.DecisionAllow {
+		t.Error("invalid root broadened into ALLOW")
+	}
+}

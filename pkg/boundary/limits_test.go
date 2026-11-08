@@ -391,3 +391,24 @@ func TestOverLimitWindowsDrivePathOnOtherOS(t *testing.T) {
 		t.Errorf("err = %v, want ErrPathTooLong", err)
 	}
 }
+
+// A declared root that cannot be resolved (here ENOTDIR) must not be replaced by the
+// broader cwd or Git root.
+func TestNewResolver_UnresolvableDeclaredRootDoesNotFallBack(t *testing.T) {
+	ws := realTempDir(t)
+	if err := os.WriteFile(filepath.Join(ws, "file"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(ws, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	declared := filepath.Join(ws, "file", "child")
+	r, err := NewResolver([]string{declared}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contained, _ := r.IsPathContained(filepath.Join(ws, "sibling"), ws)
+	if contained {
+		t.Error("unresolvable declared root broadened to cwd")
+	}
+}

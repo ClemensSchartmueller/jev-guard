@@ -18,20 +18,23 @@ type Resolver struct {
 // NewResolver initializes a Resolver with workspace paths, discovering git root if none provided.
 func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 	roots := make([]string, 0, len(declaredRoots))
-	tooLong := false
+	declared := false
 	for _, root := range declaredRoots {
-		cleanRoot, err := canonicalizePath(root)
-		if errors.Is(err, ErrResolutionLimit) {
-			tooLong = true
+		if strings.TrimSpace(root) == "" {
+			continue
 		}
+		declared = true
+		cleanRoot, err := canonicalizePath(root)
 		if err == nil && cleanRoot != "" {
 			roots = append(roots, cleanRoot)
 		}
 	}
 
-	// A declared root that could not be resolved within the limits must not be replaced by the cwd or Git root, which
-	// could be broader. With no usable root, nothing is contained.
-	if len(roots) == 0 && !tooLong {
+	// The cwd or Git root is used only when the agent declared no workspace root. A declared
+	// root that cannot be resolved (a resolution limit, ENOTDIR, EACCES, a symlink loop) must
+	// not be replaced by them, because they can be broader than what was declared. With no
+	// usable root, nothing is contained and the call is asked about.
+	if !declared {
 		effectiveCwd := cwd
 		if effectiveCwd == "" {
 			effectiveCwd, _ = os.Getwd()
