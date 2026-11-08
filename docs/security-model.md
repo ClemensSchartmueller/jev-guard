@@ -261,12 +261,12 @@ Instead, intent's power is kept narrow by deterministic limits that hold whateve
 
 A call counts as network-capable when any of these hold:
 
-- The tool is an outbound fetch tool (`WebFetch`, `WebSearch`, `read_url_content`).
+- The tool is an outbound fetch tool (`WebFetch`, `WebSearch`, `read_url_content`), or its target is an HTTP(S) URL.
 - The shell command contains a network program as any command word, for example `curl`, `wget`, `nc`, `socat`, `ssh`, `scp`, `sftp`, `ftp`, `rsync`, `rclone`, `http`, `gh`, `aws`, `gsutil`, `gcloud`, `az`, `mail`, `sendmail`, `Invoke-WebRequest`, `Invoke-RestMethod`, `iwr`, `irm`, or `bitsadmin` (paths and `.exe` are stripped).
-- It contains `git push`, `git send-email`, or `npm publish`.
+- It contains `git push`, `git send-email`, or a publish subcommand for `npm`, `pnpm`, `yarn`, or `cargo`.
 - It contains a network marker: `://`, `/dev/tcp/`, `/dev/udp/`, `socket`, `urllib`, `requests.`, `http.client`, `fetch(`, `net/http`, `Net.WebClient`, `System.Net.`, or `-urlcache`.
 
-The heuristic is deliberately over-inclusive, since a false positive only turns an intent-authorized credential access into a prompt.
+The same heuristic is used for the credential-egress cap and session taint. It is deliberately over-inclusive: a false positive can require confirmation for intent-authorized credential access or an action in a tainted session (or add a note in taint audit mode).
 
 **Limits.** These rules are local and deterministic, not a complete defense:
 
