@@ -76,6 +76,9 @@ func runGate(initErr error) int {
 		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
 	}
 
+	// One path resolution budget for every check of this call (see boundary.BeginEvaluation).
+	defer boundary.BeginEvaluation()()
+
 	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
@@ -266,6 +269,7 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict
 // (unless the anti-tampering limit set a floor).
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
+	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
 	tampering := fastpath.CheckAntiTampering(call)
 	if fastpath.IsTamperingDenial(tampering) {
@@ -348,8 +352,22 @@ func traceGateStages(call *harness.NormalizedToolCall, cfg *config.Config, offli
 	return trace
 }
 
+// isNetworkURL reports whether target has a URL scheme other than file://.
+func isNetworkURL(target string) bool {
+	lower := strings.ToLower(strings.TrimSpace(target))
+	return strings.Contains(lower, "://") && !strings.HasPrefix(lower, "file://")
+}
+
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
 	if strings.TrimSpace(call.TargetPath) == "" {
+		return true
+	}
+	// A fetch tool's target is a network URL, not a local path, so there is nothing to
+	// contain. Resolving it as a path fails on Windows (`?` is not a valid name character)
+	// and would turn every WebFetch into a boundary escape. Only outbound tools get this:
+	// any other tool's "x://../.." target is still resolved, because the OS reads it as a
+	// relative path.
+	if policy.IsOutboundTool(call.ToolName) && isNetworkURL(call.TargetPath) {
 		return true
 	}
 	if checker == nil {

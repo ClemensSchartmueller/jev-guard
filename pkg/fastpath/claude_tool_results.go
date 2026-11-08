@@ -6,13 +6,16 @@ import (
 	"regexp"
 	"strings"
 
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/harness"
 )
 
 // Test seams.
 var (
-	userHomeDir  = os.UserHomeDir
-	evalSymlinks = filepath.EvalSymlinks
+	userHomeDir = os.UserHomeDir
+	// evalSymlinks is metered by the evaluation's path resolution budget; any error,
+	// including an exhausted budget, rejects the exemption.
+	evalSymlinks = boundary.EvalSymlinks
 )
 
 var claudeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`)

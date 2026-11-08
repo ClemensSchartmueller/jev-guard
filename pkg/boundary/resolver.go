@@ -1,12 +1,13 @@
 package boundary
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 // Resolver checks whether target paths reside safely inside declared workspace boundaries.
@@ -17,13 +18,23 @@ type Resolver struct {
 // NewResolver initializes a Resolver with workspace paths, discovering git root if none provided.
 func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 	roots := make([]string, 0, len(declaredRoots))
+	declared := false
 	for _, root := range declaredRoots {
-		if cleanRoot, err := canonicalizePath(root); err == nil && cleanRoot != "" {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		declared = true
+		cleanRoot, err := canonicalizePath(root)
+		if err == nil && cleanRoot != "" {
 			roots = append(roots, cleanRoot)
 		}
 	}
 
-	if len(roots) == 0 {
+	// The cwd or Git root is used only when the agent declared no workspace root. A declared
+	// root that cannot be resolved (a resolution limit, ENOTDIR, EACCES, a symlink loop) must
+	// not be replaced by them, because they can be broader than what was declared. With no
+	// usable root, nothing is contained and the call is asked about.
+	if !declared {
 		effectiveCwd := cwd
 		if effectiveCwd == "" {
 			effectiveCwd, _ = os.Getwd()
@@ -61,6 +72,9 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	cleanTarget, err := canonicalizePath(absPath)
+	if errors.Is(err, ErrResolutionLimit) {
+		return false, err // the path itself may be too long to repeat in a message
+	}
 	if err != nil {
 		return false, fmt.Errorf("unable to resolve path %s: %w", targetPath, err)
 	}
@@ -100,10 +114,10 @@ func normalizeSeparators(p string) string {
 	return strings.ReplaceAll(p, "\\", "/")
 }
 
+// joinPaths joins rel to base without cleaning: the walk applies ".." where the OS does, after
+// the symlink before it is followed.
 func joinPaths(base, rel string) string {
-	cleanBase := normalizeSeparators(base)
-	cleanRel := normalizeSeparators(rel)
-	return path.Join(cleanBase, cleanRel)
+	return JoinPath(normalizeSeparators(base), normalizeSeparators(rel))
 }
 
 // CanonicalizePath canonicalizes a path, evaluating symlinks and cleaning separators.
@@ -116,43 +130,87 @@ func IsSubPath(parent, child string) bool {
 	return isSubPath(parent, child)
 }
 
+// ErrPathTooLong is returned, wrapped, for a path longer than MaxResolvePathLength. Such a
+// path is not resolved: callers must treat it as unverifiable (not contained, ASK), never as
+// contained or safe. It matches ErrResolutionLimit.
+var ErrPathTooLong error = &limitError{"path is too long to resolve"}
+
+// MaxResolvePathLength is the longest absolute, cleaned path the resolver will look up, in the
+// units the OS counts (see ResolvePathLength): 32,767 UTF-16 code units on Windows (the
+// extended-length path limit), 1,024 bytes on macOS (PATH_MAX there) and 4,096 bytes
+// elsewhere (Linux PATH_MAX). The OS cannot look up a longer path, so there is nothing to
+// resolve; and the walk must not mistake the OS's "name too long" for a missing component.
+// Every lookup the walk makes, including after a symlink target is spliced in, is checked
+// against it. This limit is separate from the evaluation's work budget (WorkBudget).
+func MaxResolvePathLength() int {
+	return maxResolvePathLengthForOS(runtime.GOOS)
+}
+
+func maxResolvePathLengthForOS(goos string) int {
+	switch goos {
+	case "windows":
+		return 32767
+	case "darwin", "ios":
+		return 1024
+	}
+	return 4096
+}
+
+// ResolvePathLength is the length of p in the units MaxResolvePathLength counts: UTF-16 code
+// units on Windows, where a 3-byte UTF-8 character such as a CJK ideograph is one unit, and
+// bytes elsewhere.
+func ResolvePathLength(p string) int {
+	return pathLengthForOS(p, runtime.GOOS)
+}
+
+func pathLengthForOS(p, goos string) int {
+	if goos != "windows" {
+		return len(p)
+	}
+	n := 0
+	for _, r := range p {
+		n += utf16Units(r)
+	}
+	return n
+}
+
+// utf16Units is the UTF-16 length of r. Invalid UTF-8 decodes as U+FFFD, one unit, which is
+// also what it becomes when the path is passed to Windows.
+func utf16Units(r rune) int {
+	if l := utf16.RuneLen(r); l > 0 {
+		return l
+	}
+	return 1
+}
+
 func canonicalizePath(path string) (string, error) {
 	if runtime.GOOS != "windows" && isWindowsDriveAbs(path) {
-		return normalizeSeparators(filepath.Clean(path)), nil
+		clean := filepath.Clean(path)
+		if err := checkPathLength(clean); err != nil {
+			return "", err
+		}
+		return normalizeSeparators(clean), nil
 	}
 
-	abs, err := filepath.Abs(path)
+	abs, err := absInput(path)
 	if err != nil {
 		return "", err
 	}
-	clean := filepath.Clean(abs)
-	return resolveSymlinks(clean), nil
+	return withEvaluation(func(e *evaluation) (string, error) {
+		return e.resolve(abs, false)
+	})
 }
 
-func resolveSymlinks(path string) string {
-	if realPath, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(realPath)
+func checkPathLength(clean string) error {
+	// A path's UTF-16 length never exceeds its UTF-8 length, so most paths need no count.
+	limit := MaxResolvePathLength()
+	if len(clean) <= limit {
+		return nil
 	}
-
-	curr := path
-	var parts []string
-	for {
-		parent := filepath.Dir(curr)
-		if parent == curr {
-			break
-		}
-		parts = append([]string{filepath.Base(curr)}, parts...)
-		if realParent, err := filepath.EvalSymlinks(parent); err == nil {
-			result := realParent
-			for _, part := range parts {
-				result = filepath.Join(result, part)
-			}
-			return filepath.Clean(result)
-		}
-		curr = parent
+	if n := ResolvePathLength(clean); n > limit {
+		return fmt.Errorf("%w: length %d, limit %d", ErrPathTooLong, n, limit)
 	}
-
-	return path
+	return nil
 }
 
 func isSubPath(parent, child string) bool {
@@ -187,6 +245,9 @@ func FindGitRoot(startDir string) string {
 
 func findGitRoot(startDir string) string {
 	curr := filepath.Clean(startDir)
+	if checkPathLength(curr) != nil {
+		return ""
+	}
 	for {
 		gitPath := filepath.Join(curr, ".git")
 		if info, err := os.Stat(gitPath); err == nil && (info.IsDir() || !info.IsDir()) {

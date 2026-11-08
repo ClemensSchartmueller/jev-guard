@@ -687,3 +687,26 @@ func TestApplyTranscriptIntent_StopIsHeld(t *testing.T) {
 		t.Fatal("setting disabled must not hold")
 	}
 }
+
+// A fetch tool's URL target is not a local path; any other tool's URL-like target still is.
+func TestCheckWorkspaceBoundaryURLTargets(t *testing.T) {
+	ws := t.TempDir()
+	resolver, err := boundary.NewResolver([]string{ws}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tool, target string
+		want         bool
+	}{
+		{"WebFetch", "https://example.com/?k=x", true},
+		{"read_url_content", "https://example.com/a?b=c", true},
+		{"Write", "x://../../outside/file", false},
+		{"Read", "https://../../../outside/file", false},
+	} {
+		got := checkWorkspaceBoundary(&harness.NormalizedToolCall{ToolName: tc.tool, TargetPath: tc.target, Cwd: ws}, resolver)
+		if got != tc.want {
+			t.Errorf("%s %q: contained=%t, want %t", tc.tool, tc.target, got, tc.want)
+		}
+	}
+}

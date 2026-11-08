@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
 )
@@ -25,6 +26,9 @@ func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationRes
 	if call == nil {
 		return nil
 	}
+	// One resolution scope for every path checked below: they share the per-call work budget
+	// and the prefix cache (joins the caller's scope when there is one).
+	defer boundary.BeginEvaluation()()
 
 	reason := ""
 	overLimit := ""
@@ -156,6 +160,10 @@ type commandCheck struct {
 
 	securityDirs     [][]string // the security directory's components, as configured and resolved
 	securityDirsRead bool
+
+	securityHome     string // the security directory, canonicalized once (isSecurityPath)
+	securityHomeErr  error
+	securityHomeRead bool
 }
 
 func (c *commandCheck) exceed(limit string) {
@@ -185,24 +193,37 @@ func (c *commandCheck) wordReachesJevguard(word string) bool {
 	return c.pathReachesJevguard(word, c.reader.expands[word])
 }
 
-// pathReachesJevguard reports whether a path-like word (one holding a separator or starting
-// with a home or variable spelling) points into the security directory, as written, with a
-// leading ~ expanded, with the home directory's other spellings and the hook's environment
-// variables filled in when expand is set, and resolved against each working directory.
-// session.IsJevguardPath compares it with the configured directory, so a custom JEV_GUARD_HOME
-// is protected under any spelling that reaches it, including symlinks. A leading ~ is expanded
-// even when quoted, because PowerShell's file system provider expands it itself.
+// pathReachesJevguard reports whether a word points into the security directory, as written,
+// with a leading ~ expanded, with the home directory's other spellings and the hook's
+// environment variables filled in when expand is set, and resolved against each working
+// directory. A path-like word (one holding a separator or starting with a home or variable
+// spelling) is checked as written; a bare word such as "alias" or "state" is checked only
+// against the working directories, since that is where a command would open it, so a bare
+// symlink into the security directory, or a plain file name while the working directory is
+// inside it, is caught. Flags (-x, --name) are not file operands and are skipped.
+//
+// The configured directory is compared with by session.IsJevguardPathIn, so a custom
+// JEV_GUARD_HOME is protected under any spelling that reaches it, including symlinks. A
+// leading ~ is expanded even when quoted, because PowerShell's file system provider expands
+// it itself. Every resolution draws on the call's boundary evaluation scope (see
+// CheckAntiTampering): words under one working directory share its resolved prefix, and a
+// path that cannot be resolved within the scope's budget or the path length limit is
+// reported through exceed (the ASK floor), not as clean.
 func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
-	if word == "" || len(word) > maxPathLikeBytes || !strings.ContainsAny(word, `/\~$%`) {
+	if word == "" || len(word) > maxPathLikeBytes {
+		return false
+	}
+	bare := !strings.ContainsAny(word, `/\~$%`)
+	if bare {
 		return false
 	}
 	candidates := []string{word}
-	if expand || strings.HasPrefix(word, "~") {
+	if !bare && (expand || strings.HasPrefix(word, "~")) {
 		if expanded := expandHomeWith(word, c.home); expanded != word {
 			candidates = append(candidates, expanded)
 		}
 	}
-	if expand && strings.ContainsRune(word, '$') {
+	if !bare && expand && strings.ContainsRune(word, '$') {
 		candidates = append(candidates, os.ExpandEnv(word))
 	}
 	for _, candidate := range candidates {
@@ -210,11 +231,17 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 		if !filepath.IsAbs(candidate) && !strings.HasPrefix(candidate, "~") && len(c.dirs) > 0 {
 			forms = forms[:0]
 			for _, dir := range c.dirs {
-				forms = append(forms, filepath.Join(dir, candidate))
+				forms = append(forms, boundary.JoinPath(dir, candidate))
 			}
 		}
 		for _, form := range forms {
 			if form == "" || c.resolved[form] {
+				continue
+			}
+			if mentionsJevguard(form) {
+				return true
+			}
+			if hasOverlongComponent(form) {
 				continue
 			}
 			if len(c.resolved) >= maxTamperingPathLookups {
@@ -222,12 +249,60 @@ func (c *commandCheck) pathReachesJevguard(word string, expand bool) bool {
 				return false
 			}
 			c.resolved[form] = true
-			if mentionsJevguard(form) || session.IsJevguardPath(form) {
+			if c.isSecurityPath(form) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// maxNameLength is the longest file name (one path component) the OS accepts: NAME_MAX, 255
+// bytes, on Linux and macOS, and 255 UTF-16 code units on Windows.
+const maxNameLength = 255
+
+// hasOverlongComponent reports whether a component of path is longer than any file name can
+// be. No file has such a name, so the OS fails to open the path (ENAMETOOLONG) and there is
+// nothing to protect. Such words are common in commands that are not paths at all (a long
+// quoted string holding a backslash), and resolving them would fail with a resolution limit.
+func hasOverlongComponent(path string) bool {
+	start := 0
+	for i := 0; i <= len(path); i++ {
+		if i == len(path) || os.IsPathSeparator(path[i]) {
+			if i-start > maxNameLength && boundary.ResolvePathLength(path[start:i]) > maxNameLength {
+				return true
+			}
+			start = i + 1
+		}
+	}
+	return false
+}
+
+// readSecurityHome canonicalizes the security directory once per call.
+func (c *commandCheck) readSecurityHome() {
+	if !c.securityHomeRead {
+		c.securityHomeRead = true
+		c.securityHome, c.securityHomeErr = session.CanonicalJevguardDir()
+	}
+}
+
+// isSecurityPath reports whether path resolves into the security directory. The directory is
+// canonicalized once per call. A resolution limit (boundary.ErrResolutionLimit) is recorded
+// as the ASK floor and reported as false: a command word is only a guess at a path, so an
+// over-long or over-budget word is not proof of tampering, and the stages after
+// anti-tampering, which share the exhausted budget, fail closed as well.
+func (c *commandCheck) isSecurityPath(path string) bool {
+	c.readSecurityHome()
+	if c.securityHomeErr != nil {
+		c.exceed("the security directory could not be resolved: " + c.securityHomeErr.Error())
+		return false
+	}
+	in, err := session.IsJevguardPathIn(c.securityHome, path)
+	if err != nil {
+		c.exceed("a path in a command could not be resolved: " + err.Error())
+		return false
+	}
+	return in
 }
 
 // shellPatternTargetsJevguard checks a glob or brace pattern from a command (see
@@ -366,8 +441,8 @@ func (c *commandCheck) securityDirComponents() [][]string {
 	}
 	c.securityDirsRead = true
 	dirs := []string{session.GetJevguardDir()}
-	if resolved, err := filepath.EvalSymlinks(dirs[0]); err == nil && resolved != dirs[0] {
-		dirs = append(dirs, resolved)
+	if c.readSecurityHome(); c.securityHomeErr == nil && c.securityHome != dirs[0] {
+		dirs = append(dirs, c.securityHome)
 	}
 	for _, dir := range dirs {
 		if components := pathComponents(strings.ToLower(filepath.ToSlash(dir))); len(components) > 0 {
@@ -545,7 +620,7 @@ func patchTargetsJevguard(call *harness.NormalizedToolCall) bool {
 				continue
 			}
 			for _, dir := range dirs {
-				if session.IsJevguardPath(filepath.Join(dir, target)) {
+				if session.IsJevguardPath(boundary.JoinPath(dir, target)) {
 					return true
 				}
 			}

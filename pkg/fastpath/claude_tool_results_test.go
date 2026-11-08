@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"jev-guard/pkg/harness"
@@ -225,5 +226,40 @@ func TestClaudeSessionToolResult_IgnoresHostHome(t *testing.T) {
 	}
 	if isClaudeSessionToolResult(toolResultCall(t.TempDir(), "Read", saved, testToolResultSID)) {
 		t.Fatal("matcher resolved the host home instead of the userHomeDir seam")
+	}
+}
+
+// Review of PR #79: the metered EvalSymlinks cleaned its input before walking, so
+// "tool-results/link/../out.txt" with link -> an outside directory resolved to the saved
+// out.txt and the Read was allowed, while the OS (and filepath.EvalSymlinks) follow link
+// first and read the outside out.txt. The walk keeps ".." where the OS applies it.
+func TestClaudeSessionToolResult_DotDotAfterSymlinkIsNotExempt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Win32 removes .. lexically: the path names the saved file there")
+	}
+	_, dir, ws, _ := setupToolResultEnv(t)
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "deep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(outside, "out.txt"))
+	if err := os.Symlink(filepath.Join(outside, "deep"), filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	target := dir + "/link/../out.txt"
+	opened, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := filepath.EvalSymlinks(filepath.Join(outside, "out.txt")); opened != want {
+		t.Fatalf("test premise: %s opens %s, not the outside file", target, opened)
+	}
+
+	call := toolResultCall(ws, "Read", target, testToolResultSID)
+	if isClaudeSessionToolResult(call) {
+		t.Error("a symlink followed by .. leaving tool-results was exempted")
+	}
+	if res := NewDefaultFilter().Evaluate(call); res != nil && res.Decision == harness.DecisionAllow {
+		t.Errorf("Read of %s (opens %s) = %+v, want no ALLOW", target, opened, res)
 	}
 }
