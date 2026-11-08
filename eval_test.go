@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"jev-guard/internal/testprofile"
 	"jev-guard/pkg/config"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
@@ -19,12 +23,15 @@ import (
 // TestMain makes the production config loader unusable in this package's tests: every test
 // that runs eval must go through newEvalEnv, which injects temp paths. Without this, a test
 // would read (and the trust-registry helpers would write) the real ~/.jevguard, because
-// config paths come from the OS account (user.Current), not from $HOME.
+// config paths come from the OS account (user.Current), not from $HOME. testprofile.Run also
+// makes config's account-backed loaders panic, runs the whole binary in a temp
+// HOME/JEV_GUARD_HOME, and fails if the real user config or trust registry changed.
 func TestMain(m *testing.M) {
-	evalLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
-		panic("eval test ran without newEvalEnv: it would read the real user configuration")
-	}
-	os.Exit(m.Run())
+	os.Exit(testprofile.Run(m, func(string) {
+		evalLoadConfig = func(*harness.NormalizedToolCall) *config.Config {
+			panic("eval test ran without newEvalEnv: it would read the real user configuration")
+		}
+	}))
 }
 
 // evalEnv is an isolated configuration, trust registry, session and audit environment.
@@ -205,7 +212,7 @@ func TestEvalExplainShowsStages(t *testing.T) {
 	e := newEvalEnv(t, "")
 	ws := e.workspace()
 	viaFlag := e.mustRun("--cmd", "cat .env", "--offline", "--explain", "--cwd", ws)
-	for _, stage := range []string{"Config", "Normalized tool call", "Intent", "Boundary", "Fastpath", "TypeSafe", "Decision", "Harness output", "Hook exit code"} {
+	for _, stage := range []string{"Config", "Normalized tool call", "Intent", "Anti-tampering", "Boundary", "Fastpath", "TypeSafe", "Decision", "Harness output", "Hook exit code"} {
 		if !strings.Contains(viaFlag, "] "+stage+"\n") {
 			t.Errorf("explain output missing stage %q:\n%s", stage, viaFlag)
 		}
@@ -360,6 +367,35 @@ func TestEvalIntentDefersSensitiveToTypeSafe(t *testing.T) {
 		t.Errorf("--intent=TEXT differs: %+v vs %+v", eq, with)
 	}
 	requireVerdict(t, e.report("--cmd", "cat .env", "--offline", "--cwd", ws), harness.DecisionAsk, "fastpath_sensitive")
+}
+
+func TestEvalAntiTamperingWithFastpathDisabled(t *testing.T) {
+	e := newEvalEnv(t, `{"fastpath_enabled": false}`)
+	args := []string{"--cmd", "cat ~/.jevguard/.jevguard.json", "--intent", "show me my jev-guard config", "--offline", "--cwd", e.workspace()}
+	rep := e.report(args...)
+	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+	if !rep.TamperingDenied || rep.FastpathRan || rep.WouldSendToJudge {
+		t.Errorf("expected anti-tampering to decide before fastpath and TypeSafe, got %+v", rep)
+	}
+	out := e.mustRun(append(args, "--explain")...)
+	for _, want := range []string{
+		"] Anti-tampering\n    verdict: deny - ",
+		"] Boundary\n    skipped (anti-tampering decided)\n",
+		"] Fastpath\n    skipped (anti-tampering decided)\n",
+		"] TypeSafe\n    not consulted (anti-tampering decided)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("explain missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestEvalAntiTamperingOutranksAbortedSession(t *testing.T) {
+	e := newEvalEnv(t, "")
+	ws := e.workspace()
+	rep := e.report("--cmd", "cat ~/.jevguard/.jevguard.json", "--intent", "stop", "--offline", "--cwd", ws)
+	requireVerdict(t, rep, harness.DecisionDeny, "fastpath_tampering")
+	requireVerdict(t, e.report("--cmd", "ls", "--intent", "stop", "--offline", "--cwd", ws), harness.DecisionForceAsk, sourceSessionAborted)
 }
 
 func TestEvalIntentExplain(t *testing.T) {
@@ -627,5 +663,54 @@ func TestEvalIgnoresAndPreservesSessionState(t *testing.T) {
 
 	if after := snapshotTree(t, e.jevHome); !equalSnapshots(before, after) || len(after) == 0 {
 		t.Errorf("session files changed:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func TestEvalReportsAnsweringTypeSafeModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"jev-1.14.0","answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.99},
+			"destructive_potential":{"type":"score","score":0.2,"confidence":0.9},
+			"violation_category":{"type":"choice","choice":"none","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	e := newEvalEnv(t, `{"api_key":"test-key","base_url":`+jsonString(server.URL)+`}`)
+	ws := e.workspace()
+
+	rep := e.rawReport("--cmd", "make build", "--cwd", ws)
+	if rep["typesafe_model"] != "jev-1.14.0" {
+		t.Fatalf("typesafe_model = %v, want jev-1.14.0: %v", rep["typesafe_model"], rep)
+	}
+	explain := e.mustRun("--cmd", "make build", "--cwd", ws, "--explain")
+	if !strings.Contains(explain, "model:     jev-1.14.0") {
+		t.Errorf("explain output missing answering model:\n%s", explain)
+	}
+
+	offline := e.rawReport("--cmd", "make build", "--cwd", ws, "--offline")
+	if _, ok := offline["typesafe_model"]; ok {
+		t.Errorf("offline report must not claim a TypeSafe model: %v", offline)
+	}
+}
+
+func TestEvalReportsTranscriptIntentSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+		jsonValue          bool
+	}{
+		{"default", "", "Antigravity transcript intent: off (built-in default)", false},
+		{"on", `{"antigravity_transcript_intent":true}`, "Antigravity transcript intent: on (user config)", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEvalEnv(t, tc.config)
+			ws := e.workspace()
+			if out := e.mustRun("--cmd", "ls", "--offline", "--explain", "--cwd", ws); !strings.Contains(out, tc.want) {
+				t.Errorf("explain missing %q:\n%s", tc.want, out)
+			}
+			if got := e.rawReport("--cmd", "ls", "--offline", "--cwd", ws)["antigravity_transcript_intent"]; got != tc.jsonValue {
+				t.Errorf("json = %v, want %v", got, tc.jsonValue)
+			}
+		})
 	}
 }

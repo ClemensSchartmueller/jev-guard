@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"jev-guard/pkg/config"
+	"jev-guard/pkg/fastpath"
 	"jev-guard/pkg/harness"
 	"jev-guard/pkg/session"
 )
@@ -46,17 +47,21 @@ type evalReport struct {
 	WorkspaceRoots        []string `json:"workspace_roots,omitempty"`
 	BoundaryStatus        string   `json:"boundary_status"`
 	Contained             *bool    `json:"boundary_contained"`
+	TamperingDenied       bool     `json:"tampering_denied"`
 	FastpathRan           bool     `json:"fastpath_ran"`
 	FastpathDecision      string   `json:"fastpath_decision,omitempty"`
 	FastpathReason        string   `json:"fastpath_reason,omitempty"`
 	TypeSafeRan           bool     `json:"typesafe_ran"`
 	Judgments             any      `json:"typesafe_judgments,omitempty"`
+	TypeSafeModel         string   `json:"typesafe_model,omitempty"`
 	TypeSafeError         string   `json:"typesafe_error,omitempty"`
 	HarnessOutput         string   `json:"harness_output,omitempty"`
 	HookExitCode          *int     `json:"hook_exit_code,omitempty"`
 	Intent                string   `json:"intent,omitempty"`
 	IntentApplied         bool     `json:"intent_applied"`
 	IntentNote            string   `json:"intent_note,omitempty"`
+	// AntigravityTranscriptIntent reports the opt-in. eval itself never reads the transcript.
+	AntigravityTranscriptIntent bool `json:"antigravity_transcript_intent"`
 }
 
 // evalLoadConfig is a seam so tests can inject configuration; the user config path is
@@ -252,7 +257,8 @@ func evaluate(o *evalOptions, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg := evalLoadConfig(call)
 	intent := applyEvalIntent(call, cfg, o.intent)
 	var trace *gateTrace
-	if intent.Aborted {
+	// Anti-tampering outranks the aborted-session hold, as in the hook (gateHold).
+	if intent.Aborted && fastpath.CheckAntiTampering(call) == nil {
 		trace = &gateTrace{Final: applyAuditMode(abortedSessionResult(), cfg.Mode)}
 	} else {
 		trace = traceGateEvaluation(call, cfg, o.offline)
@@ -298,25 +304,27 @@ func applyEvalIntent(call *harness.NormalizedToolCall, cfg *config.Config, text 
 
 func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *gateTrace, offline bool) *evalReport {
 	rep := &evalReport{
-		Offline:               offline,
-		Mode:                  cfg.Mode,
-		UserConfigPath:        cfg.UserConfigPath,
-		ModeSource:            cfg.Sources["mode"],
-		SensitiveFilesSource:  cfg.Sources["sensitive_files"],
-		TrustedCommandsSource: cfg.Sources["trusted_commands"],
-		SensitiveFilesCount:   len(cfg.SensitiveFiles),
-		TrustedCommandsCount:  len(cfg.TrustedCommands),
-		Diagnostics:           cfg.Diagnostics,
-		Harness:               string(call.Harness),
-		ToolName:              call.ToolName,
-		Command:               call.Command,
-		TargetPath:            call.TargetPath,
-		Cwd:                   call.Cwd,
-		WorkspaceRoots:        call.WorkspaceRoots,
-		FastpathRan:           t.FastpathRan,
-		TypeSafeRan:           t.SemanticRan,
-		WouldSendToJudge:      t.WouldSendToJudge,
-		BoundaryStatus:        boundaryStatus(call, t),
+		Offline:                     offline,
+		Mode:                        cfg.Mode,
+		UserConfigPath:              cfg.UserConfigPath,
+		ModeSource:                  cfg.Sources["mode"],
+		SensitiveFilesSource:        cfg.Sources["sensitive_files"],
+		TrustedCommandsSource:       cfg.Sources["trusted_commands"],
+		SensitiveFilesCount:         len(cfg.SensitiveFiles),
+		TrustedCommandsCount:        len(cfg.TrustedCommands),
+		Diagnostics:                 cfg.Diagnostics,
+		Harness:                     string(call.Harness),
+		ToolName:                    call.ToolName,
+		Command:                     call.Command,
+		TargetPath:                  call.TargetPath,
+		Cwd:                         call.Cwd,
+		WorkspaceRoots:              call.WorkspaceRoots,
+		TamperingDenied:             t.Tampering != nil,
+		FastpathRan:                 t.FastpathRan,
+		TypeSafeRan:                 t.SemanticRan,
+		WouldSendToJudge:            t.WouldSendToJudge,
+		BoundaryStatus:              boundaryStatus(call, t),
+		AntigravityTranscriptIntent: cfg.IsAntigravityTranscriptIntentEnabled(),
 	}
 	if t.BoundaryRan {
 		rep.Contained = &t.Contained
@@ -327,6 +335,7 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 	}
 	if t.Judgments != nil {
 		rep.Judgments = t.Judgments
+		rep.TypeSafeModel = t.JudgedModel()
 	}
 	if t.Fastpath != nil {
 		rep.FastpathDecision = string(t.Fastpath.Decision)
@@ -346,6 +355,13 @@ func buildEvalReport(call *harness.NormalizedToolCall, cfg *config.Config, t *ga
 		}
 	}
 	return rep
+}
+
+func onOff(enabled bool) string {
+	if enabled {
+		return "on"
+	}
+	return "off"
 }
 
 func summaryLine(rep *evalReport) string {
@@ -390,19 +406,33 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	default:
 		fmt.Fprintf(w, "    %q %s\n", rep.Intent, in.Note)
 	}
+	fmt.Fprintf(w, "    Antigravity transcript intent: %s (%s); eval never reads the transcript\n", onOff(cfg.IsAntigravityTranscriptIntentEnabled()), cfg.Sources["antigravity_transcript_intent"])
+	hdr("Anti-tampering")
+	switch {
+	case t.Tampering != nil:
+		fmt.Fprintf(w, "    verdict: %s - %s\n", t.Tampering.Decision, t.Tampering.Reason)
+	case in.Aborted:
+		fmt.Fprintln(w, "    no jev-guard files touched")
+	default:
+		fmt.Fprintln(w, "    no jev-guard files touched")
+	}
 	hdr("Boundary")
-	switch rep.BoundaryStatus {
-	case boundaryStatusSkipped:
+	switch {
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    skipped (anti-tampering decided)")
+	case rep.BoundaryStatus == boundaryStatusSkipped:
 		fmt.Fprintln(w, "    skipped (session aborted)")
-	case boundaryStatusNoTarget:
+	case rep.BoundaryStatus == boundaryStatusNoTarget:
 		fmt.Fprintln(w, "    no target path: treated as contained")
-	case boundaryStatusContained:
+	case rep.BoundaryStatus == boundaryStatusContained:
 		fmt.Fprintln(w, "    target is inside the workspace")
 	default:
 		fmt.Fprintln(w, "    target is OUTSIDE the workspace (or could not be resolved)")
 	}
 	hdr("Fastpath")
 	switch {
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    skipped (anti-tampering decided)")
 	case in.Aborted:
 		fmt.Fprintln(w, "    skipped (session aborted)")
 	case !t.FastpathRan:
@@ -414,15 +444,24 @@ func printExplain(w io.Writer, call *harness.NormalizedToolCall, cfg *config.Con
 	}
 	hdr("TypeSafe")
 	switch {
+	case t.Tampering != nil:
+		fmt.Fprintln(w, "    not consulted (anti-tampering decided)")
 	case in.Aborted:
 		fmt.Fprintln(w, "    skipped (session aborted)")
 	case t.SemanticRan && t.EvalErr != nil:
 		fmt.Fprintf(w, "    error: %v\n", t.EvalErr)
 	case t.SemanticRan && t.Judgments != nil:
+		model := rep.TypeSafeModel
+		if model == "" {
+			model = "not reported"
+		}
+		fmt.Fprintf(w, "    model:     %s\n", model)
 		b, _ := json.MarshalIndent(t.Judgments, "    ", "  ")
 		fmt.Fprintf(w, "    judgments: %s\n", b)
 	case t.WouldSendToJudge:
 		fmt.Fprintln(w, "    would be sent to TypeSafe (skipped, --offline)")
+	case !t.FastpathRan:
+		fmt.Fprintln(w, "    not consulted (transcript guard decided)")
 	default:
 		fmt.Fprintln(w, "    not consulted (fastpath decided)")
 	}

@@ -17,7 +17,7 @@ Run `jev-guard --help` for the built-in summary. When run in an interactive term
 | `jev-guard eval` / `explain` | Simulate how a tool call would be judged |
 | `jev-guard status` | Show active sessions and the cache directory |
 | `jev-guard ingest` | Store the user's prompt as session intent (used by hooks) |
-| `jev-guard end-turn` | Clear intent when a reply ends (Claude Code `Stop` hook) |
+| `jev-guard end-turn` | Clear intent when a reply ends (Claude Code and Codex `Stop` hook) |
 | `jev-guard clear-intent` | Clear intent for one session, or all with `--all` |
 | `jev-guard config trust` / `untrust` | Prepare or revoke a project config trust record ([details](configuration.md#project-configs-and-trust)) |
 | `<payload-json> \| jev-guard` | Evaluate a hook payload; this is what the hooks run |
@@ -45,11 +45,13 @@ Without `--agent`, `init` prints the agents it detected. With `--scope user`, it
 
 `doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation. For Claude Code it also reports the `PostToolUse` taint hook and the effective `taint_mode`. A missing taint hook is a `[WARN]`.
 
+When an agent has a registered gate, `doctor` also reports where it gets prompt intent, and warns if Claude Code or Codex is missing the `UserPromptSubmit` or `Stop` hook, which older setups can be. It always reports `antigravity_transcript_intent`: `[OK]` when off, and `[WARN]` when on, because an agent with shell access can still forge a transcript.
+
 `version`/`-v` and `help`/`-h` also work as aliases for `--version` and `--help`.
 
 ## Simulating decisions with `eval`
 
-`jev-guard eval` runs the real gate pipeline (config, normalization, boundary, fast path, TypeSafe, policy, harness formatting) without a live agent:
+`jev-guard eval` runs the real gate pipeline (config, normalization, anti-tampering, session hold, boundary, fast path, TypeSafe, policy, harness formatting) without a live agent:
 
 ```bash
 jev-guard eval --cmd "git diff .env"
@@ -73,9 +75,9 @@ ASK: Access to sensitive file or credential pattern: .env (source: fastpath_sens
 - `--tool NAME --target PATH` simulates any other tool in a Claude Code-shaped payload, passing the target under the tool's canonical path argument (`TargetFile` for `write_to_file`/`replace_file_content`, `AbsolutePath` for `view_file`, `notebook_path` for `NotebookEdit`, `path` for Glob/Grep/LS, otherwise `file_path`).
 - `--payload FILE` uses a raw hook JSON payload of any harness. Use it to reproduce an exact Antigravity or Codex call.
 - `--cwd DIR` sets the working directory (default: current directory).
-- `--intent TEXT` simulates the user's prompt for intent-aware decisions, for example `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent exactly as the hook does, so the fast path defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (such as `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written, so a cached intent or abort from a live session never affects `eval`.
+- `--intent TEXT` simulates the user's prompt for intent-aware decisions, for example `--cmd "rm -rf build" --intent "Delete the build folder"`. It sets the intent exactly as the hook does, so the fast path defers intent-covered sensitive access to TypeSafe. A stop/cancel prompt (such as `--intent stop`) reproduces the hook's aborted-session hold. It is ignored when `context_awareness_enabled` is false (reported in `--explain` and `--json` as `intent_applied: false`). The session cache is never read or written and the Antigravity transcript is never read, so a cached intent, an abort, or a live conversation never affects `eval`, even with a `--payload` that has a `transcriptPath`. `--explain` and `--json` report `antigravity_transcript_intent`, and with it on, `eval` applies the transcript guard as the hook does.
 - `--offline` skips the TypeSafe network call. If the fast path has no verdict, the result says the call "would be sent to TypeSafe".
-- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, boundary result, fast path result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
+- `--explain` prints the user config and applied trusted project config paths, mode and rule sources, normalized tool call, anti-tampering result, boundary result, fast path result, TypeSafe judgments, final decision, harness-specific output, and the exit code the hook would return.
 - `--json` emits a machine-readable result. The default output is one line: decision, reason, and source.
 
 `jev-guard explain ...` is shorthand for `jev-guard eval --explain ...` and rejects `--json` and `--explain`.
@@ -97,9 +99,17 @@ Flags take values as `--flag value` or `--flag=value`. Boolean flags accept expl
 | `contained` | The target resolved inside the workspace. | `true` |
 | `escaped` | The target is outside the workspace or could not be resolved. | `false` |
 | `no_target` | The call has no target path (such as a shell command); treated as contained, as in the hook. | `true` |
-| `skipped` | The boundary stage did not run because a stop/cancel `--intent` held the call as an aborted session. | `null` |
+| `skipped` | The boundary stage did not run, either because a stop/cancel `--intent` held the call as an aborted session or because anti-tampering denied it (`tampering_denied: true`). | `null` |
 
 Use `boundary_status` to tell a skipped check from an uncontained target. `boundary_contained` is kept for compatibility and is `null` only when the stage was skipped.
+
+### Anti-tampering fields in `--json` output
+
+`tampering_denied` is `true` when anti-tampering denied the call. Anti-tampering runs before every other stage, so in that case `fastpath_ran` and `typesafe_ran` are `false`, `fastpath_decision` and `fastpath_reason` are omitted, and `boundary_status` is `skipped`. The verdict keeps `source: "fastpath_tampering"` for compatibility with existing audit logs.
+
+### Model field in `--json` output
+
+`typesafe_model` is the model id that TypeSafe reported as having answered. This can be a specific version even when the configured `model` is a floating alias such as `jev-latest`. The field is omitted when TypeSafe was not consulted (the fast path decided, `--offline`, or the request failed) or when the response did not report a model. `--explain` prints it as `model:` in the TypeSafe stage. `jev-guard doctor` shows the *configured* model.
 
 ## Session intent
 
@@ -129,6 +139,7 @@ jev-guard status                   # also: jev-guard cache status, jev-guard cac
 - `ingest` sends its confirmation to stderr, so it never pollutes the user's prompt.
 - `end-turn` clears only that session's intent, prints nothing to stdout, and always exits 0. A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it. A session file that cannot be read is also kept, since its abort state is unknown.
 - `clear-intent` without `--session`, a stdin payload, or `--all` prints usage and exits 1.
-- `status` lists unreadable session files together with their error, and shows when a session is tainted by untrusted tool output, with the tool name and time.
+- `status` lists unreadable session files together with their error, reports `antigravity_transcript_intent`, and shows when a session is tainted by untrusted tool output, with the tool name and time.
+- `ingest --turn-key <id>` stores an opaque string turn ID, the same value a Codex `turn_id` provides. Payloads with a string `turn_id` set it automatically, and a tool call whose `turn_id` differs or is missing does not get that intent. A blank key gives no intent for any call, though a stop prompt saved with one still holds. `status` shows it as the session's turn.
 - The bare `jev-guard` command also handles Claude Code `PostToolUse` payloads, which taint the session. It never gates them.
-- Aliases: `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.
+- Aliases: `--turn_key` works for `--turn-key`, `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.

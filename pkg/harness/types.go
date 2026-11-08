@@ -1,6 +1,12 @@
 package harness
 
-import "jev-guard/pkg/session"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+
+	"jev-guard/pkg/session"
+)
 
 // HarnessType represents the calling agent platform.
 type HarnessType string
@@ -33,7 +39,13 @@ type NormalizedToolCall struct {
 	RawArgs        map[string]interface{}
 	SessionID      string
 	TurnID         int
+	// TurnKey is an opaque string turn identifier (Codex turn_id). Empty for Claude/Antigravity.
+	TurnKey string
+	// TurnUnusable means the payload had a turn_id that names no turn, such as "". The call gets no session intent.
+	TurnUnusable   bool
 	UserIntent     string
+	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
+	ModelName      string // Antigravity only
 	// HookEvent is the harness hook_event_name ("PreToolUse", "PostToolUse");
 	// empty when the payload does not carry one.
 	HookEvent string
@@ -47,6 +59,7 @@ type ClaudePayload struct {
 	ToolInput map[string]interface{} `json:"tool_input"`
 	Cwd       string                 `json:"cwd"`
 	SessionID string                 `json:"session_id,omitempty"`
+	TurnID    TurnValue              `json:"turn_id,omitempty"`
 	HookEvent string                 `json:"hook_event_name,omitempty"`
 }
 
@@ -58,18 +71,54 @@ type AntigravityPayload struct {
 	StepIdx        int                 `json:"stepIdx,omitempty"`
 	InvocationNum  int                 `json:"invocationNum,omitempty"`
 	Cwd            string              `json:"cwd"`
+	TranscriptPath string              `json:"transcriptPath,omitempty"`
+	ModelName      string              `json:"modelName,omitempty"`
 }
 
 // IngestPayload represents prompt-bearing hook payloads or explicit ingest JSON.
 type IngestPayload struct {
-	SessionID      string `json:"session_id,omitempty"`
-	ConversationID string `json:"conversationId,omitempty"`
-	TurnID         int    `json:"turn_id,omitempty"`
-	InvocationNum  int    `json:"invocationNum,omitempty"`
-	StepIdx        int    `json:"stepIdx,omitempty"`
-	Prompt         string `json:"prompt,omitempty"`
-	UserPrompt     string `json:"user_prompt,omitempty"`
-	UserMessage    string `json:"userMessage,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
+	ConversationID string    `json:"conversationId,omitempty"`
+	TurnID         TurnValue `json:"turn_id,omitempty"`
+	InvocationNum  int       `json:"invocationNum,omitempty"`
+	StepIdx        int       `json:"stepIdx,omitempty"`
+	Prompt         string    `json:"prompt,omitempty"`
+	UserPrompt     string    `json:"user_prompt,omitempty"`
+	UserMessage    string    `json:"userMessage,omitempty"`
+}
+
+// TurnValue accepts a JSON turn_id that is either a number (integer turn) or a
+// string (opaque Codex turn key) without failing to unmarshal. Unusable records a value
+// that was supplied but names no turn: a blank string or another JSON type. It must not
+// look like a missing turn_id, which numeric matching accepts for any turn.
+type TurnValue struct {
+	Num      int
+	Key      string
+	Unusable bool
+}
+
+// UnmarshalJSON implements json.Unmarshaler. JSON null means no turn_id.
+func (t *TurnValue) UnmarshalJSON(data []byte) error {
+	*t = TurnValue{}
+	if string(bytes.TrimSpace(data)) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		if strings.TrimSpace(s) == "" {
+			t.Unusable = true
+			return nil
+		}
+		t.Key = s
+		return nil
+	}
+	var n float64
+	if err := json.Unmarshal(data, &n); err == nil {
+		t.Num = int(n)
+		return nil
+	}
+	t.Unusable = true
+	return nil
 }
 
 // AntigravityToolCall holds the tool call name and arguments from Antigravity.

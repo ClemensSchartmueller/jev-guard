@@ -57,6 +57,8 @@ func parseAntigravityPayload(raw []byte) (*NormalizedToolCall, error) {
 		RawArgs:        payload.ToolCall.Args,
 		SessionID:      payload.ConversationID,
 		TurnID:         payload.InvocationNum,
+		TranscriptPath: payload.TranscriptPath,
+		ModelName:      payload.ModelName,
 	}, nil
 }
 
@@ -91,8 +93,17 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		}
 	}
 
+	// Codex sends turn_id as a string on turn-scoped events; Claude Code does not send it.
+	harnessType := HarnessClaudeCode
+	if payload.TurnID.Key != "" {
+		harnessType = HarnessCodex
+	}
+
 	return &NormalizedToolCall{
-		Harness:        HarnessClaudeCode,
+		Harness:        harnessType,
+		TurnID:         payload.TurnID.Num,
+		TurnKey:        payload.TurnID.Key,
+		TurnUnusable:   payload.TurnID.Unusable,
 		ToolName:       payload.ToolName,
 		Command:        cmd,
 		TargetPath:     target,
@@ -124,7 +135,7 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 		sid = "default"
 	}
 
-	turn := payload.TurnID
+	turn := payload.TurnID.Num
 	if turn == 0 {
 		turn = payload.InvocationNum
 	}
@@ -141,9 +152,11 @@ func ParseIngestPayload(raw []byte) (*session.SessionState, error) {
 	}
 
 	return &session.SessionState{
-		SessionID: sid,
-		TurnID:    turn,
-		Prompt:    prompt,
+		SessionID:    sid,
+		TurnID:       turn,
+		TurnKey:      payload.TurnID.Key,
+		TurnUnusable: payload.TurnID.Unusable,
+		Prompt:       prompt,
 	}, nil
 }
 
@@ -159,8 +172,7 @@ func extractCwd(args map[string]interface{}) string {
 		return ""
 	}
 
-	cwdKeys := []string{"Cwd", "cwd", "working_dir", "workingDir", "workdir", "directory"}
-	for _, key := range cwdKeys {
+	for _, key := range CwdArgKeys {
 		if val, exists := args[key]; exists {
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
 				return strings.TrimSpace(strVal)
@@ -169,6 +181,9 @@ func extractCwd(args map[string]interface{}) string {
 	}
 	return ""
 }
+
+// CwdArgKeys lists tool argument keys treated as the working directory, in priority order.
+var CwdArgKeys = []string{"Cwd", "cwd", "working_dir", "workingDir", "workdir", "directory"}
 
 // PathArgKeys lists tool argument keys treated as filesystem/URL targets, in
 // priority order. extractCommandAndTarget picks the first non-empty one.

@@ -78,11 +78,14 @@ func isReservedWindowsName(name string) bool {
 
 // SessionState records the active user prompt and turn context for a session.
 type SessionState struct {
-	SessionID string    `json:"session_id"`
-	TurnID    int       `json:"turn_id"`
-	Prompt    string    `json:"prompt"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Aborted   bool      `json:"aborted,omitempty"`
+	SessionID string `json:"session_id"`
+	TurnID    int    `json:"turn_id"`
+	TurnKey   string `json:"turn_key,omitempty"`
+	// TurnUnusable means the ingested turn_id named no turn, so the prompt is never positive intent.
+	TurnUnusable bool      `json:"turn_unusable,omitempty"`
+	Prompt       string    `json:"prompt"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Aborted      bool      `json:"aborted,omitempty"`
 	// Tainted is set by a PostToolUse hook after an untrusted tool (WebFetch,
 	// WebSearch, MCP) returned content into the agent's context. It lasts until
 	// end-turn clears the session or ingest records the next prompt.
