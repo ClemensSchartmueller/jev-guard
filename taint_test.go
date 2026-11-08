@@ -500,3 +500,48 @@ func TestTouchesExecutionSensitivePath_WorktreeExceptionIsNarrow(t *testing.T) {
 		})
 	}
 }
+
+// Issue #72: a path too long to resolve cannot be ruled out as execution-sensitive.
+func TestTouchesExecutionSensitivePath_OverLimitPathCounts(t *testing.T) {
+	ws := t.TempDir()
+	long := strings.Repeat("a/", 32*1024) + "z"
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "touch " + long, Cwd: ws}
+	if !touchesExecutionSensitivePath(call) {
+		t.Fatal("over-limit command path must count as execution-sensitive")
+	}
+	call = &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(ws, long), Cwd: ws}
+	if !touchesExecutionSensitivePath(call) {
+		t.Fatal("over-limit write target must count as execution-sensitive")
+	}
+}
+
+// Issue #72: the whole gate answers quickly and never allows a pathological path.
+func TestTraceGateEvaluation_OverLimitPathNeverAllows(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a/", 32*1024) + "z"
+	start := time.Now()
+	tr := traceGateEvaluation(&harness.NormalizedToolCall{
+		ToolName: "Bash", Command: "echo " + long, Cwd: ws, WorkspaceRoots: []string{ws},
+	}, config.DefaultConfig(), true)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("gate took %v", elapsed)
+	}
+	if tr.Final == nil || tr.Final.Decision != harness.DecisionAsk || tr.Final.Source != "boundary_limit" {
+		t.Fatalf("expected ASK from boundary_limit, got %+v", tr.Final)
+	}
+
+	// With the fast path off, an over-limit target is not contained, so policy asks.
+	cfg := config.DefaultConfig()
+	off := false
+	cfg.FastpathEnabled = &off
+	tr = traceGateEvaluation(&harness.NormalizedToolCall{
+		ToolName: "Write", TargetPath: filepath.Join(ws, long), Cwd: ws, WorkspaceRoots: []string{ws},
+	}, cfg, true)
+	if tr.Contained {
+		t.Fatal("over-limit target reported as contained")
+	}
+}

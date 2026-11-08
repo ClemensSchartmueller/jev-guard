@@ -277,6 +277,9 @@ func (s pathScope) isExecutionSensitive(p string) bool {
 		p = filepath.Join(s.cwd, p)
 	}
 	resolved, err := boundary.CanonicalizePath(p)
+	if errors.Is(err, boundary.ErrPathTooLong) {
+		return true // cannot be ruled out
+	}
 	if err != nil || resolved == "" {
 		return false
 	}

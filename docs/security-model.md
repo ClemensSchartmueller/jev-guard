@@ -50,6 +50,16 @@ Read tools (`Read`, `view_file`, `read_file`, `Glob`, `Grep`, `LS`, and similar)
 
 Path traversals and directory escapes (`../../`) are resolved locally for write and read operations. This prevents access to, or exfiltration of, files outside the workspace, such as `/etc/shadow` or `C:\Windows\system.ini`. Path case is preserved on Linux and matched case-insensitively on Windows. If a path cannot be resolved, the check fails closed.
 
+**Path length limit.** The resolver looks up a path only if, once made absolute and cleaned, it is at most 4,096 bytes long (32,767 bytes on Windows). These are the longest paths the operating system can open: `PATH_MAX` on Linux (macOS allows only 1,024), and the extended-length path limit on Windows, which counts UTF-16 units, so counting UTF-8 bytes never allows more. The transcript guard uses the same values for its filesystem lookups. A longer path is not resolved and is never treated as inside the workspace:
+
+- a target path, a trusted command's argument, or a path checked for sensitive files gets `ASK` (source `boundary_limit`, reason "cannot be verified"), whatever the intent;
+- with `fastpath_enabled` false, a target path over the limit is not contained, so policy asks (source `policy_boundary`);
+- in a tainted session, a path over the limit counts as execution-sensitive and as a sensitive file;
+- a declared workspace root over the limit is dropped without falling back to the Git root or working directory, so nothing is inside it;
+- anti-tampering still checks such a path as written. On Linux and macOS the OS cannot follow a symlink in it, and the other checks above still ask.
+
+There is no separate limit on the number of path components. Resolving a path whose tail does not exist yet (a file about to be created) finds the deepest existing ancestor by binary search, so a path within the length limit costs at most 13 symlink resolutions (16 on Windows), and the work is linear in its length. Audit mode reports a `boundary_limit` `ASK` like any other verdict.
+
 One exception: a Claude Code `Read` of a file that Claude Code itself saved for the current session, exactly `~/.claude/projects/<project>/<session_id>/tool-results/<file>` with no symlinks leading out, is not treated as a boundary escape.
 
 ### Anti-tampering

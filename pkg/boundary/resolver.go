@@ -1,6 +1,7 @@
 package boundary
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -17,13 +18,20 @@ type Resolver struct {
 // NewResolver initializes a Resolver with workspace paths, discovering git root if none provided.
 func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 	roots := make([]string, 0, len(declaredRoots))
+	tooLong := false
 	for _, root := range declaredRoots {
-		if cleanRoot, err := canonicalizePath(root); err == nil && cleanRoot != "" {
+		cleanRoot, err := canonicalizePath(root)
+		if errors.Is(err, ErrPathTooLong) {
+			tooLong = true
+		}
+		if err == nil && cleanRoot != "" {
 			roots = append(roots, cleanRoot)
 		}
 	}
 
-	if len(roots) == 0 {
+	// A declared root too long to resolve must not be replaced by the cwd or Git root, which
+	// could be broader. With no usable root, nothing is contained.
+	if len(roots) == 0 && !tooLong {
 		effectiveCwd := cwd
 		if effectiveCwd == "" {
 			effectiveCwd, _ = os.Getwd()
@@ -61,6 +69,9 @@ func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) 
 	}
 
 	cleanTarget, err := canonicalizePath(absPath)
+	if errors.Is(err, ErrPathTooLong) {
+		return false, err // the path itself is too long to repeat in a message
+	}
 	if err != nil {
 		return false, fmt.Errorf("unable to resolve path %s: %w", targetPath, err)
 	}
@@ -116,9 +127,37 @@ func IsSubPath(parent, child string) bool {
 	return isSubPath(parent, child)
 }
 
+// ErrPathTooLong is returned, wrapped, for a path longer than MaxResolvePathBytes. Such a
+// path is not resolved: callers must treat it as unverifiable (not contained, ASK), never as
+// contained or safe.
+var ErrPathTooLong = errors.New("path is too long to resolve")
+
+// MaxResolvePathBytes is the longest absolute, cleaned path the resolver will look up: 32,767
+// on Windows (the extended-length path limit, counted here in UTF-8 bytes, which is never less
+// than the UTF-16 units Windows counts) and 4,096 elsewhere (Linux PATH_MAX; macOS allows only
+// 1,024). The OS cannot open a longer path, so there is nothing to resolve. The same values
+// bound filesystem lookups in the fastpath transcript guard.
+func MaxResolvePathBytes() int {
+	return maxResolvePathBytesForOS(runtime.GOOS)
+}
+
+func maxResolvePathBytesForOS(goos string) int {
+	if goos == "windows" {
+		return 32767
+	}
+	return 4096
+}
+
+// evalSymlinks is a seam so tests can count filesystem resolutions.
+var evalSymlinks = filepath.EvalSymlinks
+
 func canonicalizePath(path string) (string, error) {
 	if runtime.GOOS != "windows" && isWindowsDriveAbs(path) {
-		return normalizeSeparators(filepath.Clean(path)), nil
+		clean := filepath.Clean(path)
+		if err := checkPathLength(clean); err != nil {
+			return "", err
+		}
+		return normalizeSeparators(clean), nil
 	}
 
 	abs, err := filepath.Abs(path)
@@ -126,33 +165,73 @@ func canonicalizePath(path string) (string, error) {
 		return "", err
 	}
 	clean := filepath.Clean(abs)
+	if err := checkPathLength(clean); err != nil {
+		return "", err
+	}
 	return resolveSymlinks(clean), nil
 }
 
+func checkPathLength(clean string) error {
+	if limit := MaxResolvePathBytes(); len(clean) > limit {
+		return fmt.Errorf("%w: %d bytes, limit %d", ErrPathTooLong, len(clean), limit)
+	}
+	return nil
+}
+
+// resolveSymlinks evaluates symlinks in an absolute, cleaned path. When the whole path does
+// not resolve (a file about to be created), the deepest ancestor that does is resolved and the
+// rest is appended as written.
+//
+// A cleaned path has no ".." components, so whether a prefix resolves is monotonic in its
+// length: EvalSymlinks walks the components in order, so a prefix that fails makes every
+// longer prefix fail the same way. The deepest resolvable ancestor is therefore found by
+// binary search over the separator positions, with O(log n) EvalSymlinks calls, and the result
+// is built with one concatenation. The previous one-ancestor-at-a-time walk was quadratic.
 func resolveSymlinks(path string) string {
-	if realPath, err := filepath.EvalSymlinks(path); err == nil {
+	if realPath, err := evalSymlinks(path); err == nil {
 		return filepath.Clean(realPath)
 	}
 
-	curr := path
-	var parts []string
-	for {
-		parent := filepath.Dir(curr)
-		if parent == curr {
-			break
+	volume := len(filepath.VolumeName(path))
+	// ends[i] is where ancestor i ends; ancestors are ordered from the root down.
+	var ends []int
+	for i := volume; i < len(path); i++ {
+		if os.IsPathSeparator(path[i]) {
+			ends = append(ends, i)
 		}
-		parts = append([]string{filepath.Base(curr)}, parts...)
-		if realParent, err := filepath.EvalSymlinks(parent); err == nil {
-			result := realParent
-			for _, part := range parts {
-				result = filepath.Join(result, part)
-			}
-			return filepath.Clean(result)
+	}
+	ancestor := func(i int) string {
+		end := ends[i]
+		if end == volume {
+			return path[:end+1] // the root keeps its separator: "/" or `C:\`
 		}
-		curr = parent
+		return path[:end]
 	}
 
-	return path
+	// Find the largest i whose ancestor resolves; ok holds its resolution.
+	lo, hi := 0, len(ends) // the answer lies in [lo-1, hi-1]
+	best, bestReal := -1, ""
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if realParent, err := evalSymlinks(ancestor(mid)); err == nil {
+			best, bestReal = mid, realParent
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if best < 0 {
+		return path
+	}
+
+	rest := path[ends[best]+1:]
+	if rest == "" {
+		return filepath.Clean(bestReal)
+	}
+	if len(bestReal) > 0 && os.IsPathSeparator(bestReal[len(bestReal)-1]) {
+		return filepath.Clean(bestReal + rest)
+	}
+	return filepath.Clean(bestReal + string(filepath.Separator) + rest)
 }
 
 func isSubPath(parent, child string) bool {
@@ -187,6 +266,9 @@ func FindGitRoot(startDir string) string {
 
 func findGitRoot(startDir string) string {
 	curr := filepath.Clean(startDir)
+	if checkPathLength(curr) != nil {
+		return ""
+	}
 	for {
 		gitPath := filepath.Join(curr, ".git")
 		if info, err := os.Stat(gitPath); err == nil && (info.IsDir() || !info.IsDir()) {

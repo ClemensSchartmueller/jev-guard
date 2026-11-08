@@ -1,6 +1,7 @@
 package fastpath
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -69,7 +70,11 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
-	if reason := f.checkSensitive(call); reason != "" {
+	reason, err := f.checkSensitive(call)
+	if err != nil {
+		return boundaryLimitResult("Sensitive file access could not be verified: ", err)
+	}
+	if reason != "" {
 		if strings.TrimSpace(call.UserIntent) != "" {
 			// Defer to TypeSafe AI for semantic intent verification.
 			// Never fall through to trusted read operations for sensitive files.
@@ -83,7 +88,11 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
-	if reason := f.checkBoundaryEscape(call); reason != "" {
+	reason, err = f.checkBoundaryEscape(call)
+	if err != nil {
+		return boundaryLimitResult("Target path cannot be verified within workspace: ", err)
+	}
+	if reason != "" {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
 			Reason:     reason,
@@ -92,7 +101,11 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
-	if f.isTrustedOperation(call) {
+	trusted, err := f.isTrustedOperation(call)
+	if err != nil {
+		return boundaryLimitResult("Command argument cannot be verified within workspace: ", err)
+	}
+	if trusted {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAllow,
 			Reason:     "Trusted read-only operation verified by fast-path",
@@ -102,6 +115,19 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 	}
 
 	return nil
+}
+
+// sourceBoundaryLimit is reported when a path is too long for the resolver to check
+// (boundary.ErrPathTooLong). The call is asked about whatever its intent.
+const sourceBoundaryLimit = "boundary_limit"
+
+func boundaryLimitResult(prefix string, err error) *harness.EvaluationResult {
+	return &harness.EvaluationResult{
+		Decision:   harness.DecisionAsk,
+		Reason:     prefix + err.Error(),
+		Source:     sourceBoundaryLimit,
+		Confidence: 1.0,
+	}
 }
 
 // CheckAntiTampering denies any access to jev-guard's own configuration, log, or
@@ -186,14 +212,21 @@ func stringArgValues(raw interface{}) []string {
 }
 
 // SensitiveReason reports why a call touches a sensitive file or credential
-// pattern, or "" if it does not. The gate reuses it for tainted sessions.
+// pattern, or "" if it does not. The gate reuses it for tainted sessions. A path too long
+// to resolve counts as sensitive, since it cannot be ruled out.
 func (f *Filter) SensitiveReason(call *harness.NormalizedToolCall) string {
-	return f.checkSensitive(call)
+	reason, err := f.checkSensitive(call)
+	if err != nil {
+		return "Sensitive file access could not be verified: " + err.Error()
+	}
+	return reason
 }
 
-func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
+// checkSensitive returns a sensitive-file reason, or an error wrapping
+// boundary.ErrPathTooLong when a path could not be resolved to check it.
+func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error) {
 	if reason := f.checkResolvedXDGConfig(call); reason != "" {
-		return reason
+		return reason, nil
 	}
 
 	targetRaw := call.TargetPath
@@ -210,7 +243,7 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 
 		// 1. Glob matching on target path / basename
 		if targetGlobMatches(lowerPattern, target) {
-			return "Access to sensitive file or credential pattern: " + s
+			return "Access to sensitive file or credential pattern: " + s, nil
 		}
 
 		// 2. Glob matching on command arguments
@@ -219,7 +252,7 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 				cleanToken := strings.Trim(token, `"'`)
 				tokenBase := strings.ToLower(path.Base(normalizePathSeparators(cleanToken)))
 				if matched, _ := path.Match(lowerPattern, tokenBase); matched {
-					return "Access to sensitive file or credential pattern: " + s
+					return "Access to sensitive file or credential pattern: " + s, nil
 				}
 			}
 		}
@@ -228,21 +261,21 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) string {
 		cleanPattern := strings.TrimPrefix(lowerPattern, "*")
 		if cleanPattern != "" {
 			if strings.Contains(target, cleanPattern) || strings.Contains(baseName, cleanPattern) || strings.Contains(cmd, cleanPattern) {
-				return "Access to sensitive file or credential pattern: " + s
+				return "Access to sensitive file or credential pattern: " + s, nil
 			}
 			if strings.HasSuffix(cleanPattern, "/") {
 				if targetInPatternDir(cleanPattern, target) {
-					return "Access to sensitive file or credential pattern: " + s
+					return "Access to sensitive file or credential pattern: " + s, nil
 				}
 				cleanPatternTrimmed := strings.TrimSuffix(cleanPattern, "/")
 				if strings.Contains(cmd, "/"+cleanPatternTrimmed+"/") || strings.Contains(cmd, " "+cleanPatternTrimmed) {
-					return "Access to sensitive file or credential pattern: " + s
+					return "Access to sensitive file or credential pattern: " + s, nil
 				}
 			}
 		}
 	}
 	if reason := checkRepoGitConfig(targetRaw, call.Command, call.Cwd); reason != "" {
-		return reason
+		return reason, nil
 	}
 	return f.checkResolvedSensitive(targetRaw, call.Command, call.Cwd)
 }
@@ -276,7 +309,7 @@ func targetInPatternDir(cleanPattern, target string) bool {
 // arguments are resolved only when they exist, so flags and words never pick
 // up the working directory's own path. A resolved path that is spelled the
 // same as the original adds nothing and is skipped.
-func (f *Filter) checkResolvedSensitive(target, command, cwd string) string {
+func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, error) {
 	var candidates []string
 	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
 		candidates = append(candidates, t)
@@ -300,6 +333,9 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) string {
 	}
 	for _, c := range candidates {
 		resolved, err := boundary.CanonicalizePath(joinCwd(c, cwd))
+		if errors.Is(err, boundary.ErrPathTooLong) {
+			return "", err
+		}
 		if err != nil || resolved == "" {
 			continue
 		}
@@ -312,14 +348,14 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) string {
 			cleanPattern := strings.TrimPrefix(lowerPattern, "*")
 			if targetGlobMatches(lowerPattern, lower) ||
 				(cleanPattern != "" && (strings.Contains(lower, cleanPattern) || strings.HasSuffix(cleanPattern, "/") && targetInPatternDir(cleanPattern, lower))) {
-				return "Access to sensitive file or credential pattern: " + s
+				return "Access to sensitive file or credential pattern: " + s, nil
 			}
 		}
 		if isRepoGitConfigPath(lower) {
-			return repoGitConfigReason
+			return repoGitConfigReason, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // joinCwd makes a relative path absolute against cwd (or the process
@@ -543,10 +579,12 @@ func normalizePathSeparators(value string) string {
 	return strings.ReplaceAll(value, `\`, "/")
 }
 
-func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
+// checkBoundaryEscape returns why the target escapes the workspace, or an error wrapping
+// boundary.ErrPathTooLong when it is too long to resolve.
+func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) (string, error) {
 	target := strings.TrimSpace(call.TargetPath)
 	if target == "" || isURL(target) {
-		return ""
+		return "", nil
 	}
 
 	if isFileURI(target) {
@@ -555,22 +593,25 @@ func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) string {
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target)
+		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target), nil
 	}
 
 	contained, err := checker.IsPathContained(target, call.Cwd)
+	if errors.Is(err, boundary.ErrPathTooLong) {
+		return "", err
+	}
 	if err != nil {
-		return fmt.Sprintf("Target path cannot be verified within workspace: %s (%v)", target, err)
+		return fmt.Sprintf("Target path cannot be verified within workspace: %s (%v)", target, err), nil
 	}
 
 	if !contained {
 		if isClaudeSessionToolResult(call) {
-			return ""
+			return "", nil
 		}
-		return fmt.Sprintf("Target path escapes workspace boundaries: %s", target)
+		return fmt.Sprintf("Target path escapes workspace boundaries: %s", target), nil
 	}
 
-	return ""
+	return "", nil
 }
 
 func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) BoundaryChecker {
@@ -585,21 +626,23 @@ func (f *Filter) resolveBoundaryChecker(call *harness.NormalizedToolCall) Bounda
 	return resolver
 }
 
-func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) bool {
+// isTrustedOperation reports whether the call is a trusted read. A non-nil error means a
+// command argument was too long to resolve (boundary.ErrPathTooLong); the caller must ask.
+func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) (bool, error) {
 	if isSafeReadTool(call) {
-		return true
+		return true, nil
 	}
 	return f.isTrustedCommand(call)
 }
 
-func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) bool {
+func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error) {
 	trimmedCmd := strings.TrimSpace(strings.ToLower(call.Command))
 	if trimmedCmd == "" {
-		return false
+		return false, nil
 	}
 
 	if containsChainingOperators(trimmedCmd) {
-		return false
+		return false, nil
 	}
 
 	matched := false
@@ -614,21 +657,21 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) bool {
 	}
 
 	if !matched {
-		return false
+		return false, nil
 	}
 
 	return f.areCommandArgsContained(trimmedCmd, matchedPrefix, call)
 }
 
-func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harness.NormalizedToolCall) bool {
+func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harness.NormalizedToolCall) (bool, error) {
 	argsStr := strings.TrimSpace(strings.TrimPrefix(cmd, trustedPrefix))
 	if argsStr == "" {
-		return true
+		return true, nil
 	}
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return false
+		return false, nil
 	}
 
 	tokens := strings.Fields(argsStr)
@@ -639,12 +682,12 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 		// Disallow file output/writing flags in trusted read commands - defer to semantic evaluation
 		lowerArg := strings.ToLower(cleanArg)
 		if lowerArg == "-o" || strings.HasPrefix(lowerArg, "-o=") || strings.HasPrefix(lowerArg, "--output") || strings.HasPrefix(lowerArg, "--output-directory") {
-			return false
+			return false, nil
 		}
 
 		// PowerShell accepts -Param:value syntax; any colon in a flag defers to semantic evaluation.
 		if strings.HasPrefix(cleanArg, "-") && strings.Contains(cleanArg, ":") {
-			return false
+			return false, nil
 		}
 
 		// Inspect --flag=path syntax
@@ -653,12 +696,15 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 				parts := strings.SplitN(cleanArg, "=", 2)
 				val := strings.Trim(parts[1], `"'`)
 				if isUnsafeShellArg(val) {
-					return false
+					return false, nil
 				}
 				if isPotentialPath(val) {
 					contained, err := checker.IsPathContained(val, call.Cwd)
+					if errors.Is(err, boundary.ErrPathTooLong) {
+						return false, err
+					}
 					if err != nil || !contained {
-						return false
+						return false, nil
 					}
 				}
 			}
@@ -666,17 +712,20 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 		}
 
 		if isUnsafeShellArg(cleanArg) {
-			return false
+			return false, nil
 		}
 		if isPotentialPath(cleanArg) {
 			contained, err := checker.IsPathContained(cleanArg, call.Cwd)
+			if errors.Is(err, boundary.ErrPathTooLong) {
+				return false, err
+			}
 			if err != nil || !contained {
-				return false
+				return false, nil
 			}
 		}
 	}
 
-	return true
+	return true, nil
 }
 
 func isPotentialPath(arg string) bool {
