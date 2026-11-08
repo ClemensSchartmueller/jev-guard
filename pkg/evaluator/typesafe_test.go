@@ -204,3 +204,35 @@ func TestClient_Evaluate_WithUserIntent(t *testing.T) {
 		t.Errorf("expected IntentConfidence 0.98, got %f", judgments.IntentConfidence)
 	}
 }
+
+func TestClient_Evaluate_RecordsAnsweringModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, modelField, want string
+	}{
+		{"versioned model reported for floating alias", `"model": "jev-1.14.0",`, "jev-1.14.0"},
+		{"model omitted", ``, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{` + tc.modelField + `
+					"answers": {
+						"is_workspace_contained": {"type": "noul", "noul": 1.0},
+						"destructive_potential": {"type": "score", "score": 0.1, "confidence": 0.9},
+						"violation_category": {"type": "choice", "choice": "none", "confidence": 0.9}
+					}
+				}`))
+			}))
+			defer server.Close()
+
+			client := NewClient("test-key", server.URL, DefaultModel, 1*time.Second)
+			judgments, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "view_file"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if judgments.Model != tc.want {
+				t.Errorf("Model = %q, want %q", judgments.Model, tc.want)
+			}
+		})
+	}
+}

@@ -60,9 +60,10 @@ func runGate() int {
 		return outputHarnessVerdict(call, *applyAuditMode(hold, cfg.Mode))
 	}
 
-	result := executeGateEvaluation(call, cfg)
+	trace := traceGateEvaluation(call, cfg, false)
+	result := trace.Final
 
-	if auditErr := cfg.LogAudit(call, result); auditErr != nil {
+	if auditErr := cfg.LogAuditWithModel(call, result, trace.JudgedModel()); auditErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 	}
 
@@ -192,6 +193,15 @@ type gateTrace struct {
 	Final            *harness.EvaluationResult
 }
 
+// JudgedModel returns the semantic model that answered, or "" when no
+// semantic response was received.
+func (t *gateTrace) JudgedModel() string {
+	if t == nil || t.Judgments == nil {
+		return ""
+	}
+	return t.Judgments.Model
+}
+
 type boundaryResult struct {
 	contained bool
 	err       error
@@ -215,10 +225,6 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 	}
 	c.results[key] = boundaryResult{contained: contained, err: err}
 	return contained, err
-}
-
-func executeGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) *harness.EvaluationResult {
-	return traceGateEvaluation(call, cfg, false).Final
 }
 
 // traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.

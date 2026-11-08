@@ -626,3 +626,40 @@ func TestConfig_IntentTTL(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_LogAuditWithModel(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	cfg := &Config{AuditLogPath: logPath}
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "go test ./..."}
+	res := &harness.EvaluationResult{Decision: harness.DecisionAllow, Reason: "safe", Source: "policy_jev_allow"}
+
+	if err := cfg.LogAuditWithModel(call, res, "jev-1.14.0"); err != nil {
+		t.Fatalf("LogAuditWithModel: %v", err)
+	}
+	if err := cfg.LogAudit(call, res); err != nil {
+		t.Fatalf("LogAudit: %v", err)
+	}
+
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read audit log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 audit lines, got %d:\n%s", len(lines), content)
+	}
+	var withModel map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[0]), &withModel); err != nil {
+		t.Fatal(err)
+	}
+	if withModel["model"] != "jev-1.14.0" {
+		t.Errorf("model = %v, want jev-1.14.0", withModel["model"])
+	}
+	var withoutModel map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[1]), &withoutModel); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := withoutModel["model"]; ok {
+		t.Errorf("entry without a semantic model should omit model: %s", lines[1])
+	}
+}

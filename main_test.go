@@ -566,7 +566,7 @@ func TestGateIntentHardening(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.call.UserIntent = intent
-			final := executeGateEvaluation(tc.call, cfg)
+			final := traceGateEvaluation(tc.call, cfg, false).Final
 			if final == nil || final.Decision != tc.want || (tc.wantSource != "" && final.Source != tc.wantSource) {
 				t.Fatalf("final=%+v; want %s/%s", final, tc.want, tc.wantSource)
 			}
