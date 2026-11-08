@@ -111,6 +111,7 @@ func parseClaudePayload(raw []byte) (*NormalizedToolCall, error) {
 		WorkspaceRoots: nil,
 		RawArgs:        payload.ToolInput,
 		SessionID:      sid,
+		HookEvent:      payload.HookEvent,
 	}, nil
 }
 

@@ -122,7 +122,9 @@ Each agent receives the verdict in its own protocol. In Claude Code and Codex, `
 
 Your stated intent comes from your latest prompt: through hooks in Claude Code and Codex, and in Antigravity only if you opt in to reading the conversation transcript ([details and risk](docs/security-model.md#intent-per-agent)). If it is missing or unusable, `jev-guard` decides without it.
 
-The full rules, including the list of protected files, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
+In Claude Code, a `PostToolUse` hook also marks the session as tainted after `WebFetch`, `WebSearch` or an MCP tool returns content, because that content can carry injected instructions. The default `taint_mode: "audit"` only logs the decisions that would be tightened. `"enforce"` turns egress, sensitive-file access, writes to agent configuration and intent-only allows into `ASK` until the reply ends. No tool output is sent anywhere.
+
+The full rules, including the list of protected files, tool-output taint, the intent policy matrix, and per-agent behavior, are in [docs/security-model.md](docs/security-model.md).
 
 ## Common tasks
 
@@ -158,6 +160,7 @@ The most common changes:
 - **`sensitive_files`**: extra file patterns that always need confirmation.
 - **`trusted_commands`**: command prefixes allowed instantly without a network call.
 - **`audit_log_path`**: write every decision to a JSONL log.
+- **`taint_mode`**: `"off"`, `"audit"` (default) or `"enforce"`, for sessions that read web or MCP output.
 
 Every setting, the project-config trust model, and the audit log format are described in [docs/configuration.md](docs/configuration.md).
 

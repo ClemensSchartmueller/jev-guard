@@ -43,7 +43,7 @@ Without `--agent`, `init` prints the agents it detected. With `--scope user`, it
 
 `init` preserves existing hook configuration, and running it again does not add duplicate hooks. The hooks call the installed binary by its absolute path, so they work without a `PATH` change.
 
-`doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation.
+`doctor` reports each check as `[OK]`, `[WARN]`, or `[FAIL]`. It exits 1 if any check fails. A missing API key is only a `[WARN]`, but without a key, every call the fast path cannot decide is held for confirmation. For Claude Code it also reports the `PostToolUse` taint hook and the effective `taint_mode`. A missing taint hook is a `[WARN]`.
 
 When an agent has a registered gate, `doctor` also reports where it gets prompt intent, and warns if Claude Code or Codex is missing the `UserPromptSubmit` or `Stop` hook, which older setups can be. It always reports `antigravity_transcript_intent`: `[OK]` when off, and `[WARN]` when on, because an agent with shell access can still forge a transcript.
 
@@ -139,6 +139,7 @@ jev-guard status                   # also: jev-guard cache status, jev-guard cac
 - `ingest` sends its confirmation to stderr, so it never pollutes the user's prompt.
 - `end-turn` clears only that session's intent, prints nothing to stdout, and always exits 0. A recorded abort ("stop") is kept until the TTL expires or the next prompt replaces it. A session file that cannot be read is also kept, since its abort state is unknown.
 - `clear-intent` without `--session`, a stdin payload, or `--all` prints usage and exits 1.
-- `status` lists unreadable session files together with their error, and reports `antigravity_transcript_intent`.
+- `status` lists unreadable session files together with their error, reports `antigravity_transcript_intent`, and shows when a session is tainted by untrusted tool output, with the tool name and time.
 - `ingest --turn-key <id>` stores an opaque string turn ID, the same value a Codex `turn_id` provides. Payloads with a string `turn_id` set it automatically, and a tool call whose `turn_id` differs or is missing does not get that intent. A blank key gives no intent for any call, though a stop prompt saved with one still holds. `status` shows it as the session's turn.
+- The bare `jev-guard` command also handles Claude Code `PostToolUse` payloads, which taint the session. It never gates them.
 - Aliases: `--turn_key` works for `--turn-key`, `--session-id` and `--session_id` work for `--session`, and `--turn-id` and `--turn_id` work for `--turn`. The underscore command aliases `end_turn` and `clear_intent` also work.

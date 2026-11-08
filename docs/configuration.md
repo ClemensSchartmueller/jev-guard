@@ -77,6 +77,7 @@ The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs
 | **Timeout** | `timeout_ms` | — | `1500` | Evaluation HTTP timeout in milliseconds |
 | **Fast path** | `fastpath_enabled` | — | `true` | Enable the local sub-millisecond filter |
 | **Context awareness** | `context_awareness_enabled` | — | `true` | Enable session intent caching and intent-aware evaluation |
+| **Taint mode** | `taint_mode` | — | `audit` | `off`, `audit` or `enforce`: what a session tainted by `WebFetch`, `WebSearch` or MCP output changes (see [Tool-output taint](security-model.md#tool-output-taint)). User config only; an invalid value uses `enforce` |
 | **Intent TTL** | `intent_ttl_minutes` | — | `30` | Backstop lifetime of a stored prompt intent in minutes (1–1440); the Claude Code or Codex `Stop` hook normally ends it sooner. Does not apply to Antigravity transcript intent. User config only |
 | **Antigravity transcript intent** | `antigravity_transcript_intent` | — | `false` | Opt-in. Read Antigravity prompt intent from the conversation transcript at `PreToolUse`, and run the transcript guard for every agent. An agent with shell access can still forge a transcript, so turning this on trusts your agents not to. See [Intent per agent](security-model.md#intent-per-agent). Codex and Claude Code intent do not depend on it. User config only |
 | **Audit log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging. Relative paths are anchored to `~/.jevguard` |
@@ -108,7 +109,7 @@ Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
 
 ## Project configs and trust
 
-Repository files named `.jevguard.json` or `jevguard.json` are ignored until you explicitly trust their exact contents. Even then, only additive `sensitive_files` entries are applied. Project values for `mode`, `base_url`, API keys, `fastpath_enabled`, `context_awareness_enabled`, and `trusted_commands` are ignored. See [`.jevguard.json.example`](../.jevguard.json.example).
+Repository files named `.jevguard.json` or `jevguard.json` are ignored until you explicitly trust their exact contents. Even then, only additive `sensitive_files` entries are applied. Project values for `mode`, `base_url`, API keys, `fastpath_enabled`, `context_awareness_enabled`, `taint_mode`, and `trusted_commands` are ignored. See [`.jevguard.json.example`](../.jevguard.json.example).
 
 **Discovery.** Discovery checks the tool call's working directory and walks up to the nearest declared workspace root, inclusive. It also checks declared workspace roots directly. If no workspace root contains the working directory, discovery is bounded by the nearest `.git` directory or file; without one, it checks only the candidate directory. When a hook payload has neither a working directory nor workspace roots, the process working directory is the fallback and uses the same bounds. Target file directories are never used for config discovery.
 
@@ -155,6 +156,8 @@ When `audit_log_path` is set, every tool evaluation produces a JSONL entry:
   "confidence": 1.0
 }
 ```
+
+While a session is tainted by untrusted tool output, entries for decisions that `taint_mode` checks also carry a `taint` field, for example `"taint": "audit: enforce would ask (network egress); session tainted by WebFetch at 2026-09-18T11:59:30Z"`. In `audit` taint mode this field is the only record, so set `audit_log_path` if you want to measure the effect. See [Tool-output taint](security-model.md#tool-output-taint).
 
 When TypeSafe answered the call, the entry also has `"model"`: the model id TypeSafe reported, for example a specific Jev version behind `jev-latest`. Comparing it across entries shows when the model behind a floating alias changed. Fast-path and fail-safe entries have no `model`.
 

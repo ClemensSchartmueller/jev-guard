@@ -36,6 +36,7 @@ type Config struct {
 	FastpathEnabled             *bool         `json:"fastpath_enabled,omitempty"`          // whether local fastpath filter is active
 	ContextAwarenessEnabled     *bool         `json:"context_awareness_enabled,omitempty"` // whether session intent cache and context awareness are active
 	IntentTTLMinutes            *int          `json:"intent_ttl_minutes,omitempty"`        // backstop lifetime of a stored prompt intent (1-1440)
+	TaintMode                   string        `json:"taint_mode,omitempty"`                // "off", "audit" (default) or "enforce"; user config only
 	AntigravityTranscriptIntent *bool         `json:"-"`                                   // read Antigravity prompt intent from the transcript and run the guard that protects it; off by default, user config only
 	// AntigravityTranscriptIntentRaw keeps a wrong JSON type from invalidating the whole file, which is what a *bool would do.
 	AntigravityTranscriptIntentRaw json.RawMessage    `json:"antigravity_transcript_intent,omitempty"`
@@ -56,6 +57,13 @@ const DefaultIntentTTLMinutes = 30
 // MaxIntentTTLMinutes is the largest accepted intent_ttl_minutes value.
 const MaxIntentTTLMinutes = 1440
 
+// Taint modes control what a session tainted by untrusted tool output changes.
+const (
+	TaintModeOff     = "off"     // PostToolUse records no taint and the gate ignores it
+	TaintModeAudit   = "audit"   // record taint and log decisions that enforce would tighten
+	TaintModeEnforce = "enforce" // tainted sessions escalate those decisions to ask
+)
+
 // DefaultConfig provides fallback defaults for zero-config operation.
 func DefaultConfig() *Config {
 	enabled := true
@@ -70,13 +78,14 @@ func DefaultConfig() *Config {
 		ContextAwarenessEnabled:     &contextAwareness,
 		IntentTTLMinutes:            &intentTTL,
 		AntigravityTranscriptIntent: &transcriptIntent,
+		TaintMode:                   TaintModeAudit,
 		SensitiveFiles:              DefaultSensitiveFiles(),
 		TrustedCommands:             DefaultTrustedCommands(),
 		Sources: map[string]string{
 			"mode": "built-in default", "base_url": "built-in default", "api_key": "environment or user config",
 			"model": "built-in default", "timeout_ms": "built-in default", "audit_log_path": "built-in default",
 			"fastpath_enabled": "built-in default", "context_awareness_enabled": "built-in default",
-			"intent_ttl_minutes": "built-in default", "antigravity_transcript_intent": "built-in default",
+			"intent_ttl_minutes": "built-in default", "taint_mode": "built-in default", "antigravity_transcript_intent": "built-in default",
 			"sensitive_files": "built-in defaults", "trusted_commands": "built-in defaults",
 		},
 	}
@@ -114,6 +123,21 @@ func (c *Config) IntentTTL() time.Duration {
 		return DefaultIntentTTLMinutes * time.Minute
 	}
 	return time.Duration(*c.IntentTTLMinutes) * time.Minute
+}
+
+// EffectiveTaintMode returns the taint mode, treating an empty value as the
+// audit default. Without context awareness there is no session to taint, so
+// the mode is off.
+func (c *Config) EffectiveTaintMode() string {
+	if !c.IsContextAwarenessEnabled() {
+		return TaintModeOff
+	}
+	switch c.TaintMode {
+	case TaintModeOff, TaintModeEnforce:
+		return c.TaintMode
+	default:
+		return TaintModeAudit
+	}
 }
 
 // DefaultSensitiveFiles returns standard sensitive filename fragments protected by default.
@@ -663,6 +687,18 @@ func applyUserFileConfig(cfg *Config, fileCfg *Config, configDir string) {
 			cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("user config intent_ttl_minutes ignored: expected an integer from 1 to %d, using default %d", MaxIntentTTLMinutes, DefaultIntentTTLMinutes))
 		}
 	}
+	if fileCfg.TaintMode != "" {
+		switch mode := strings.ToLower(strings.TrimSpace(fileCfg.TaintMode)); mode {
+		case TaintModeOff, TaintModeAudit, TaintModeEnforce:
+			cfg.TaintMode = mode
+			cfg.Sources["taint_mode"] = "user config"
+		default:
+			// An unrecognized value fails toward the stricter mode.
+			cfg.TaintMode = TaintModeEnforce
+			cfg.Sources["taint_mode"] = "safe fallback after invalid user config"
+			cfg.Diagnostics = append(cfg.Diagnostics, "user config taint_mode ignored: expected off, audit or enforce, using enforce")
+		}
+	}
 	if raw := bytes.TrimSpace(fileCfg.AntigravityTranscriptIntentRaw); len(raw) > 0 && string(raw) != "null" {
 		var enabled bool
 		if err := json.Unmarshal(raw, &enabled); err == nil {
@@ -894,6 +930,7 @@ type AuditEntry struct {
 	Reason     string           `json:"reason"`
 	Source     string           `json:"source"`
 	Confidence float64          `json:"confidence"`
+	Taint      string           `json:"taint,omitempty"`
 	// Model is the semantic model that answered, as reported by the provider.
 	// Empty when no semantic evaluation produced a response.
 	Model string `json:"model,omitempty"`
@@ -928,6 +965,7 @@ func (c *Config) LogAuditWithModel(call *harness.NormalizedToolCall, res *harnes
 		entry.Reason = res.Reason
 		entry.Source = res.Source
 		entry.Confidence = res.Confidence
+		entry.Taint = res.TaintNote
 	}
 
 	data, err := json.Marshal(entry)

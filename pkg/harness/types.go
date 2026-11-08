@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"jev-guard/pkg/session"
 )
 
 // HarnessType represents the calling agent platform.
@@ -44,6 +46,11 @@ type NormalizedToolCall struct {
 	UserIntent     string
 	TranscriptPath string // Antigravity only: path to the conversation transcript (unvalidated)
 	ModelName      string // Antigravity only
+	// HookEvent is the harness hook_event_name ("PreToolUse", "PostToolUse");
+	// empty when the payload does not carry one.
+	HookEvent string
+	// Taint is copied from the session when untrusted tool output entered it.
+	Taint *session.TaintSource
 }
 
 // ClaudePayload represents the payload sent by Claude Code and Codex hooks.
@@ -53,6 +60,7 @@ type ClaudePayload struct {
 	Cwd       string                 `json:"cwd"`
 	SessionID string                 `json:"session_id,omitempty"`
 	TurnID    TurnValue              `json:"turn_id,omitempty"`
+	HookEvent string                 `json:"hook_event_name,omitempty"`
 }
 
 // AntigravityPayload represents the payload sent by Antigravity pre-tool hooks.
@@ -144,4 +152,7 @@ type EvaluationResult struct {
 	Reason     string
 	Source     string // "fastpath", "typesafe", or "policy_fallback"
 	Confidence float64
+	// TaintNote is set when a tainted session changed (enforce) or would have
+	// changed (audit) this decision; it is written to the audit log.
+	TaintNote string
 }

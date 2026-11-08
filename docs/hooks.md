@@ -20,6 +20,7 @@ Add hooks to `.claude/settings.json` (project) or `~/.claude/settings.json` (glo
 - `UserPromptSubmit` stores your prompt as session intent.
 - `Stop` clears that intent when the reply finishes.
 - `PreToolUse` gates each tool call.
+- `PostToolUse` marks the session as tainted after `WebFetch`, `WebSearch` or an MCP tool returns content (see [Tool-output taint](security-model.md#tool-output-taint)). It sends no tool output anywhere.
 
 Do not add `SubagentStop`: a subagent finishing must not clear the main reply's intent.
 
@@ -57,13 +58,24 @@ Do not add `SubagentStop`: a subagent finishing must not clear the main reply's 
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jev-guard"
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
 > [!NOTE]
-> `jev-guard` formats Claude Code `PreToolUse` verdicts using the standard `hookSpecificOutput.permissionDecision` schema. `ALLOW` is returned as `permissionDecision: "allow"`. `ASK` and `DENY` verdicts are returned as exit code 2 with the reason on stderr (Codex behaves the same). Ingest confirmations go to stderr so they never pollute your prompt.
+> `jev-guard` formats Claude Code `PreToolUse` verdicts using the standard `hookSpecificOutput.permissionDecision` schema. `ALLOW` is returned as `permissionDecision: "allow"`. `ASK` and `DENY` verdicts are returned as exit code 2 with the reason on stderr (Codex behaves the same). Ingest confirmations go to stderr so they never pollute your prompt. A `PostToolUse` payload is recognized by its `hook_event_name` and is never gated as a pending call. It always exits 0. With `taint_mode: "enforce"` it also returns `hookSpecificOutput.additionalContext` that tells the model to treat the output as data.
 
 ## Codex CLI (`.codex/hooks.json`)
 
@@ -116,6 +128,8 @@ Codex intent does not depend on `antigravity_transcript_intent`. Codex loads pro
 
 `ingest` and `end-turn` print nothing to stdout, because Codex would inject that text into the model's context. Every `ASK`, `force_ask`, and `DENY` exits with code 2 and the reason on stderr, because `jev-guard` never emits `permissionDecision: "ask"`.
 
+`init` does not install a `PostToolUse` hook for Codex, so tool-output taint does not cover Codex. Codex's hosted web search also bypasses hooks.
+
 ## Antigravity (`.agents/hooks.json`)
 
 ```json
@@ -140,4 +154,4 @@ If the `jev-guard` section already exists with `"enabled": false`, `init` sets i
 
 Antigravity only needs `PreToolUse`. Its payload has a transcript path but not the prompt text, so by default it gets no intent. `jev-guard init --agent antigravity` installs the tool gates and removes any older managed `PreInvocation` ingest hook. Do not add that hook back.
 
-To read your latest request from the conversation transcript at each `PreToolUse`, set `antigravity_transcript_intent` to `true` in `~/.jevguard/.jevguard.json`. It needs no extra hooks. It is off by default because an agent with shell access can still forge a transcript. See [Intent per agent](security-model.md#intent-per-agent). Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command.
+To read your latest request from the conversation transcript at each `PreToolUse`, set `antigravity_transcript_intent` to `true` in `~/.jevguard/.jevguard.json`. It needs no extra hooks. It is off by default because an agent with shell access can still forge a transcript. See [Intent per agent](security-model.md#intent-per-agent). Prompt-bearing payloads remain supported through the explicit `jev-guard ingest` command. Antigravity post-tool hooks are unverified, so tool-output taint does not cover Antigravity.
