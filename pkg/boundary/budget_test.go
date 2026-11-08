@@ -502,3 +502,22 @@ func TestOSNameTooLongIsMarked(t *testing.T) {
 		t.Fatalf("err = %v; want ErrPathTooLong and ErrOSNameTooLong", err)
 	}
 }
+
+// A name-too-long for a lookup at the path limit is a whole-path failure (the limit counts the
+// NUL), which a shorter spelling can avoid: it must not be marked as an unopenable name.
+func TestOSNameTooLongAtPathLimitIsNotMarked(t *testing.T) {
+	base := string(filepath.Separator) + "w"
+	limit := MaxResolvePathLength()
+	for _, n := range []int{limit, limit - 1} {
+		p := base + strings.Repeat("a", n-len(base))
+		if got := ResolvePathLength(p); got != n {
+			t.Fatalf("built %d, want %d", got, n)
+		}
+		if err := errOSNameTooLong(p); errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+			t.Errorf("length %d: %v; want only ErrPathTooLong", n, err)
+		}
+	}
+	if err := errOSNameTooLong(base + "/x"); !errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+		t.Errorf("short lookup: %v; want ErrOSNameTooLong and ErrPathTooLong", err)
+	}
+}

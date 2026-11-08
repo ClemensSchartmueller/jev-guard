@@ -1,11 +1,13 @@
 package fastpath
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -699,6 +701,8 @@ func TestCheckAntiTampering_OSRejectedLongNameIsClean(t *testing.T) {
 	long := strings.Repeat("a", 300)
 	if err := os.WriteFile(filepath.Join(ws, long), nil, 0o600); err == nil {
 		t.Skip("this file system accepts 300-byte names")
+	} else if !errors.Is(err, syscall.ENAMETOOLONG) {
+		t.Skipf("creating a 300-byte name failed for another reason: %v", err)
 	}
 	for _, command := range []string{"echo " + long, "cat ./" + long + "/x", `printf '%s' "` + long + `"`} {
 		if res := CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws}); res != nil {

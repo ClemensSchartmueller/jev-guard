@@ -257,13 +257,21 @@ func errTooLongLookup(p string) error {
 	return fmt.Errorf("%w: a lookup of length %d, limit %d", ErrPathTooLong, ResolvePathLength(p), MaxResolvePathLength())
 }
 
-// ErrOSNameTooLong is wrapped, together with ErrPathTooLong, when the OS itself rejected a
-// lookup within MaxResolvePathLength as too long. The lookup is within the path limit, so the
-// OS rejected a single name in it (a component, or a symlink target's component, over the
-// file system's name limit), and any open of the same path fails the same way.
+// ErrOSNameTooLong is wrapped, together with ErrPathTooLong, when the OS rejected a lookup as
+// too long although the lookup, with its terminating NUL, is shorter than the OS path limit
+// (MaxResolvePathLength, which counts the NUL on Linux and macOS). The whole path then fits,
+// so the OS rejected a single name in it (a component, or a symlink target's component, over
+// the file system's name limit), and any open that reaches that name fails the same way,
+// whatever spelling or working directory it uses. A rejection of a lookup at the path limit
+// is a whole-path failure that a shorter relative or symlinked spelling can avoid: it is only
+// ErrPathTooLong.
 var ErrOSNameTooLong = errors.New("the operating system rejected a name as too long")
 
+// errOSNameTooLong classifies an OS name-too-long error for lookup path p.
 func errOSNameTooLong(p string) error {
+	if ResolvePathLength(p)+1 >= MaxResolvePathLength() {
+		return errTooLongLookup(p)
+	}
 	return fmt.Errorf("%w: %w: a lookup of length %d", ErrPathTooLong, ErrOSNameTooLong, ResolvePathLength(p))
 }
 
@@ -551,7 +559,7 @@ func (e *evaluation) normalized(p string) (string, error) {
 			// Without the on-disk spelling, a short-name alias cannot be recognized: fail,
 			// and cache nothing for this prefix or the ones below it.
 			if isNameTooLong(err) {
-				return "", errOSNameTooLong(cur)
+				return "", errTooLongLookup(cur)
 			}
 			return "", err
 		}
