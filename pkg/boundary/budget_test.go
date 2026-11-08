@@ -498,6 +498,12 @@ func TestOSNameTooLongIsMarked(t *testing.T) {
 		return orig(p)
 	}
 	_, err := newEvaluation().resolve(filepath.Join(ws, "long"), false)
+	if runtime.GOOS == "windows" {
+		if !errors.Is(err, ErrPathTooLong) || errors.Is(err, ErrOSNameTooLong) {
+			t.Fatalf("err = %v; want only ErrPathTooLong on Windows", err)
+		}
+		return
+	}
 	if !errors.Is(err, ErrPathTooLong) || !errors.Is(err, ErrOSNameTooLong) {
 		t.Fatalf("err = %v; want ErrPathTooLong and ErrOSNameTooLong", err)
 	}
@@ -517,7 +523,11 @@ func TestOSNameTooLongAtPathLimitIsNotMarked(t *testing.T) {
 			t.Errorf("length %d: %v; want only ErrPathTooLong", n, err)
 		}
 	}
-	if err := errOSNameTooLong(base + "/x"); !errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+	if err := errOSNameTooLongFor("linux", base+"/x"); !errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
 		t.Errorf("short lookup: %v; want ErrOSNameTooLong and ErrPathTooLong", err)
+	}
+	// Windows converts the path before the API sees it, so its errors are never marked.
+	if err := errOSNameTooLongFor("windows", base+"/x"); errors.Is(err, ErrOSNameTooLong) || !errors.Is(err, ErrPathTooLong) {
+		t.Errorf("windows: %v; want only ErrPathTooLong", err)
 	}
 }

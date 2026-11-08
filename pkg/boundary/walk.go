@@ -268,8 +268,16 @@ func errTooLongLookup(p string) error {
 var ErrOSNameTooLong = errors.New("the operating system rejected a name as too long")
 
 // errOSNameTooLong classifies an OS name-too-long error for lookup path p.
+//
+// Windows errors are never marked: os.Lstat converts the path (adding a \\?\ or UNC prefix)
+// and Windows expands namespaces at run time, so the length the OS saw is not the length of p,
+// and a whole-path failure cannot be told apart from a name that is too long.
 func errOSNameTooLong(p string) error {
-	if ResolvePathLength(p)+1 >= MaxResolvePathLength() {
+	return errOSNameTooLongFor(runtime.GOOS, p)
+}
+
+func errOSNameTooLongFor(goos, p string) error {
+	if goos == "windows" || ResolvePathLength(p)+1 >= MaxResolvePathLength() {
 		return errTooLongLookup(p)
 	}
 	return fmt.Errorf("%w: %w: a lookup of length %d", ErrPathTooLong, ErrOSNameTooLong, ResolvePathLength(p))
