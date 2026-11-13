@@ -80,6 +80,14 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 	if len(projectDiags) > 0 {
 		report(doctorWarn, "Project config: %s", strings.Join(projectDiags, "; "))
 	}
+	// Diagnostic only: name approvals recorded under another spelling of this path.
+	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
+		if info, err := inspectProjectConfig(file); err == nil && !info.Trusted {
+			for _, hint := range trustAliasHints(info) {
+				report(doctorWarn, "Project config: %s", hint)
+			}
+		}
+	}
 	if cfg.Mode == "audit" {
 		report(doctorWarn, "Mode: audit (decisions are logged but not enforced)")
 	} else {

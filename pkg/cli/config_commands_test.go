@@ -130,3 +130,57 @@ func writeTrustRegistry(t *testing.T, entries ...config.ProjectConfigTrust) {
 	}
 	t.Cleanup(func() { _ = os.Remove(path) })
 }
+
+// symlinkedProjectAlias creates a project config reached through a symlinked parent and
+// approves the symlinked spelling in the temp registry. It returns both spellings.
+func symlinkedProjectAlias(t *testing.T) (realRepo, linkRepo string) {
+	t.Helper()
+	root, err := filepath.Abs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRepo = filepath.Join(root, "real", "repo")
+	linkRepo = filepath.Join(root, "link", "repo")
+	if err := os.MkdirAll(realRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(realRepo), filepath.Dir(linkRepo)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realRepo, ".jevguard.json"), []byte(`{"sensitive_files":[".x"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := inspectProjectConfig(linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTrustRegistry(t, info.TrustRecord)
+	return realRepo, linkRepo
+}
+
+func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
+	realRepo, linkRepo := symlinkedProjectAlias(t)
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	if action, code := runner.EvaluateArgs([]string{"config", "untrust", realRepo}); action != ActionHandled || code != 0 {
+		t.Fatalf("config untrust failed: code=%d stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Current digest is not trusted.",
+		"Registry entry for another spelling of this path: " + filepath.Join(linkRepo, ".jevguard.json") + " (the current digest).",
+		"It does not apply to " + filepath.Join(realRepo, ".jevguard.json"),
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected untrust output to contain %q, got %q", want, output)
+		}
+	}
+
+	stdout.Reset()
+	if _, code := runner.EvaluateArgs([]string{"config", "untrust", linkRepo}); code != 0 {
+		t.Fatalf("config untrust failed: stderr=%q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "another spelling") {
+		t.Errorf("the exact approved path must not report itself as an alias, got %q", stdout.String())
+	}
+}

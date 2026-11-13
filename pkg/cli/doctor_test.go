@@ -328,3 +328,17 @@ func TestDoctorAuditTargetPreservesContents(t *testing.T) {
 		t.Fatalf("audit contents changed: %q, %v", got, err)
 	}
 }
+
+func TestDoctorNamesTrustRecordForAnotherSpellingOfThePath(t *testing.T) {
+	realRepo, linkRepo := symlinkedProjectAlias(t)
+	out, _ := doctorRun(t, &Runner{}, doctorConfig(t), realRepo, t.TempDir(), true)
+	want := doctorWarn + " Project config: Registry entry for another spelling of this path: " + filepath.Join(linkRepo, ".jevguard.json")
+	if !strings.Contains(out, want) {
+		t.Errorf("expected doctor to name the alias record %q, got %q", want, out)
+	}
+
+	out, _ = doctorRun(t, &Runner{}, doctorConfig(t), linkRepo, t.TempDir(), true)
+	if strings.Contains(out, "another spelling") {
+		t.Errorf("doctor must not report an alias for the exact approved path, got %q", out)
+	}
+}

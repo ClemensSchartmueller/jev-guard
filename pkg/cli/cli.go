@@ -211,9 +211,29 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	} else {
 		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
 	}
+	for _, hint := range trustAliasHints(info) {
+		fmt.Fprintln(r.Stdout, hint)
+	}
 	fmt.Fprintf(r.Stdout, "Trust registry: %s\n", trustRegistryPath())
 	fmt.Fprintln(r.Stdout, "This command does not edit user-owned files; edit the registry manually to revoke trust.")
 	return ActionHandled, 0
+}
+
+// trustAliasHints describes registry records approved under a different spelling of the
+// same config file. Those records never apply to this path; the hint only explains why an
+// approval appears to have no effect and which record to remove or re-approve.
+func trustAliasHints(info *config.ProjectConfigInfo) []string {
+	hints := make([]string, 0, len(info.TrustAliases))
+	for _, alias := range info.TrustAliases {
+		digest := "an older digest"
+		if alias.SHA256 == info.SHA256 {
+			digest = "the current digest"
+		}
+		hints = append(hints, fmt.Sprintf(
+			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because trust is bound to the exact path; remove that entry to revoke it, or run `jev-guard config trust %s` and add the printed record to trust this spelling.",
+			alias.ConfigPath, digest, info.ConfigPath, info.ConfigPath))
+	}
+	return hints
 }
 
 func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {
