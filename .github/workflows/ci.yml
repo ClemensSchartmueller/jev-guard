@@ -39,6 +39,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+          # Deliberately uncached: these artifacts should be built from a clean
+          # toolchain state, not from a GOCACHE restored from another ref's run.
+          # The job is a short cross-compile, so caching would save little.
           cache: false
 
       - name: Build release binary
@@ -83,11 +86,34 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           check-latest: true
+          # setup-go's built-in cache is not used: it also archives GOMODCACHE,
+          # and the Go toolchain's telemetry writes read-only files there
+          # before the restore, so extraction fails ("File exists") and the
+          # cache never hits. The module has no dependencies (no go.sum), so
+          # only the build cache below is worth caching.
           cache: false
+
+      - name: Locate Go build cache
+        id: go-env
+        shell: bash
+        run: echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+
+      # Build cache only. Keyed on runner OS/arch and the resolved Go version;
+      # the source hash refreshes the cache as code changes and restore-keys
+      # fall back to the nearest older snapshot. GOCACHE is content-addressed,
+      # so stale entries are ignored rather than reused incorrectly.
+      - name: Cache Go build cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.go-env.outputs.gocache }}
+          key: go-build-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', '**/*.go') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-${{ runner.arch }}-go${{ steps.setup-go.outputs.go-version }}-
 
       - name: Verify Dependencies
         run: go mod verify
@@ -100,4 +126,6 @@ jobs:
         run: go vet ./...
 
       - name: Run Tests
-        run: go test -v ./...
+        # -count=1 disables Go test-result caching so a restored GOCACHE only
+        # saves compilation; security regression tests always execute.
+        run: go test -count=1 -v ./...
