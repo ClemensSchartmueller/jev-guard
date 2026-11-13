@@ -138,6 +138,8 @@ jev-guard config untrust .jevguard.json
 
 The digest is checked on every invocation, so editing or replacing the config requires a new reviewed record. `config untrust` identifies the registry entry to remove.
 
+Trust is bound to the exact path in the record. If you approved the project through another spelling of the same directory, such as a symlinked checkout, macOS `/var` versus `/private/var`, or a Windows 8.3 short name, the record does not apply to this path. `config untrust` and `doctor` name such records so you can remove them or approve this spelling.
+
 **Why the CLI does not write approvals.** A confirmation typed into an agent-controlled shell would not prove that you reviewed it. This design assumes the agent process cannot write the user config or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as you, approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
 
 ## Audit log

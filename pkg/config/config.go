@@ -394,6 +394,11 @@ type ProjectConfigInfo struct {
 	Trusted        bool               `json:"trusted"`
 	TrustIssue     string             `json:"trust_issue,omitempty"`
 	TrustRecord    ProjectConfigTrust `json:"trust_record"`
+	// TrustAliases lists registry records whose config_path is a different spelling of the
+	// same config file (a symlinked parent, macOS /var versus /private/var, or a Windows
+	// 8.3 short name). It is diagnostic only: an alias record never grants trust to
+	// TrustRecord's path, because trust stays bound to the exact approved path.
+	TrustAliases []ProjectConfigTrust `json:"trust_aliases,omitempty"`
 }
 
 type projectTrustRegistry struct {
@@ -424,8 +429,53 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 	info.Trusted, err = trustRecordExists(trustRegistryPath, info.TrustRecord)
 	if err != nil {
 		info.TrustIssue = describeTrustRegistryError(err)
+		return info, nil
 	}
+	info.TrustAliases = trustAliasRecords(trustRegistryPath, info.TrustRecord)
 	return info, nil
+}
+
+// trustAliasRecords returns registry records whose config_path differs from the expected
+// record's but names the same file in the same directory: a symlinked or junctioned parent,
+// macOS /var versus /private/var, a case variant, or a Windows 8.3 short name. It only reports
+// these records; the trust decision itself never consults it. Records whose paths no longer
+// resolve, and records that could never be approved as written, are skipped.
+func trustAliasRecords(registryPath string, expected ProjectConfigTrust) []ProjectConfigTrust {
+	registry, err := readTrustRegistry(registryPath)
+	if err != nil {
+		return nil
+	}
+	wantFile, err := os.Stat(expected.ConfigPath)
+	if err != nil {
+		return nil
+	}
+	wantDir, err := os.Stat(expected.ProjectRoot)
+	if err != nil {
+		return nil
+	}
+	var aliases []ProjectConfigTrust
+	for _, entry := range registry.Entries {
+		if entry.ConfigPath == expected.ConfigPath || !filepath.IsAbs(entry.ConfigPath) ||
+			entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
+			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(expected.ConfigPath)) {
+			continue
+		}
+		// The approved path must name a regular file, as config trust requires; comparing
+		// both the file and its directory excludes hard links from other directories.
+		if linkInfo, err := os.Lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Stat(entry.ConfigPath)
+		if err != nil || !os.SameFile(file, wantFile) {
+			continue
+		}
+		dir, err := os.Stat(entry.ProjectRoot)
+		if err != nil || !os.SameFile(dir, wantDir) {
+			continue
+		}
+		aliases = append(aliases, entry)
+	}
+	return aliases
 }
 
 func resolveProjectConfigPath(path string) (string, error) {

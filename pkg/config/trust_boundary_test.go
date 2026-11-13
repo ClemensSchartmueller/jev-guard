@@ -588,3 +588,79 @@ func TestInspectProjectConfigReportsMissingTrustRegistry(t *testing.T) {
 		t.Fatalf("expected an untrusted config with a missing-registry issue, got trusted=%t issue=%q", info.Trusted, info.TrustIssue)
 	}
 }
+
+func TestInspectProjectConfig_ReportsTrustRecordForAnotherSpellingWithoutTrustingIt(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	linkParent := filepath.Join(root, "link")
+	realRepo := filepath.Join(realParent, "repo")
+	linkRepo := filepath.Join(linkParent, "repo")
+	if err := os.MkdirAll(realRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeConfig(t, filepath.Join(realRepo, ".jevguard.json"), `{"sensitive_files":[".alias-secret"]}`)
+
+	approved, err := inspectProjectConfigIsolated(t, linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := ProjectConfigTrust{
+		ProjectRoot: filepath.Join(root, "deleted"),
+		ConfigPath:  filepath.Join(root, "deleted", ".jevguard.json"),
+		SHA256:      approved.SHA256,
+	}
+	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
+	registryBytes, err := json.Marshal(map[string]any{
+		"version": 1,
+		"entries": []ProjectConfigTrust{gone, approved.TrustRecord},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+
+	alias, err := inspectProjectConfigWithRegistry(realRepo, registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias.Trusted {
+		t.Fatalf("a record for another spelling must not trust this path, got %+v", alias)
+	}
+	if len(alias.TrustAliases) != 1 || alias.TrustAliases[0] != approved.TrustRecord {
+		t.Fatalf("expected the symlinked-path record as the only alias, got %+v", alias.TrustAliases)
+	}
+
+	exact, err := inspectProjectConfigWithRegistry(linkRepo, registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact.Trusted || len(exact.TrustAliases) != 0 {
+		t.Fatalf("the exact record must not be reported as its own alias, got %+v", exact)
+	}
+
+	// A record naming a symlinked config file could never be approved, so it is not an alias.
+	symlinkRepo := filepath.Join(root, "symlink-file")
+	if err := os.MkdirAll(symlinkRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkConfig := filepath.Join(symlinkRepo, ".jevguard.json")
+	if err := os.Symlink(filepath.Join(realRepo, ".jevguard.json"), symlinkConfig); err != nil {
+		t.Skipf("file symlinks unavailable: %v", err)
+	}
+	registryBytes, err = json.Marshal(map[string]any{
+		"version": 1,
+		"entries": []ProjectConfigTrust{{ProjectRoot: symlinkRepo, ConfigPath: symlinkConfig, SHA256: approved.SHA256}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+	if info, err := inspectProjectConfigWithRegistry(realRepo, registryPath); err != nil || len(info.TrustAliases) != 0 {
+		t.Fatalf("a symlinked config file record must not be reported as an alias, got info=%+v err=%v", info, err)
+	}
+}
