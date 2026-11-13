@@ -183,4 +183,25 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	if strings.Contains(stdout.String(), "another spelling") {
 		t.Errorf("the exact approved path must not report itself as an alias, got %q", stdout.String())
 	}
+	if strings.Contains(output, "config trust") {
+		t.Errorf("untrust must not suggest approving a spelling, got %q", output)
+	}
+
+	// When both spellings are approved, revoking one still names the other.
+	realInfo, err := inspectProjectConfig(realRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkInfo, err := inspectProjectConfig(linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTrustRegistry(t, linkInfo.TrustRecord, realInfo.TrustRecord)
+	stdout.Reset()
+	if _, code := runner.EvaluateArgs([]string{"config", "untrust", realRepo}); code != 0 {
+		t.Fatalf("config untrust failed: stderr=%q", stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "is trusted.") || !strings.Contains(out, "another spelling of this path: "+linkInfo.ConfigPath) {
+		t.Errorf("expected untrust of a trusted path to also name the alias record, got %q", out)
+	}
 }

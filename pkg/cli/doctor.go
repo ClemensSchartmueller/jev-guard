@@ -83,7 +83,7 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 	// Diagnostic only: name approvals recorded under another spelling of this path.
 	if file := config.FindProjectConfigInDirectory(cwd); file != "" {
 		if info, err := inspectProjectConfig(file); err == nil && !info.Trusted {
-			for _, hint := range trustAliasHints(info) {
+			for _, hint := range trustAliasHints(info, true) {
 				report(doctorWarn, "Project config: %s", hint)
 			}
 		}

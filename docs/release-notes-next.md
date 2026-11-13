@@ -15,6 +15,7 @@ Changes since v0.3.0.
 - Add an offline policy regression corpus and name the existing policy thresholds without changing their values.
 
 - Use one network-egress heuristic for credential intent authorization and session taint (#76). Preserve URL-target and package-publish coverage while extending taint checks to the shared detector's cloud clients and inline network markers. Tainted sessions can therefore report or prompt on more network-capable calls.
+- `config untrust` and `doctor` name trust registry records approved under another spelling of the same project path, such as a symlinked checkout, macOS `/private/var`, or a Windows short name (#77). Trust remains bound to the exact approved path.
 - Check resolved filesystem locations before granting local path proof (#74). Aliases into execution-sensitive directories such as `.claude/`, including new files beneath an aliased directory, retain the model's containment check. Ordinary files in Claude Code worktrees remain eligible for local proof.
 
 ## Upgrade notes

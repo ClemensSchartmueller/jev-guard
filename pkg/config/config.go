@@ -436,25 +436,41 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 }
 
 // trustAliasRecords returns registry records whose config_path differs from the expected
-// record's but resolves, through symlinks and on Windows long-name expansion, to the same
-// file. It only reports these records; the trust decision itself never consults it.
-// Records whose paths no longer resolve are skipped.
+// record's but names the same file in the same directory: a symlinked or junctioned parent,
+// macOS /var versus /private/var, a case variant, or a Windows 8.3 short name. It only reports
+// these records; the trust decision itself never consults it. Records whose paths no longer
+// resolve, and records that could never be approved as written, are skipped.
 func trustAliasRecords(registryPath string, expected ProjectConfigTrust) []ProjectConfigTrust {
 	registry, err := readTrustRegistry(registryPath)
 	if err != nil {
 		return nil
 	}
-	want, err := filepath.EvalSymlinks(expected.ConfigPath)
+	wantFile, err := os.Stat(expected.ConfigPath)
+	if err != nil {
+		return nil
+	}
+	wantDir, err := os.Stat(expected.ProjectRoot)
 	if err != nil {
 		return nil
 	}
 	var aliases []ProjectConfigTrust
 	for _, entry := range registry.Entries {
-		if entry.ConfigPath == "" || entry.ConfigPath == expected.ConfigPath || !filepath.IsAbs(entry.ConfigPath) {
+		if entry.ConfigPath == expected.ConfigPath || !filepath.IsAbs(entry.ConfigPath) ||
+			entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
+			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(expected.ConfigPath)) {
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(entry.ConfigPath)
-		if err != nil || resolved != want {
+		// The approved path must name a regular file, as config trust requires; comparing
+		// both the file and its directory excludes hard links from other directories.
+		if linkInfo, err := os.Lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Stat(entry.ConfigPath)
+		if err != nil || !os.SameFile(file, wantFile) {
+			continue
+		}
+		dir, err := os.Stat(entry.ProjectRoot)
+		if err != nil || !os.SameFile(dir, wantDir) {
 			continue
 		}
 		aliases = append(aliases, entry)

@@ -642,4 +642,25 @@ func TestInspectProjectConfig_ReportsTrustRecordForAnotherSpellingWithoutTrustin
 	if !exact.Trusted || len(exact.TrustAliases) != 0 {
 		t.Fatalf("the exact record must not be reported as its own alias, got %+v", exact)
 	}
+
+	// A record naming a symlinked config file could never be approved, so it is not an alias.
+	symlinkRepo := filepath.Join(root, "symlink-file")
+	if err := os.MkdirAll(symlinkRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkConfig := filepath.Join(symlinkRepo, ".jevguard.json")
+	if err := os.Symlink(filepath.Join(realRepo, ".jevguard.json"), symlinkConfig); err != nil {
+		t.Skipf("file symlinks unavailable: %v", err)
+	}
+	registryBytes, err = json.Marshal(map[string]any{
+		"version": 1,
+		"entries": []ProjectConfigTrust{{ProjectRoot: symlinkRepo, ConfigPath: symlinkConfig, SHA256: approved.SHA256}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+	if info, err := inspectProjectConfigWithRegistry(realRepo, registryPath); err != nil || len(info.TrustAliases) != 0 {
+		t.Fatalf("a symlinked config file record must not be reported as an alias, got info=%+v err=%v", info, err)
+	}
 }
