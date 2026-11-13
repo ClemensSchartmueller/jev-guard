@@ -91,8 +91,11 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
           # Cache GOMODCACHE + GOCACHE. The module has no external dependencies
-          # (no go.sum), so go.mod is the dependency file. setup-go's key also
-          # includes runner OS, arch and the resolved Go version.
+          # (no go.sum); go.mod is setup-go v6's default, stated explicitly.
+          # The key is runner OS, arch, (Linux) image, resolved Go version and
+          # the go.mod hash. An exact hit is not re-saved, so the cache mainly
+          # keeps stdlib/vet objects warm; project packages are rebuilt as they
+          # change. GOCACHE is content-addressed, so stale entries are unused.
           cache: true
           cache-dependency-path: go.mod
 
