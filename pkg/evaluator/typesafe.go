@@ -3,10 +3,12 @@ package evaluator
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -66,6 +68,16 @@ func NewClient(apiKey, baseURL, model string, timeout time.Duration) *Client {
 		BaseURL: baseURL,
 		Model:   model,
 		HTTPClient: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 nil,
+				DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: time.Second,
+				TLSClientConfig:       &tls.Config{RootCAs: trustedSystemRoots(), MinVersion: tls.VersionTLS12},
+			},
 			Timeout: timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse

@@ -2,9 +2,16 @@ package evaluator
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,5 +241,76 @@ func TestClient_Evaluate_RecordsAnsweringModel(t *testing.T) {
 				t.Errorf("Model = %q, want %q", judgments.Model, tc.want)
 			}
 		})
+	}
+}
+
+func TestClient_TransportIgnoresEnvironment(t *testing.T) {
+	// Use a non-loopback URL so ProxyFromEnvironment's loopback exemption cannot
+	// hide a regression. Only the test's dialer maps the endpoint to loopback.
+	var proxyConnections atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyConnections.Add(1)
+		if r.Header.Get("Authorization") != "" {
+			t.Error("API key leaked to proxy")
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	proxy.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			proxyConnections.Add(1)
+		}
+	}
+	var endpointRequests atomic.Int32
+	endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		endpointRequests.Add(1)
+		w.Write([]byte(`{"answers":{}}`))
+	}))
+	defer endpoint.Close()
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: endpoint.Certificate().Raw})
+	if err := os.WriteFile(caFile, ca, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("ALL_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("SSL_CERT_FILE", caFile)
+	t.Setenv("SSL_CERT_DIR", filepath.Dir(caFile))
+	client := NewClient("secret-test-key", "https://example.com", "", time.Second)
+	transport, ok := client.HTTPClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatal("expected explicit *http.Transport")
+	}
+	defer transport.CloseIdleConnections()
+	if transport.Proxy != nil {
+		t.Fatal("proxy must be disabled")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatal("TLS minimum must be 1.2")
+	}
+	transport.TLSClientConfig.ServerName = "127.0.0.1"
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr == "example.com:443" {
+			addr = endpoint.Listener.Addr().String()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	// The environment-selected certificate must not authorize even a direct
+	// connection. It is a trust anchor accepted by a control verifier below.
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca)
+	if _, err := endpoint.Certificate().Verify(x509.VerifyOptions{Roots: pool, DNSName: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "bash", Command: "ls"}); err == nil {
+		t.Fatal("environment-selected CA was trusted")
+	}
+	if proxyConnections.Load() != 0 {
+		t.Fatal("connected to environment-selected proxy")
+	}
+	if endpointRequests.Load() != 0 {
+		t.Fatal("sent API key to untrusted TLS endpoint")
 	}
 }
