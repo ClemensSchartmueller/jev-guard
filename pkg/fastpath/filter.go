@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -563,7 +564,11 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 		return false, nil
 	}
 
-	if containsChainingOperators(trimmedCmd) {
+	chainText := trimmedCmd
+	if strings.HasPrefix(trimmedCmd, "git diff ") || strings.HasPrefix(trimmedCmd, "git log ") {
+		chainText = gitReflogReference.ReplaceAllString(chainText, "reflog")
+	}
+	if containsChainingOperators(chainText) {
 		return false, nil
 	}
 
@@ -593,10 +598,22 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	// --no-index compares directories recursively, including sensitive descendants
 	// absent from the command text. Defer even file operands: their type can change.
 	if trustedPrefix == "git diff" {
+		operands := 0
+		pathsOnly := false
 		for _, arg := range shellWords(argsStr) {
 			if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
 				return false, nil
 			}
+			if arg == "--" {
+				pathsOnly = true
+				continue
+			}
+			if pathsOnly || !strings.HasPrefix(arg, "-") {
+				operands++
+			}
+		}
+		if operands >= 2 && !insideGitWorkTree(call.Cwd) {
+			return false, nil
 		}
 	}
 	if !nameOnlyTrustedCommand(trustedPrefix) && commandArgsMayExpand(argsStr) {
@@ -766,6 +783,9 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 	}
 }
 
+// Git reflog selectors are literal arguments, rather than shell brace syntax.
+var gitReflogReference = regexp.MustCompile(`@\{(?:[0-9]+|upstream)\}`)
+
 func containsChainingOperators(cmd string) bool {
 	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
 	for _, op := range operators {
@@ -812,4 +832,50 @@ func extractFilePathFromURI(uriStr string) string {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// insideGitWorkTree recognizes normal repositories and linked worktrees without
+// invoking Git. Lookup failures conservatively leave directory diffs untrusted.
+func insideGitWorkTree(cwd string) bool {
+	if cwd == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return false
+		}
+	}
+	dir, err := filepath.Abs(cwd)
+	if err != nil {
+		return false
+	}
+	explicit := false
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE"} {
+		if value := os.Getenv(key); value != "" {
+			if !filepath.IsAbs(value) {
+				value = filepath.Join(dir, value)
+			}
+			info, err := os.Stat(value)
+			if err != nil || !info.IsDir() {
+				return false
+			}
+			explicit = true
+		}
+	}
+	if explicit {
+		return true
+	}
+	for {
+		_, err := os.Stat(filepath.Join(dir, ".git"))
+		if err == nil {
+			return true
+		}
+		if !os.IsNotExist(err) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
