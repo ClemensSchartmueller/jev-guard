@@ -13,6 +13,16 @@ import (
 // SSL_CERT_FILE and SSL_CERT_DIR supplied by the invoking process.
 var trustedSystemRoots = sync.OnceValue(readTrustedSystemRoots)
 
+// clonedTrustedRoots gives each transport its own copy of the cached pool, so
+// a caller that adds a certificate to one transport cannot widen trust for
+// every other client in the process. A nil pool (platform verifier) stays nil.
+func clonedTrustedRoots() *x509.CertPool {
+	if roots := trustedSystemRoots(); roots != nil {
+		return roots.Clone()
+	}
+	return nil
+}
+
 func readTrustedSystemRoots() *x509.CertPool {
 	if runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "windows" {
 		return nil // Use the native platform verifier.

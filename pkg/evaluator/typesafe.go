@@ -89,7 +89,7 @@ func NewTransport() *http.Transport {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
-		TLSClientConfig:       &tls.Config{RootCAs: trustedSystemRoots(), MinVersion: tls.VersionTLS12},
+		TLSClientConfig:       &tls.Config{RootCAs: clonedTrustedRoots(), MinVersion: tls.VersionTLS12},
 	}
 }
 

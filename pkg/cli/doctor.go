@@ -118,7 +118,7 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		}
 		client := r.HTTPClient
 		if client == nil {
-			client = &http.Client{Transport: evaluator.NewTransport()}
+			client = defaultDoctorClient()
 		}
 		c := *client
 		c.Timeout = timeout
@@ -443,4 +443,11 @@ func resolveExecutable(exe string) (string, bool) {
 	}
 	p, err := exec.LookPath(exe)
 	return p, err == nil
+}
+
+// defaultDoctorClient probes the network through the same transport the judge
+// client uses, so proxy and CA settings from the environment are ignored here
+// exactly as they are for real evaluations.
+func defaultDoctorClient() *http.Client {
+	return &http.Client{Transport: evaluator.NewTransport()}
 }
