@@ -39,6 +39,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+          # Deliberately uncached. A tag run can restore caches saved by main's
+          # runs, so a restored GOCACHE would feed objects built elsewhere into
+          # published binaries. A clean cross-compile takes seconds anyway.
           cache: false
 
       - name: Build Binary

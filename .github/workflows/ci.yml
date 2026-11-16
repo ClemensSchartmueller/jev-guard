@@ -36,13 +36,28 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
-          # Deliberately uncached: these artifacts should be built from a clean
-          # toolchain state, not from a GOCACHE restored from another ref's run.
-          # The job is a short cross-compile, so caching would save little.
+          # Not setup-go's cache: see the test job. The build cache is cached
+          # below instead. These binaries are a build check and are never
+          # published; release.yml builds the published ones without a cache.
           cache: false
+
+      - name: Locate Go build cache
+        id: go-env
+        run: echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+
+      # Keyed on the cross-compile target as well as the Go version, since each
+      # matrix entry builds for a different GOOS/GOARCH.
+      - name: Cache Go build cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.go-env.outputs.gocache }}
+          key: go-build-release-${{ matrix.os }}-${{ matrix.arch }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', '**/*.go') }}
+          restore-keys: |
+            go-build-release-${{ matrix.os }}-${{ matrix.arch }}-go${{ steps.setup-go.outputs.go-version }}-
 
       - name: Build release binary
         env:
