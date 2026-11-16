@@ -111,8 +111,13 @@ func (c *Client) Evaluate(ctx context.Context, call *harness.NormalizedToolCall)
 		return nil, fmt.Errorf("%w: status %d (%s)", ErrAPIFailure, resp.StatusCode, string(bodySnippet))
 	}
 
-	return c.parseResponseBody(resp.Body, call.UserIntent != "")
+	// Cap the body so a misbehaving endpoint cannot stream unbounded data into
+	// memory; a truncated body fails to decode and resolves to fail-safe ASK.
+	return c.parseResponseBody(io.LimitReader(resp.Body, maxResponseBytes), call.UserIntent != "")
 }
+
+// maxResponseBytes bounds the judge's HTTP 200 body.
+const maxResponseBytes = 1 << 20
 
 var destructiveCriteria = []string{
 	"Read-only inspection or trivial non-destructive query",
@@ -195,6 +200,9 @@ type apiAnswerEnvelope struct {
 
 // validate requires the fields belonging to the requested primitive, including
 // confidence for scores and choices. Pointers distinguish zero from absent/null.
+// Fields of other primitive types are ignored: the type tag already fixes which
+// field is read, and rejecting them would turn a harmless envelope change into
+// an ASK for every call.
 func (a *apiAnswerEnvelope) validate(kind string, choices map[string]string) bool {
 	inRange := func(v *float64, max float64) bool {
 		return v != nil && *v >= 0 && *v <= max
@@ -204,12 +212,11 @@ func (a *apiAnswerEnvelope) validate(kind string, choices map[string]string) boo
 	}
 	switch kind {
 	case "noul":
-		return inRange(a.Noul, 1) && a.Score == nil && a.Choice == nil &&
-			(a.Confidence == nil || inRange(a.Confidence, 1))
+		return inRange(a.Noul, 1) && (a.Confidence == nil || inRange(a.Confidence, 1))
 	case "score":
-		return inRange(a.Score, float64(len(destructiveCriteria)-1)) && inRange(a.Confidence, 1) && a.Noul == nil && a.Choice == nil
+		return inRange(a.Score, float64(len(destructiveCriteria)-1)) && inRange(a.Confidence, 1)
 	case "choice":
-		if a.Choice == nil || !inRange(a.Confidence, 1) || a.Noul != nil || a.Score != nil {
+		if a.Choice == nil || !inRange(a.Confidence, 1) {
 			return false
 		}
 		_, ok := choices[*a.Choice]

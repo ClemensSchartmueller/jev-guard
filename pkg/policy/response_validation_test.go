@@ -98,6 +98,22 @@ func TestJudgeResponseFailsafe(t *testing.T) {
 			}
 		}
 	}
+	safeBody, _ := json.Marshal(map[string]interface{}{"answers": safeAnswers()})
+	for name, body := range map[string]string{
+		"trailing garbage": string(safeBody) + "xyz",
+		"second object":    string(safeBody) + "{}",
+		// Valid apart from its size, so only the body cap turns it into ASK.
+		"oversized body": `{"pad":"` + strings.Repeat("x", 1<<20) + `","answers":` + string(mustJSON(safeAnswers())) + `}`,
+	} {
+		t.Run(name, func(t *testing.T) { check(t, body, "write the file", harness.DecisionAsk) })
+	}
+	t.Run("ignore fields of other answer types", func(t *testing.T) {
+		a := safeAnswers()
+		a["is_workspace_contained"].(map[string]interface{})["score"] = 0.0
+		a["violation_category"].(map[string]interface{})["noul"] = 0.0
+		body, _ := json.Marshal(map[string]interface{}{"answers": a})
+		check(t, string(body), "write the file", harness.DecisionAllow)
+	})
 	t.Run("safe without intent", func(t *testing.T) {
 		a := safeAnswers()
 		delete(a, "intent_alignment")
@@ -116,6 +132,14 @@ func TestJudgeResponseFailsafe(t *testing.T) {
 	})
 }
 
+func mustJSON(value interface{}) []byte {
+	b, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 func stringify(value interface{}) string {
 	b, _ := json.Marshal(value)
 	return string(b)
@@ -125,7 +149,7 @@ func TestUnknownViolationCategoryAsks(t *testing.T) {
 	result := policy.NewDefaultPolicy().ResolveWithEvidence(&evaluator.JevJudgments{
 		IsWorkspaceContained: 1, ViolationCategory: "unknown",
 	}, policy.BoundaryEvidence{Contained: true, PathVerified: true}, nil)
-	if result.Decision != harness.DecisionAsk {
+	if result.Decision != harness.DecisionAsk || result.Source != "policy_jev_violation" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
