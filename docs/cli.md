@@ -109,6 +109,8 @@ Use `boundary_status` to tell a skipped check from an uncontained target. `bound
 
 A command too large for anti-tampering to read word by word is not denied: `tampering_denied` is `false` and the later stages run as usual, but the final verdict is at least `ASK`. When their verdict was weaker, the final verdict is that `ASK`, with `source: "anti_tampering_limit"` (see [Anti-tampering](security-model.md#anti-tampering)). `--explain` shows it in the Anti-tampering stage as `floor: ask - ...`.
 
+Self-invocation of read/evaluation CLI commands also sets an ASK floor. The fast path, judge (unless offline), and policy still run; a stricter verdict wins. When the floor wins, JSON reports `source: "fastpath_self_invocation"`; `--explain` shows `floor: ask - ...` in the Anti-tampering stage. State-changing self-invocations short-circuit with DENY and the same source.
+
 ### Model field in `--json` output
 
 `typesafe_model` is the model id that TypeSafe reported as having answered. This can be a specific version even when the configured `model` is a floating alias such as `jev-latest`. The field is omitted when TypeSafe was not consulted (the fast path decided, `--offline`, or the request failed) or when the response did not report a model. `--explain` prints it as `model:` in the TypeSafe stage. `jev-guard doctor` shows the *configured* model.

@@ -373,7 +373,7 @@ func TestGuardSelfInvocationGate(t *testing.T) {
 					if trace.Final == nil || trace.Final.Decision != class.decision || trace.Final.Source != fastpath.SourceSelfInvocation {
 						t.Errorf("enabled=%t command=%q: final=%+v; want %s", enabled, command, trace.Final, class.decision)
 					}
-					if trace.FastpathRan || trace.WouldSendToJudge {
+					if class.decision == harness.DecisionDeny && (trace.FastpathRan || trace.WouldSendToJudge) {
 						t.Errorf("%q reached later stages", command)
 					}
 				}
@@ -400,5 +400,20 @@ func TestGuardSelfInvocationGate(t *testing.T) {
 		if !fastpath.IsTamperingDenial(result) {
 			t.Errorf("argv %q: %+v", args, result)
 		}
+	}
+}
+
+func TestSelfInvocationAskFloorPreservesJudgeDeny(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{"is_workspace_contained":{"type":"noul","noul":0.95},"destructive_potential":{"type":"score","score":0.99,"confidence":0.99},"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.99},"intent_alignment":{"type":"choice","choice":"not_requested","confidence":0.99}}}`)
+	}))
+	defer server.Close()
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	cfg := withFastpath(config.DefaultConfig(), false)
+	cfg.APIKey, cfg.BaseURL = "test-key", server.URL
+	trace := traceGateEvaluation(&harness.NormalizedToolCall{ToolName: "Bash", Command: "jev-guard status; rm -rf /", Cwd: t.TempDir()}, cfg, false)
+	if !trace.SemanticRan || trace.Final == nil || trace.Final.Decision != harness.DecisionDeny {
+		t.Fatalf("trace=%+v final=%+v", trace, trace.Final)
 	}
 }

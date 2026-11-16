@@ -220,7 +220,7 @@ func readStandardInput() ([]byte, error) {
 // hook path and `jev-guard eval --explain` share a single implementation.
 type gateTrace struct {
 	Tampering        *harness.EvaluationResult // an anti-tampering DENY, which decided the call
-	TamperingLimit   *harness.EvaluationResult // anti-tampering's ASK floor for a command too large to check
+	TamperingLimit   *harness.EvaluationResult // anti-tampering's ASK floor (limits or read-only self-invocation)
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
 	BoundaryRan      bool
@@ -273,13 +273,13 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
 	tampering := fastpath.CheckAntiTampering(call)
-	if fastpath.IsTamperingDenial(tampering) || (tampering != nil && tampering.Source == fastpath.SourceSelfInvocation) {
+	if fastpath.IsTamperingDenial(tampering) {
 		return &gateTrace{Tampering: tampering, Final: applyAuditMode(tampering, cfg.Mode)}
 	}
 	if tampering == nil {
 		return traceGateStages(call, cfg, offline, cfg.Mode)
 	}
-	// The command was too large for anti-tampering to read. Its ASK is a floor, not a verdict:
+	// An anti-tampering ASK is a floor, not a verdict:
 	// the later stages still run, so a DENY from them stands, and nothing weaker than ASK does.
 	trace := traceGateStages(call, cfg, offline, "")
 	trace.TamperingLimit = tampering

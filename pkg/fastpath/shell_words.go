@@ -614,8 +614,52 @@ func posixRead(s string, track bool, commands ...bool) (words, patterns []string
 		switch {
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
-			b.writeString(commandSeparator)
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+			} else {
+				b.writeString(commandSeparator)
+			}
 			b.flush()
+		case len(commands) > 0 && commands[0] && (c == '<' || c == '>'):
+			// Redirections are syntax, never command arguments. Drop an adjacent fd.
+			b.flush()
+			if len(b.words) > 0 {
+				last := b.words[len(b.words)-1]
+				if last != "" && strings.Trim(last, "0123456789") == "" {
+					b.words = b.words[:len(b.words)-1]
+				}
+			}
+			j := i + 1
+			for j < len(s) && strings.ContainsRune("<>&|", rune(s[j])) {
+				j++
+			}
+			for j < len(s) && isShellSpace(s[j]) && s[j] != '\n' {
+				j++
+			}
+			var quote byte
+			for j < len(s) {
+				if quote != 0 {
+					if s[j] == quote {
+						quote = 0
+					}
+					j++
+					continue
+				}
+				if s[j] == '\'' || s[j] == '"' {
+					quote = s[j]
+					j++
+					continue
+				}
+				if s[j] == '\\' && j+1 < len(s) {
+					j += 2
+					continue
+				}
+				if isShellSpace(s[j]) || strings.ContainsRune(";&|()<>", rune(s[j])) {
+					break
+				}
+				j++
+			}
+			i = j - 1
 		case isShellSpace(c):
 			b.flush()
 		case c == '\\':
