@@ -427,7 +427,9 @@ type ProjectConfigInfo struct {
 	file os.FileInfo
 	// dir identifies the directory handle that file was opened relative to (see
 	// openInspectedConfig), or is nil if that binding could not be established, in which case
-	// canonical records never apply.
+	// canonical records never apply. It is not yet known that the inspected spelling still
+	// names dir after the read: that check can block on an unreachable path, so every lookup
+	// that uses dir repeats it under trustAliasScanTimeout first (verifyInspectedDir).
 	dir os.FileInfo
 }
 
@@ -482,20 +484,25 @@ var (
 	// trustAliasStat and trustAliasLstat serve the diagnostic alias scan only.
 	trustAliasStat  = os.Stat
 	trustAliasLstat = os.Lstat
+	// trustInspectedDirStat checks, after the read, that the inspected directory spelling
+	// still names the directory handle the config was read from (verifyInspectedDir).
+	trustInspectedDirStat = os.Stat
 	// trustPinRecorded is the pinned lookup of a canonical record's path.
 	trustPinRecorded pinFunc = pinRecordedConfig
 	// trustPinStep, when set, runs before each open of a pinned lookup and of the bound
 	// open of the inspected config, and before the inspected spelling is checked again.
 	trustPinStep func(path string)
-	// trustEvalSymlinks resolves the directory that config trust proposes. Only
+	// trustEvalSymlinks resolves the directory that config trust proposes, in the exact
+	// spelling the pinned lookup requires (resolveTrustProposalRoot). Only
 	// ProposeTrustRecord calls it; the hook path never proposes a record.
-	trustEvalSymlinks = filepath.EvalSymlinks
+	trustEvalSymlinks = resolveTrustProposalRoot
 )
 
 // trustLookup holds the filesystem lookups used on registry entry paths, captured once per
 // bounded scan so a goroutine that outlives its deadline never reads the package variables.
 type trustLookup struct {
 	stat, lstat func(string) (os.FileInfo, error)
+	dirStat     func(string) (os.FileInfo, error)
 	pinRecorded pinFunc
 	step        func(string)
 }
@@ -511,6 +518,7 @@ func currentTrustLookup() trustLookup {
 	return trustLookup{
 		stat:        trustAliasStat,
 		lstat:       trustAliasLstat,
+		dirStat:     trustInspectedDirStat,
 		pinRecorded: trustPinRecorded,
 		step:        currentTrustStep(),
 	}
@@ -525,6 +533,23 @@ type trustTarget struct {
 
 func newTrustTarget(info *ProjectConfigInfo) trustTarget {
 	return trustTarget{projectRoot: info.ProjectRoot, configPath: info.ConfigPath, file: info.file, dir: info.dir}
+}
+
+// verifyInspectedDir returns target with dir cleared unless the inspected directory
+// spelling still names the directory handle the config was read from. Inspection reads the
+// config through that handle first; checking the spelling afterwards closes the window in
+// which a link in the spelling pointed at the directory only while it was opened. The stat
+// can block on an unreachable path, so it runs only inside a bounded lookup, and only when
+// a lookup actually needs dir (exact records never do).
+func verifyInspectedDir(target trustTarget, lookup trustLookup) trustTarget {
+	if target.dir == nil {
+		return target
+	}
+	lookup.step(target.projectRoot)
+	if now, err := lookup.dirStat(target.projectRoot); err != nil || !os.SameFile(now, target.dir) {
+		target.dir = nil
+	}
+	return target
 }
 
 // boundedTrustScan finds the registry entries that apply to info (matches) and, with
@@ -551,7 +576,9 @@ func boundedTrustScan(entries []ProjectConfigTrust, info *ProjectConfigInfo, cur
 	result := make(chan scanResult, 1)
 	go func() {
 		var r scanResult
-		r.matches = canonicalTrustRecords(canonical, target, lookup)
+		if len(canonical) > 0 {
+			r.matches = canonicalTrustRecords(canonical, verifyInspectedDir(target, lookup), lookup)
+		}
 		if wantAliases {
 			r.aliases = trustAliasRecords(entries, target, lookup)
 		}
@@ -812,8 +839,9 @@ func inspectProjectConfigFile(path string) (*ProjectConfigInfo, error) {
 
 // readInspectedConfig reads the config at path, a clean absolute path, through
 // openInspectedConfig, so the bytes that are hashed come from a file opened relative to the
-// directory handle whose identity is returned as dir. After reading, the inspected directory
-// spelling must still name that directory, or dir is nil. If the bound open is not possible
+// directory handle whose identity is returned as dir. That the inspected directory spelling
+// still names dir after the read is checked later, under the lookup deadline, by every
+// lookup that uses dir (verifyInspectedDir). If the bound open is not possible
 // (an unsupported platform, or a directory that cannot be opened), the file is read by its
 // path as before and dir is nil. Without dir, canonical records do not apply (fail closed),
 // while records for the exact spelling still do.
@@ -825,11 +853,7 @@ func readInspectedConfig(path string) (data []byte, file, dir os.FileInfo, err e
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		step(root)
-		if now, statErr := os.Stat(root); statErr == nil && os.SameFile(now, dirInfo) {
-			return data, file, dirInfo, nil
-		}
-		return data, file, nil, nil
+		return data, file, dirInfo, nil
 	}
 	data, file, err = readConfigFileWithInfo(path)
 	return data, file, nil, err
@@ -858,7 +882,7 @@ func ProposeTrustRecord(info *ProjectConfigInfo) (record ProjectConfigTrust, not
 	}
 	result := make(chan proposal, 1)
 	go func() {
-		record, err := canonicalTrustProposal(target, digest, lookup, evalSymlinks)
+		record, err := canonicalTrustProposal(verifyInspectedDir(target, lookup), digest, lookup, evalSymlinks)
 		result <- proposal{record, err}
 	}()
 	timer := time.NewTimer(trustAliasScanTimeout)

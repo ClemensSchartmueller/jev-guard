@@ -1,10 +1,12 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -27,7 +29,8 @@ func identityOnlyTrustFixture(t *testing.T) (root, repo string, record ProjectCo
 	return root, linkRepo, record
 }
 
-// blockTrustLookups makes the registry-entry lookups (stat calls and pinned lookups) block
+// blockTrustLookups makes the registry-entry lookups (stat calls and pinned lookups) and the
+// post-read check of the inspected directory spelling block
 // for paths that block reports, until the test ends, and sets the scan deadline.
 func blockTrustLookups(t *testing.T, timeout time.Duration, block func(string) bool) {
 	t.Helper()
@@ -49,12 +52,12 @@ func blockTrustLookups(t *testing.T, timeout time.Duration, block func(string) b
 		}
 	}
 	origStat, origLstat, origTimeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
-	origRecorded := trustPinRecorded
+	origRecorded, origDirStat := trustPinRecorded, trustInspectedDirStat
 	trustAliasStat, trustAliasLstat, trustAliasScanTimeout = slow(os.Stat), slow(os.Lstat), timeout
-	trustPinRecorded = slowPin(pinRecordedConfig)
+	trustPinRecorded, trustInspectedDirStat = slowPin(pinRecordedConfig), slow(os.Stat)
 	t.Cleanup(func() {
 		trustAliasStat, trustAliasLstat, trustAliasScanTimeout = origStat, origLstat, origTimeout
-		trustPinRecorded = origRecorded
+		trustPinRecorded, trustInspectedDirStat = origRecorded, origDirStat
 		close(release)
 	})
 }
@@ -161,5 +164,93 @@ func TestInspectProjectConfig_ReportsIncompleteIdentityMatch(t *testing.T) {
 	}
 	if !r.info.TrustAliasCheckSkipped {
 		t.Fatalf("expected the inspection to report an incomplete check, got %+v", r.info)
+	}
+}
+
+// blockInspectedDirCheck makes only the post-read check of the inspected directory spelling
+// (verifyInspectedDir) block, as if the alias had been redirected to an unreachable network
+// location after the config was read. It returns a counter of those checks.
+func blockInspectedDirCheck(t *testing.T, timeout time.Duration) *atomic.Int32 {
+	t.Helper()
+	release := make(chan struct{})
+	var calls atomic.Int32
+	origDirStat, origTimeout := trustInspectedDirStat, trustAliasScanTimeout
+	trustInspectedDirStat = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-release
+		return nil, errors.New("unreachable")
+	}
+	trustAliasScanTimeout = timeout
+	t.Cleanup(func() {
+		trustInspectedDirStat, trustAliasScanTimeout = origDirStat, origTimeout
+		close(release)
+	})
+	return &calls
+}
+
+// The check that the inspected spelling still names the directory the config was read from
+// runs after the read and can block on an unreachable path. On the hook path it must run
+// under the lookup deadline: a canonical record then does not apply, and the diagnostic
+// names the incomplete check.
+func TestLoadConfig_BlockedInspectedDirCheckFailsClosed(t *testing.T) {
+	root, repo, record := identityOnlyTrustFixture(t)
+	registryPath := filepath.Join(root, "registry", "trusted-project-configs.json")
+	writeTrustRegistryFile(t, registryPath, record)
+
+	calls := blockInspectedDirCheck(t, 50*time.Millisecond)
+	cfg := within(t, 5*time.Second, "LoadConfigWithPaths", func() *Config {
+		return loadTrustedProjectConfig(root, repo, registryPath)
+	})
+	if calls.Load() == 0 {
+		t.Fatal("expected the post-read directory check to run")
+	}
+	if cfg.ProjectConfig != nil || slices.Contains(cfg.SensitiveFiles, ".identity-secret") {
+		t.Fatalf("a blocked directory check must leave the config untrusted, got %+v", cfg.ProjectConfig)
+	}
+	if !slices.ContainsFunc(cfg.Diagnostics, func(d string) bool {
+		return strings.Contains(d, "is not trusted") && strings.Contains(d, "did not finish in time")
+	}) {
+		t.Fatalf("expected a diagnostic naming the incomplete check, got %q", cfg.Diagnostics)
+	}
+}
+
+// Inspection reports the same blocked check as incomplete, and exact records still apply
+// without it: they never need the directory check at all.
+func TestInspectProjectConfig_BlockedInspectedDirCheckKeepsExactRecords(t *testing.T) {
+	root, repo, record := identityOnlyTrustFixture(t)
+	info, err := inspectProjectConfigIsolated(t, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(root, "registry", "trusted-project-configs.json")
+	writeTrustRegistryFile(t, registryPath, record)
+
+	calls := blockInspectedDirCheck(t, 50*time.Millisecond)
+	type result struct {
+		info *ProjectConfigInfo
+		err  error
+	}
+	r := within(t, 5*time.Second, "inspectProjectConfigWithRegistry", func() result {
+		info, err := inspectProjectConfigWithRegistry(repo, registryPath)
+		return result{info, err}
+	})
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.info.Trusted || len(r.info.TrustMatches) != 0 || !r.info.TrustAliasCheckSkipped {
+		t.Fatalf("a blocked directory check must fail closed and be reported, got %+v", r.info)
+	}
+
+	// With an exact record, the hook answers without the check.
+	writeTrustRegistryFile(t, registryPath, record, info.TrustRecord)
+	before := calls.Load()
+	cfg := within(t, 5*time.Second, "LoadConfigWithPaths", func() *Config {
+		return loadTrustedProjectConfig(root, repo, registryPath)
+	})
+	if cfg.ProjectConfig == nil || !slices.Contains(cfg.SensitiveFiles, ".identity-secret") {
+		t.Fatalf("expected the exact record to trust the config, diagnostics=%q", cfg.Diagnostics)
+	}
+	if n := calls.Load() - before; n != 0 {
+		t.Fatalf("an exact record must not wait for the directory check, saw %d checks", n)
 	}
 }

@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -83,7 +85,7 @@ func inspectedBindingViolation(t *testing.T, open inspectedOpener) error {
 		}
 	})
 	if err != nil {
-		return fmt.Errorf("open failed: %w", err)
+		return &inspectedOpenError{err}
 	}
 	defer file.Close()
 	if len(steps) != 2 {
@@ -108,16 +110,32 @@ func inspectedBindingViolation(t *testing.T, open inspectedOpener) error {
 // whose identity is compared with canonical records, even if a link in the inspected
 // spelling is switched between opening the directory and opening the file. This runs the
 // shared openat implementation on Linux and FreeBSD, the same source file macOS compiles
-// (trust_pin_at.go); only the darwin openat binding (trust_pin_darwin.go) and the Windows
-// implementation are compile-checked here.
+// (trust_pin_at.go); the darwin openat binding (trust_pin_darwin.go) and the Windows
+// NtCreateFile binding are compile-checked here.
+//
+// On Windows, an error from the opener is also accepted: it fails closed (the config is then
+// read by path and canonical records do not apply). A file that is returned must still be
+// the one in the directory whose identity is returned.
 func TestInspectedConfigIsBoundToTheOpenedDirectory(t *testing.T) {
 	if !trustPinningSupported {
 		t.Skip("no bound inspected open on this platform; canonical records never apply")
 	}
-	if err := inspectedBindingViolation(t, openInspectedConfig); err != nil {
+	err := inspectedBindingViolation(t, openInspectedConfig)
+	var openErr *inspectedOpenError
+	if runtime.GOOS == "windows" && errors.As(err, &openErr) {
+		t.Logf("the Windows opener rejected the switched alias (fail closed): %v", err)
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 }
+
+// inspectedOpenError reports that the opener itself returned an error.
+type inspectedOpenError struct{ err error }
+
+func (e *inspectedOpenError) Error() string { return "open failed: " + e.err.Error() }
+func (e *inspectedOpenError) Unwrap() error { return e.err }
 
 // The check above must catch a lookup that opens the directory and the file independently,
 // which is what pinInspectedConfig did on macOS before this test was added.
