@@ -9,33 +9,26 @@ import (
 	"time"
 )
 
-// identityOnlyTrustFixture writes a project config and returns a trust record that applies to
-// it only by file identity: its config_path spells the directory with a "." component, so it
-// never matches the inspected spelling exactly but names the same file and directory.
+// identityOnlyTrustFixture writes a project config under root/real/repo, links root/link to
+// root/real, and returns the linked spelling of the repository with a canonical trust record
+// for the real one, which applies to the linked spelling only through a pinned lookup.
 func identityOnlyTrustFixture(t *testing.T) (root, repo string, record ProjectConfigTrust) {
 	t.Helper()
 	clearConfigEnvironment(t)
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, realRepo, linkRepo := symlinkedParentFixture(t, `{"sensitive_files":[".identity-secret"]}`)
+	info, err := inspectProjectConfigIsolated(t, linkRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo = filepath.Join(root, "repo")
-	writeConfig(t, filepath.Join(repo, ".jevguard.json"), `{"sensitive_files":[".identity-secret"]}`)
-	info, err := inspectProjectConfigIsolated(t, repo)
-	if err != nil {
-		t.Fatal(err)
+	record = proposeCanonicalRecord(t, info)
+	if record.ProjectRoot != realRepo || record.ConfigPath == info.ConfigPath {
+		t.Fatalf("fixture record must name the real directory, not the inspected spelling: %+v", record)
 	}
-	sep := string(filepath.Separator)
-	configPath := root + sep + "." + sep + "repo" + sep + ".jevguard.json"
-	record = ProjectConfigTrust{ProjectRoot: filepath.Dir(configPath), ConfigPath: configPath, SHA256: info.SHA256}
-	if record.ConfigPath == info.ConfigPath {
-		t.Fatalf("fixture record must not be an exact match: %+v", record)
-	}
-	return root, repo, record
+	return root, linkRepo, record
 }
 
-// blockTrustLookups makes the registry-entry lookups block for paths that block reports,
-// until the test ends, and sets the scan deadline.
+// blockTrustLookups makes the registry-entry lookups (stat calls and pinned lookups) block
+// for paths that block reports, until the test ends, and sets the scan deadline.
 func blockTrustLookups(t *testing.T, timeout time.Duration, block func(string) bool) {
 	t.Helper()
 	release := make(chan struct{})
@@ -47,10 +40,21 @@ func blockTrustLookups(t *testing.T, timeout time.Duration, block func(string) b
 			return real(path)
 		}
 	}
+	slowPin := func(real pinFunc) pinFunc {
+		return func(projectRoot, name string, step func(string)) (pinnedConfig, error) {
+			if block(projectRoot) {
+				<-release
+			}
+			return real(projectRoot, name, step)
+		}
+	}
 	origStat, origLstat, origTimeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
+	origRecorded, origInspected := trustPinRecorded, trustPinInspected
 	trustAliasStat, trustAliasLstat, trustAliasScanTimeout = slow(os.Stat), slow(os.Lstat), timeout
+	trustPinRecorded, trustPinInspected = slowPin(pinRecordedConfig), slowPin(pinInspectedConfig)
 	t.Cleanup(func() {
 		trustAliasStat, trustAliasLstat, trustAliasScanTimeout = origStat, origLstat, origTimeout
+		trustPinRecorded, trustPinInspected = origRecorded, origInspected
 		close(release)
 	})
 }
@@ -83,7 +87,7 @@ func TestLoadConfig_IdentityTrustMatchFailsClosedWhenLookupBlocks(t *testing.T) 
 		t.Fatalf("expected the identity-matching record to trust the config, diagnostics=%q", cfg.Diagnostics)
 	}
 
-	marker := string(filepath.Separator) + "." + string(filepath.Separator)
+	marker := string(filepath.Separator) + "real" + string(filepath.Separator)
 	blockTrustLookups(t, 50*time.Millisecond, func(path string) bool { return strings.Contains(path, marker) })
 	cfg := within(t, 5*time.Second, "LoadConfigWithPaths", func() *Config {
 		return loadTrustedProjectConfig(root, repo, registryPath)
@@ -110,6 +114,7 @@ func TestLoadConfig_ExactTrustRecordIgnoresBlockedUnrelatedEntry(t *testing.T) {
 		ProjectRoot: filepath.Join(unreachable, "repo"),
 		ConfigPath:  filepath.Join(unreachable, "repo", ".jevguard.json"),
 		SHA256:      info.SHA256,
+		Canonical:   true,
 	}
 	registryPath := filepath.Join(root, "registry", "trusted-project-configs.json")
 	writeTrustRegistryFile(t, registryPath, stale, exact)
@@ -138,7 +143,7 @@ func TestInspectProjectConfig_ReportsIncompleteIdentityMatch(t *testing.T) {
 		t.Fatalf("expected the identity record to match without a timeout, got %+v", info)
 	}
 
-	marker := string(filepath.Separator) + "." + string(filepath.Separator)
+	marker := string(filepath.Separator) + "real" + string(filepath.Separator)
 	blockTrustLookups(t, 50*time.Millisecond, func(path string) bool { return strings.Contains(path, marker) })
 	type result struct {
 		info *ProjectConfigInfo

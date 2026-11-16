@@ -39,6 +39,7 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 		ProjectRoot: resolvedRoot,
 		ConfigPath:  resolvedConfigPath,
 		SHA256:      sha,
+		Canonical:   true,
 	}
 	recordJSON, err := json.MarshalIndent(wantRecord, "", "  ")
 	if err != nil {
@@ -176,7 +177,7 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	for _, want := range []string{
 		"Current digest is not trusted.",
 		"Registry entry for another spelling of this path: " + filepath.Join(linkRepo, ".jevguard.json") + " (the current digest).",
-		"It does not apply to " + filepath.Join(realRepo, ".jevguard.json"),
+		"It does not apply to " + filepath.Join(realRepo, ".jevguard.json") + ` because it has no "canonical": true`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected untrust output to contain %q, got %q", want, output)
@@ -214,9 +215,28 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	}
 }
 
+func TestConfigTrustExplainsExactSpellingFallback(t *testing.T) {
+	info := &config.ProjectConfigInfo{ProjectRoot: "/repo", ConfigPath: "/repo/.jevguard.json", SHA256: strings.Repeat("a", 64)}
+	record := config.ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
+	var out bytes.Buffer
+	printTrustProposal(&out, info, record, "resolving the real directory did not finish in time, so the record is bound to this exact path")
+	got := out.String()
+	for _, want := range []string{
+		"The record applies only to the exact path /repo/.jevguard.json: resolving the real directory did not finish in time",
+		`"sha256": "` + info.SHA256 + "\"\n}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected trust proposal to contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "canonical") {
+		t.Errorf("a fallback record must not be marked canonical, got %q", got)
+	}
+}
+
 func TestTrustAliasHintsNoteSkippedAliasCheck(t *testing.T) {
 	hints := trustAliasHints(&config.ProjectConfigInfo{ConfigPath: "/repo/.jevguard.json", TrustAliasCheckSkipped: true}, true)
-	if len(hints) != 1 || !strings.Contains(hints[0], "Skipped the check for registry entries under another spelling") {
+	if len(hints) != 1 || !strings.Contains(hints[0], "Skipped the registry lookups that check the filesystem") {
 		t.Fatalf("expected a skipped-check note, got %q", hints)
 	}
 }
@@ -242,10 +262,11 @@ func TestConfigUntrustThroughAnotherSpellingNamesTheEffectiveRecord(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.TrustRecord.ConfigPath != filepath.Join(realRepo, ".jevguard.json") {
-		t.Fatalf("expected the record to bind the real directory, got %+v", info.TrustRecord)
+	record, note := proposeTrustRecord(info)
+	if !record.Canonical || record.ConfigPath != filepath.Join(realRepo, ".jevguard.json") {
+		t.Fatalf("expected a canonical record for the real directory, got %+v (%s)", record, note)
 	}
-	writeTrustRegistry(t, info.TrustRecord)
+	writeTrustRegistry(t, record)
 
 	var stdout, stderr bytes.Buffer
 	runner := NewRunner(&stdout, &stderr, func() bool { return false })
@@ -256,7 +277,7 @@ func TestConfigUntrustThroughAnotherSpellingNamesTheEffectiveRecord(t *testing.T
 	for _, want := range []string{
 		"is trusted.",
 		"Registry entries that apply to this config file",
-		"config_path=" + info.TrustRecord.ConfigPath + " sha256=" + info.SHA256,
+		"config_path=" + record.ConfigPath + " sha256=" + info.SHA256 + " canonical=true",
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected untrust output to contain %q, got %q", want, output)

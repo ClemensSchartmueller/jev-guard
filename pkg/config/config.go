@@ -378,38 +378,48 @@ func FindProjectConfigInDirectory(dir string) string {
 }
 
 // ProjectConfigTrust is one approval record in trusted-project-configs.json. It approves the
-// config file's exact SHA-256 digest at one real location. config trust proposes the
-// symlink-resolved spelling; see splitExactTrustRecords and identityTrustRecords for which spellings a record covers.
+// config file's exact SHA-256 digest at one location.
+//
+// A record with Canonical set (what config trust proposes) names the symlink-resolved
+// directory and applies only while that path is reached without any symlink or junction,
+// checked with pinned, handle-based lookups each time it is used. It then applies to any
+// spelling of the same real file and directory. A record without Canonical (written by
+// earlier versions, or proposed where pinning is unavailable) applies only to the exact path
+// it names, without filesystem checks; see trustRecordsForLookup.
 type ProjectConfigTrust struct {
 	ProjectRoot string `json:"project_root"`
 	ConfigPath  string `json:"config_path"`
 	SHA256      string `json:"sha256"`
+	Canonical   bool   `json:"canonical,omitempty"`
 }
 
 // ProjectConfigInfo describes the project config without exposing user secrets.
 type ProjectConfigInfo struct {
-	ProjectRoot    string             `json:"project_root"`
-	ConfigPath     string             `json:"config_path"`
-	SHA256         string             `json:"sha256"`
-	SensitiveFiles []string           `json:"sensitive_files,omitempty"`
-	IgnoredKeys    []string           `json:"ignored_keys,omitempty"`
-	Trusted        bool               `json:"trusted"`
-	TrustIssue     string             `json:"trust_issue,omitempty"`
-	TrustRecord    ProjectConfigTrust `json:"trust_record"`
+	ProjectRoot    string   `json:"project_root"`
+	ConfigPath     string   `json:"config_path"`
+	SHA256         string   `json:"sha256"`
+	SensitiveFiles []string `json:"sensitive_files,omitempty"`
+	IgnoredKeys    []string `json:"ignored_keys,omitempty"`
+	Trusted        bool     `json:"trusted"`
+	TrustIssue     string   `json:"trust_issue,omitempty"`
+	// TrustRecord is the exact-spelling record for the inspected path. Computing it needs no
+	// filesystem access. config trust prints ProposeTrustRecord's result instead.
+	TrustRecord ProjectConfigTrust `json:"trust_record"`
 	// TrustMatches lists the registry records, for any digest, that apply to this config
-	// file: the record for this exact spelling, and records whose path names the same real
-	// file without going through a symlink or junction. Removing all of them revokes trust.
+	// file: records without canonical for this exact spelling, and canonical records whose
+	// path is reached without a symlink or junction and names this real file and directory.
+	// Removing all of them revokes trust.
 	TrustMatches []ProjectConfigTrust `json:"trust_matches,omitempty"`
-	// TrustAliases lists registry records whose config_path is a different spelling of the
-	// same config file that do not apply to this spelling, because their path goes through
-	// a symlink or junction and such records stay bound to their exact spelling. It is
-	// diagnostic only and never grants trust.
+	// TrustAliases lists registry records that name the same config file under another
+	// spelling but do not apply to this one: records without canonical, which are bound to
+	// their exact spelling, and canonical records whose path goes through a symlink or
+	// junction or could not be pinned. It is diagnostic only and never grants trust.
 	TrustAliases []ProjectConfigTrust `json:"trust_aliases,omitempty"`
-	// TrustAliasCheckSkipped reports that the registry scan comparing other entries by file
-	// identity did not finish within trustAliasScanTimeout, for example because an entry is
-	// on an unreachable network mount. Exact-spelling records were still honored, but
-	// TrustMatches and TrustAliases may be incomplete, and a record that would apply only by
-	// file identity was treated as not applying (fail closed).
+	// TrustAliasCheckSkipped reports that the registry lookups that touch the filesystem
+	// (canonical records and the alias scan) did not finish within trustAliasScanTimeout, for
+	// example because an entry is on an unreachable network mount. Exact-spelling records
+	// without canonical were still honored, but TrustMatches and TrustAliases may be
+	// incomplete, and canonical records were treated as not applying (fail closed).
 	TrustAliasCheckSkipped bool `json:"trust_alias_check_skipped,omitempty"`
 
 	// file identifies the config file whose bytes were hashed; trust lookups compare
@@ -456,51 +466,93 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 	return info, nil
 }
 
-// trustAliasScanTimeout bounds every registry lookup that touches another entry's path, in
-// both the hook and the interactive commands. A stat on a stale network mount can block until
-// the OS gives up, and Go cannot cancel it, so callers stop waiting after this deadline.
+// trustAliasScanTimeout bounds every registry lookup that touches the filesystem, in both
+// the hook and the interactive commands, and the trust proposal in config trust. A lookup on
+// a stale network mount can block until the OS gives up, and Go cannot cancel it, so callers
+// stop waiting after this deadline.
 var trustAliasScanTimeout = 500 * time.Millisecond
 
-// trustAliasStat and trustAliasLstat are the filesystem lookups used on registry entry paths
-// (identity matching and the alias scan). Tests replace them to simulate unreachable paths.
+// Filesystem seams for trust lookups. Tests replace them to simulate unreachable paths, to
+// change the filesystem between the steps of a pinned lookup, or to count calls.
 var (
+	// trustAliasStat and trustAliasLstat serve the diagnostic alias scan only.
 	trustAliasStat  = os.Stat
 	trustAliasLstat = os.Lstat
+	// trustPinRecorded and trustPinInspected are the pinned lookups that decide whether a
+	// canonical record applies.
+	trustPinRecorded  pinFunc = pinRecordedConfig
+	trustPinInspected pinFunc = pinInspectedConfig
+	// trustPinStep, when set, runs before each open of a pinned lookup.
+	trustPinStep func(path string)
+	// trustEvalSymlinks resolves the directory that config trust proposes. Only
+	// ProposeTrustRecord calls it; the hook path never proposes a record.
+	trustEvalSymlinks = filepath.EvalSymlinks
 )
 
+// trustLookup holds the filesystem lookups used on registry entry paths, captured once per
+// bounded scan so a goroutine that outlives its deadline never reads the package variables.
+type trustLookup struct {
+	stat, lstat               func(string) (os.FileInfo, error)
+	pinRecorded, pinInspected pinFunc
+	step                      func(string)
+}
+
+func currentTrustLookup() trustLookup {
+	step := trustPinStep
+	if step == nil {
+		step = func(string) {}
+	}
+	return trustLookup{
+		stat:         trustAliasStat,
+		lstat:        trustAliasLstat,
+		pinRecorded:  trustPinRecorded,
+		pinInspected: trustPinInspected,
+		step:         step,
+	}
+}
+
+// trustTarget is the immutable part of a ProjectConfigInfo that trust lookups read. A
+// bounded scan works on a copy so it never reads fields the caller may still be writing.
+type trustTarget struct {
+	projectRoot, configPath string
+	file                    os.FileInfo
+}
+
+func newTrustTarget(info *ProjectConfigInfo) trustTarget {
+	return trustTarget{projectRoot: info.ProjectRoot, configPath: info.ConfigPath, file: info.file}
+}
+
 // boundedTrustScan finds the registry entries that apply to info (matches) and, with
-// wantAliases, the entries for a linked spelling of the same file that do not apply
-// (aliases). Exact-spelling matches need no filesystem access and are always returned. The
-// identity-based checks run in one goroutine under trustAliasScanTimeout; on timeout they are
-// dropped, so only exact matches count (fail closed), aliases are empty, and skipped is true.
-// The goroutine works on copies of its inputs and reports through a buffered channel, so a
-// blocked scan writes no shared state after the caller has returned.
+// wantAliases, the entries for another spelling of the same file that do not apply
+// (aliases). Exact-spelling records without canonical need no filesystem access and are
+// always returned. Canonical records and the alias scan run in one goroutine under
+// trustAliasScanTimeout; on timeout they are dropped, so only the exact records count (fail
+// closed), aliases are empty, and skipped is true. The goroutine works on copies of its
+// inputs and reports through a buffered channel, so a blocked scan writes no shared state
+// after the caller has returned.
 func boundedTrustScan(entries []ProjectConfigTrust, info *ProjectConfigInfo, currentDigestOnly, wantAliases bool) (matches, aliases []ProjectConfigTrust, skipped bool) {
-	exact, rest := splitExactTrustRecords(entries, info, currentDigestOnly)
-	if len(rest) == 0 || (currentDigestOnly && len(exact) > 0) {
-		// Nothing needs the filesystem, or the hook already has its answer.
+	exact, canonical, others := trustRecordsForLookup(entries, info, currentDigestOnly)
+	if currentDigestOnly && len(exact) > 0 {
+		// The hook already has its answer without touching the filesystem.
 		return exact, nil, false
 	}
-	target := trustTarget{
-		projectRoot: info.ProjectRoot,
-		configPath:  info.ConfigPath,
-		file:        info.file,
-		record:      info.TrustRecord,
+	if len(canonical) == 0 && (!wantAliases || !others) {
+		return exact, nil, false
 	}
-	lookup := trustLookup{stat: trustAliasStat, lstat: trustAliasLstat}
-	timeout := trustAliasScanTimeout
+	target := newTrustTarget(info)
+	lookup := currentTrustLookup()
 	entries = append([]ProjectConfigTrust(nil), entries...)
 	type scanResult struct{ matches, aliases []ProjectConfigTrust }
 	result := make(chan scanResult, 1)
 	go func() {
 		var r scanResult
-		r.matches = identityTrustRecords(rest, target, lookup)
+		r.matches = canonicalTrustRecords(canonical, target, lookup)
 		if wantAliases {
-			r.aliases = trustAliasRecords(entries, target.record, lookup)
+			r.aliases = trustAliasRecords(entries, target, lookup)
 		}
 		result <- r
 	}()
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(trustAliasScanTimeout)
 	defer timer.Stop()
 	select {
 	case r := <-result:
@@ -525,38 +577,102 @@ func containsTrustRecord(records []ProjectConfigTrust, record ProjectConfigTrust
 	return false
 }
 
-// trustAliasRecords returns registry records whose config_path differs from the expected
-// record's but names the same file in the same directory: a symlinked or junctioned parent,
-// macOS /var versus /private/var, a case variant, or a Windows 8.3 short name. It only reports
-// these records; the trust decision itself never consults it. Records whose paths no longer
-// resolve, and records that could never be approved as written, are skipped.
-func trustAliasRecords(entries []ProjectConfigTrust, expected ProjectConfigTrust, lookup trustLookup) []ProjectConfigTrust {
-	stat, lstat := lookup.stat, lookup.lstat
-	wantFile, err := stat(expected.ConfigPath)
-	if err != nil {
+// trustRecordsForLookup partitions the registry entries that may approve info's config file.
+// With currentDigestOnly, only entries for info's exact digest are considered.
+//
+// exact holds records without canonical that name the inspected spelling exactly. They apply
+// with no filesystem access, as they always have, so records written by earlier versions keep
+// working. This is a compatibility exception: such a record is bound to a path string, not to
+// a directory, so if a directory on that path is later replaced by a symlink or junction to
+// another directory with byte-identical config, the record still applies there. config trust
+// proposes canonical records, which do not have this weakness.
+//
+// canonical holds every canonical record, including one that names the inspected spelling
+// exactly; canonicalTrustRecords checks them with pinned lookups. others reports whether any
+// other entry exists, which only the diagnostic alias scan looks at.
+func trustRecordsForLookup(entries []ProjectConfigTrust, info *ProjectConfigInfo, currentDigestOnly bool) (exact, canonical []ProjectConfigTrust, others bool) {
+	for _, entry := range entries {
+		if currentDigestOnly && entry.SHA256 != info.SHA256 {
+			continue
+		}
+		switch {
+		case entry.Canonical:
+			canonical = append(canonical, entry)
+		case entry.ProjectRoot == info.ProjectRoot && entry.ConfigPath == info.ConfigPath:
+			exact = append(exact, entry)
+		default:
+			others = true
+		}
+	}
+	return exact, canonical, others
+}
+
+// trustRecordShapeValid reports whether a record names an absolute, clean config path
+// directly inside its project root, under the same file name (ignoring case) as target.
+func trustRecordShapeValid(record ProjectConfigTrust, target trustTarget) bool {
+	return filepath.IsAbs(record.ConfigPath) && filepath.Clean(record.ConfigPath) == record.ConfigPath &&
+		record.ProjectRoot == filepath.Dir(record.ConfigPath) &&
+		strings.EqualFold(filepath.Base(record.ConfigPath), filepath.Base(target.configPath))
+}
+
+// canonicalTrustRecords returns the canonical records that apply to target. A canonical
+// record applies when a pinned lookup of its path (trustPinRecorded) reaches, without any
+// symlink or junction, a directory and a regular config file whose handle identities are the
+// file that was hashed and the directory that a pinned lookup of the inspected spelling
+// (trustPinInspected) found that file in. Comparing directories too excludes hard links from
+// other directories. Every identity comes from an open handle, so swapping a path component
+// for a link between steps cannot move trust to another directory; see the platform files
+// for what each operating system pins. The lookups can block on unreachable paths, so
+// callers run this through a bounded goroutine.
+func canonicalTrustRecords(entries []ProjectConfigTrust, target trustTarget, lookup trustLookup) []ProjectConfigTrust {
+	if len(entries) == 0 || target.file == nil {
 		return nil
 	}
-	wantDir, err := stat(expected.ProjectRoot)
+	inspected, err := lookup.pinInspected(target.projectRoot, filepath.Base(target.configPath), lookup.step)
+	if err != nil || !os.SameFile(inspected.file, target.file) {
+		return nil
+	}
+	var matches []ProjectConfigTrust
+	for _, entry := range entries {
+		if !entry.Canonical || !trustRecordShapeValid(entry, target) {
+			continue
+		}
+		pinned, err := lookup.pinRecorded(entry.ProjectRoot, filepath.Base(entry.ConfigPath), lookup.step)
+		if err == nil && os.SameFile(pinned.file, target.file) && os.SameFile(pinned.dir, inspected.dir) {
+			matches = append(matches, entry)
+		}
+	}
+	return matches
+}
+
+// trustAliasRecords returns registry records that name the same file in the same directory as
+// target under another spelling, or that are canonical, judged by plain stat calls. It is
+// diagnostic only: boundedTrustScan drops the records that apply, and the rest are reported
+// so a user can see why an approval appears to have no effect. Records whose paths no longer
+// resolve, and records that could never be approved as written, are skipped.
+func trustAliasRecords(entries []ProjectConfigTrust, target trustTarget, lookup trustLookup) []ProjectConfigTrust {
+	if target.file == nil {
+		return nil
+	}
+	wantDir, err := lookup.stat(target.projectRoot)
 	if err != nil {
 		return nil
 	}
 	var aliases []ProjectConfigTrust
 	for _, entry := range entries {
-		if entry.ConfigPath == expected.ConfigPath || !filepath.IsAbs(entry.ConfigPath) ||
-			entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
-			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(expected.ConfigPath)) {
+		if (!entry.Canonical && entry.ConfigPath == target.configPath) || !trustRecordShapeValid(entry, target) {
 			continue
 		}
 		// The approved path must name a regular file, as config trust requires; comparing
 		// both the file and its directory excludes hard links from other directories.
-		if linkInfo, err := lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
+		if linkInfo, err := lookup.lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
 			continue
 		}
-		file, err := stat(entry.ConfigPath)
-		if err != nil || !os.SameFile(file, wantFile) {
+		file, err := lookup.stat(entry.ConfigPath)
+		if err != nil || !os.SameFile(file, target.file) {
 			continue
 		}
-		dir, err := stat(entry.ProjectRoot)
+		dir, err := lookup.stat(entry.ProjectRoot)
 		if err != nil || !os.SameFile(dir, wantDir) {
 			continue
 		}
@@ -682,129 +798,65 @@ func inspectProjectConfigFile(path string) (*ProjectConfigInfo, error) {
 		IgnoredKeys:    ignored,
 		file:           file,
 	}
-	info.TrustRecord = proposedTrustRecord(info)
+	info.TrustRecord = ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
 	return info, nil
 }
 
-// proposedTrustRecord returns the record config trust proposes: the config file under its
-// symlink-resolved directory, so the approval names one real location and keeps applying
-// when the project is reached through another spelling. If the directory cannot be resolved,
-// or the resolved spelling does not name the file that was hashed, it falls back to the
-// inspected spelling, which then only matches exactly.
-func proposedTrustRecord(info *ProjectConfigInfo) ProjectConfigTrust {
-	record := ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
-	resolvedRoot, err := filepath.EvalSymlinks(info.ProjectRoot)
-	if err != nil || !filepath.IsAbs(resolvedRoot) {
-		return record
-	}
-	resolved := ProjectConfigTrust{
-		ProjectRoot: filepath.Clean(resolvedRoot),
-		ConfigPath:  filepath.Join(resolvedRoot, filepath.Base(info.ConfigPath)),
-		SHA256:      info.SHA256,
-	}
-	target := trustTarget{projectRoot: info.ProjectRoot, configPath: info.ConfigPath, file: info.file}
-	if !trustRecordNamesFile(resolved, target, trustLookup{stat: os.Stat, lstat: os.Lstat}) {
-		return record
-	}
-	return resolved
-}
-
-// trustLookup holds the filesystem lookups used on registry entry paths, so a bounded scan
-// can capture them once and tests can substitute slow ones.
-type trustLookup struct {
-	stat, lstat func(string) (os.FileInfo, error)
-}
-
-// trustTarget is the immutable part of a ProjectConfigInfo that identity matching reads. A
-// bounded scan works on a copy so it never reads fields the caller may still be writing.
-type trustTarget struct {
-	projectRoot, configPath string
-	file                    os.FileInfo
-	record                  ProjectConfigTrust
-}
-
-// splitExactTrustRecords partitions the registry entries that may approve info's config file.
-// With currentDigestOnly, only entries for info's exact digest are considered. exact holds the
-// entries that name the inspected spelling exactly (the behavior before trust followed file
-// identity, so existing records keep working for the spelling they were approved under); it
-// needs no filesystem access. rest holds the other entries, which identityTrustRecords checks.
-func splitExactTrustRecords(entries []ProjectConfigTrust, info *ProjectConfigInfo, currentDigestOnly bool) (exact, rest []ProjectConfigTrust) {
-	for _, entry := range entries {
-		if currentDigestOnly && entry.SHA256 != info.SHA256 {
-			continue
-		}
-		if entry.ProjectRoot == info.ProjectRoot && entry.ConfigPath == info.ConfigPath {
-			exact = append(exact, entry)
-		} else {
-			rest = append(rest, entry)
-		}
-	}
-	return exact, rest
-}
-
-// identityTrustRecords returns the entries that apply to target by file identity: the entry's
-// path contains no symlink or junction, and its config file and project root are the same file
-// and directory (os.SameFile) as the inspected ones at lookup time.
+// ProposeTrustRecord returns the record config trust prints for info. It proposes a
+// canonical record for the symlink-resolved directory, but only after verifying it with the
+// same pinned lookup that the hook uses, so the proposal applies when added. If that is not
+// possible (no pinning on this platform, a path that cannot be resolved or pinned, or a
+// lookup that does not finish within trustAliasScanTimeout), it falls back to a record for
+// the exact inspected spelling without canonical, and note says why.
 //
-// This lets a record for /private/var/x/repo trust /var/x/repo, a symlinked checkout, a case
-// variant, or a Windows 8.3 short name. Because the recorded path must not go through a link,
-// swapping a symlink after approval cannot move trust to another directory; a record that does
-// go through a link only applies to its exact spelling. The lookups can block on unreachable
-// paths, so callers run this through boundedTrustScan.
-func identityTrustRecords(entries []ProjectConfigTrust, target trustTarget, lookup trustLookup) []ProjectConfigTrust {
-	var matches []ProjectConfigTrust
-	for _, entry := range entries {
-		if !filepath.IsAbs(entry.ConfigPath) || entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
-			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(target.configPath)) {
-			continue
-		}
-		if pathHasLinkComponent(entry.ProjectRoot, lookup) {
-			continue
-		}
-		if trustRecordNamesFile(entry, target, lookup) {
-			matches = append(matches, entry)
-		}
+// Only config trust calls this. The hook path never proposes a record.
+func ProposeTrustRecord(info *ProjectConfigInfo) (record ProjectConfigTrust, note string) {
+	exact := ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
+	if !trustPinningSupported {
+		return exact, "this platform cannot check trust records without following links, so the record is bound to this exact path"
 	}
-	return matches
+	target := newTrustTarget(info)
+	digest := info.SHA256
+	lookup := currentTrustLookup()
+	evalSymlinks := trustEvalSymlinks
+	type proposal struct {
+		record ProjectConfigTrust
+		err    error
+	}
+	result := make(chan proposal, 1)
+	go func() {
+		record, err := canonicalTrustProposal(target, digest, lookup, evalSymlinks)
+		result <- proposal{record, err}
+	}()
+	timer := time.NewTimer(trustAliasScanTimeout)
+	defer timer.Stop()
+	select {
+	case p := <-result:
+		if p.err != nil {
+			return exact, p.err.Error() + ", so the record is bound to this exact path"
+		}
+		return p.record, ""
+	case <-timer.C:
+		return exact, "resolving the real directory did not finish in time, so the record is bound to this exact path"
+	}
 }
 
-// trustRecordNamesFile reports whether record names, as a regular non-symlink file, the same
-// file that target hashed, inside the same directory as target's project root. Comparing the
-// directory too excludes hard links from other directories.
-func trustRecordNamesFile(record ProjectConfigTrust, target trustTarget, lookup trustLookup) bool {
-	if target.file == nil {
-		return false
+func canonicalTrustProposal(target trustTarget, digest string, lookup trustLookup, evalSymlinks func(string) (string, error)) (ProjectConfigTrust, error) {
+	resolved, err := evalSymlinks(target.projectRoot)
+	if err != nil || !filepath.IsAbs(resolved) {
+		return ProjectConfigTrust{}, fmt.Errorf("the real directory of %s could not be resolved", target.projectRoot)
 	}
-	if linkInfo, err := lookup.lstat(record.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
-		return false
+	resolved = filepath.Clean(resolved)
+	record := ProjectConfigTrust{
+		ProjectRoot: resolved,
+		ConfigPath:  filepath.Join(resolved, filepath.Base(target.configPath)),
+		SHA256:      digest,
+		Canonical:   true,
 	}
-	file, err := lookup.stat(record.ConfigPath)
-	if err != nil || !os.SameFile(file, target.file) {
-		return false
+	if len(canonicalTrustRecords([]ProjectConfigTrust{record}, target, lookup)) != 1 {
+		return ProjectConfigTrust{}, fmt.Errorf("the real directory %s could not be verified without following a link", resolved)
 	}
-	dir, err := lookup.stat(record.ProjectRoot)
-	if err != nil {
-		return false
-	}
-	wantDir, err := lookup.stat(target.projectRoot)
-	return err == nil && os.SameFile(dir, wantDir)
-}
-
-// pathHasLinkComponent reports whether dir or any of its ancestors is a symlink, a Windows
-// junction or other reparse point (reported as irregular since Go 1.23), or cannot be
-// inspected. It fails closed: any doubt counts as a link.
-func pathHasLinkComponent(dir string, lookup trustLookup) bool {
-	for {
-		info, err := lookup.lstat(dir)
-		if err != nil || !info.IsDir() || info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-			return true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		dir = parent
-	}
+	return record, nil
 }
 
 func describeTrustRegistryError(err error) string {

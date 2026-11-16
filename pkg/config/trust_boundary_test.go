@@ -323,11 +323,12 @@ func TestLoadConfigWithPaths_TrustThroughSymlinkedParentBindsTheRealDirectory(t 
 	if info.ConfigPath != filepath.Join(linkRepo, ".jevguard.json") {
 		t.Fatalf("expected inspection to report the inspected spelling, got %q", info.ConfigPath)
 	}
-	if info.TrustRecord.ProjectRoot != realRepo || info.TrustRecord.ConfigPath != filepath.Join(realRepo, ".jevguard.json") {
-		t.Fatalf("expected the proposal to bind the symlink-resolved path %q, got %+v", realRepo, info.TrustRecord)
+	proposal := proposeCanonicalRecord(t, info)
+	if proposal.ProjectRoot != realRepo || proposal.ConfigPath != filepath.Join(realRepo, ".jevguard.json") {
+		t.Fatalf("expected the proposal to bind the symlink-resolved path %q, got %+v", realRepo, proposal)
 	}
 	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
-	writeTrustRegistryFile(t, registryPath, info.TrustRecord)
+	writeTrustRegistryFile(t, registryPath, proposal)
 
 	// Approval through the symlinked spelling is honored for both spellings.
 	assertProjectTrust(t, linkRepo, registryPath, ".symlinked-secret", true)
@@ -351,7 +352,7 @@ func TestLoadConfigWithPaths_SwappedSymlinkDoesNotInheritTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
-	writeTrustRegistryFile(t, registryPath, approved.TrustRecord)
+	writeTrustRegistryFile(t, registryPath, proposeCanonicalRecord(t, approved))
 	assertProjectTrust(t, linkRepo, registryPath, ".swapped-secret", true)
 
 	// Repoint the symlink at another directory holding byte-identical config. The digest
@@ -397,12 +398,27 @@ func TestLoadConfigWithPaths_LegacyRecordForSymlinkedSpellingKeepsExactBinding(t
 		t.Fatalf("expected the legacy record as an alias only, got matches=%+v aliases=%+v", info.TrustMatches, info.TrustAliases)
 	}
 
-	// A legacy record that names the real directory directly also covers other spellings.
-	writeTrustRegistryFile(t, registryPath, ProjectConfigTrust{
+	// A legacy record that names the real directory is also bound to its exact spelling;
+	// only a canonical record, which config trust now proposes, covers other spellings.
+	legacyReal := ProjectConfigTrust{
 		ProjectRoot: realRepo,
 		ConfigPath:  filepath.Join(realRepo, ".jevguard.json"),
 		SHA256:      approved.SHA256,
-	})
+	}
+	writeTrustRegistryFile(t, registryPath, legacyReal)
+	assertProjectTrust(t, linkRepo, registryPath, ".legacy-secret", false)
+	assertProjectTrust(t, realRepo, registryPath, ".legacy-secret", true)
+	info, err = inspectProjectConfigWithRegistry(linkRepo, registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.TrustMatches) != 0 || len(info.TrustAliases) != 1 || info.TrustAliases[0] != legacyReal {
+		t.Fatalf("expected the legacy real-directory record as an alias only, got matches=%+v aliases=%+v", info.TrustMatches, info.TrustAliases)
+	}
+
+	canonical := legacyReal
+	canonical.Canonical = true
+	writeTrustRegistryFile(t, registryPath, canonical)
 	assertProjectTrust(t, linkRepo, registryPath, ".legacy-secret", true)
 	assertProjectTrust(t, realRepo, registryPath, ".legacy-secret", true)
 }
@@ -414,7 +430,8 @@ func TestInspectProjectConfig_TrustMatchesNameEveryRecordToRevoke(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	older := approved.TrustRecord
+	current := proposeCanonicalRecord(t, approved)
+	older := current
 	older.SHA256 = strings.Repeat("0", 64)
 	unrelated := ProjectConfigTrust{
 		ProjectRoot: filepath.Join(root, "unrelated"),
@@ -422,7 +439,7 @@ func TestInspectProjectConfig_TrustMatchesNameEveryRecordToRevoke(t *testing.T) 
 		SHA256:      approved.SHA256,
 	}
 	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
-	writeTrustRegistryFile(t, registryPath, unrelated, approved.TrustRecord, older)
+	writeTrustRegistryFile(t, registryPath, unrelated, current, older)
 
 	// Untrust through the symlinked spelling names the records for the real directory,
 	// including older digests, so removing them revokes trust under every spelling.
@@ -430,7 +447,7 @@ func TestInspectProjectConfig_TrustMatchesNameEveryRecordToRevoke(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.Trusted || len(info.TrustMatches) != 2 || info.TrustMatches[0] != approved.TrustRecord || info.TrustMatches[1] != older {
+	if !info.Trusted || len(info.TrustMatches) != 2 || info.TrustMatches[0] != current || info.TrustMatches[1] != older {
 		t.Fatalf("expected both records for the real directory, got trusted=%t matches=%+v", info.Trusted, info.TrustMatches)
 	}
 	writeTrustRegistryFile(t, registryPath, unrelated)
@@ -458,7 +475,7 @@ func TestLoadConfigWithPaths_HardLinkInAnotherDirectoryDoesNotShareTrust(t *test
 		t.Fatal(err)
 	}
 	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
-	writeTrustRegistryFile(t, registryPath, approved.TrustRecord)
+	writeTrustRegistryFile(t, registryPath, proposeCanonicalRecord(t, approved))
 	assertProjectTrust(t, repo, registryPath, ".hardlink-secret", true)
 	assertProjectTrust(t, other, registryPath, ".hardlink-secret", false)
 }
@@ -680,6 +697,17 @@ func TestLoadConfigWithPaths_RejectsSymlinkProjectConfig(t *testing.T) {
 func inspectProjectConfigIsolated(t *testing.T, path string) (*ProjectConfigInfo, error) {
 	t.Helper()
 	return inspectProjectConfigWithRegistry(path, filepath.Join(t.TempDir(), "trusted-project-configs.json"))
+}
+
+// proposeCanonicalRecord returns what config trust proposes for info and fails unless it is
+// a canonical record.
+func proposeCanonicalRecord(t *testing.T, info *ProjectConfigInfo) ProjectConfigTrust {
+	t.Helper()
+	record, note := ProposeTrustRecord(info)
+	if !record.Canonical || note != "" {
+		t.Fatalf("expected a canonical trust proposal, got %+v (%s)", record, note)
+	}
+	return record
 }
 
 func writeConfig(t *testing.T, path, contents string) {

@@ -345,6 +345,30 @@ func TestDoctorNamesTrustRecordForAnotherSpellingOfThePath(t *testing.T) {
 	if strings.Contains(out, "another spelling") {
 		t.Errorf("doctor must not report an alias for the exact approved path, got %q", out)
 	}
+	// The exact approved path is trusted through a record without canonical, so doctor
+	// suggests the stronger binding.
+	if !strings.Contains(out, doctorWarn+" Project config: Trusted through a registry entry without \"canonical\": true") {
+		t.Errorf("expected doctor to note the legacy exact-path record, got %q", out)
+	}
+}
+
+func TestDoctorDoesNotFlagCanonicalTrustRecord(t *testing.T) {
+	realRepo, linkRepo := symlinkedProjectAlias(t)
+	info, err := inspectProjectConfig(linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, note := proposeTrustRecord(info)
+	if !record.Canonical {
+		t.Fatalf("expected a canonical proposal, got %+v (%s)", record, note)
+	}
+	writeTrustRegistry(t, record)
+	for _, dir := range []string{realRepo, linkRepo} {
+		out, _ := doctorRun(t, &Runner{}, doctorConfig(t), dir, t.TempDir(), true)
+		if strings.Contains(out, "without \"canonical\"") || strings.Contains(out, "another spelling") {
+			t.Errorf("doctor in %s must not flag a canonical record, got %q", dir, out)
+		}
+	}
 }
 
 func TestShellQuoteArgKeepsSuggestedPathOneArgument(t *testing.T) {

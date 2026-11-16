@@ -104,7 +104,7 @@ Set `mode` to `audit` only when you intend blocking results to become `ALLOW`.
 
 1. **User config** (`~/.jevguard/.jevguard.json`) owns policy and endpoint settings.
 2. **Credential environment variable** (`TYPESAFE_API_KEY`) supplies the API key and, when set, overrides `api_key` in the user config.
-3. **Trusted project config** can add `sensitive_files`, only when its canonical path and exact SHA-256 digest match the user trust registry.
+3. **Trusted project config** can add `sensitive_files`, only when its path and exact SHA-256 digest match a record in the user trust registry (see [Project configs and trust](#project-configs-and-trust)).
 4. **Built-in defaults** include `mode: "enforcing"`, `timeout_ms: 1500`, `fastpath_enabled: true`, `context_awareness_enabled: true`, `intent_ttl_minutes: 30`, `antigravity_transcript_intent: false`, standard sensitive file patterns, and read commands.
 
 ## Project configs and trust
@@ -121,7 +121,7 @@ jev-guard config trust .jevguard.json
 jev-guard config untrust .jevguard.json
 ```
 
-`config trust` prints the file's canonical path, root, SHA-256 digest, supported settings, and the registry entry to review. It does not grant trust. To approve it, add that entry to `~/.jevguard/trusted-project-configs.json` yourself:
+`config trust` prints the file's path, root, SHA-256 digest, supported settings, and the registry entry to review. It does not grant trust. To approve it, add that entry to `~/.jevguard/trusted-project-configs.json` yourself:
 
 ```json
 {
@@ -130,7 +130,8 @@ jev-guard config untrust .jevguard.json
     {
       "project_root": "/path/to/project",
       "config_path": "/path/to/project/.jevguard.json",
-      "sha256": "digest-printed-by-config-trust"
+      "sha256": "digest-printed-by-config-trust",
+      "canonical": true
     }
   ]
 }
@@ -138,16 +139,29 @@ jev-guard config untrust .jevguard.json
 
 The digest is checked on every invocation, so editing or replacing the config requires a new reviewed record. `config untrust` identifies the registry entry to remove.
 
-`config trust` proposes the config under its symlink-resolved directory, so one record names one real directory. A record applies to a config file when:
+**Canonical records.** `config trust` proposes the config under its symlink-resolved directory and marks the record `"canonical": true`. A canonical record applies to a config file only when, at the time of the check:
 
-- its `config_path` is exactly the spelling being checked, or
-- no component of its path is a symlink or Windows junction, and its `config_path` and `project_root` are the same file and directory (by file identity) as the one being checked.
+- its `config_path` and `project_root` are reached from the filesystem root without any symlink or Windows junction (or other reparse point), and
+- the file and directory reached that way are the same file and directory (by file identity) as the config being checked, and the digest matches.
 
-So a project approved once is trusted whether it is reached through a symlinked checkout, macOS `/var` or `/private/var`, a case variant, or a Windows 8.3 short name such as `RUNNER~1`. The digest is still checked, and file identity is checked on every lookup, so repointing a symlink at another directory, even one with byte-identical config, does not move trust there. A hard link to the config in another directory is not trusted either.
+This holds whether or not the checked spelling is the recorded one. So a project approved once is trusted whether it is reached through a symlinked checkout, macOS `/var` or `/private/var`, a case variant, or a Windows 8.3 short name such as `RUNNER~1`. If a directory on the recorded path is later replaced by a symlink or junction, even one pointing at byte-identical config, the record stops applying everywhere. A hard link to the config in another directory is not trusted either. Renaming a real directory into the recorded path is not detected: the record names a location, and whatever real directory is at that location with the approved digest is trusted.
 
-Records written by earlier versions name the path as it was given. They keep working for that exact spelling. If such a path goes through a symlink or junction, the record is not extended to other spellings, because the link could have pointed elsewhere when it was approved; run `config trust` again and replace it with the record it prints. `config untrust` lists every registry entry that applies to the config file under any spelling and digest; remove all of them to revoke trust. `config untrust` and `doctor` also name entries for a linked spelling that do not apply to the current one.
+`config trust` checks its proposal the same way before printing it. If it cannot, it prints a record without `canonical` for the exact path given, and says why. This happens on platforms without pinned lookups (see below), when the real directory cannot be resolved or opened, for example on a Windows `subst` or mapped drive, or when the check does not finish in time.
 
-Comparing file identity means looking up the paths in other registry entries. If an entry is unreachable, for example on a stale network mount, the lookup gives up after a short deadline. Entries that name the checked spelling exactly are still honored, but entries that would only apply by file identity are treated as not applying, so the config stays untrusted rather than blocking the hook. `config untrust` and `doctor` say when the check was incomplete.
+**Pinned lookups.** The checks open each path step by step and compare identities read from the open handles, so a path swapped for a link between two steps cannot redirect a check:
+
+- **Linux and FreeBSD** open the recorded path one component at a time from `/`, each relative to the handle of its parent with `O_NOFOLLOW`, then open the config file relative to the final directory handle.
+- **macOS** opens the recorded directory and the config file with `O_NOFOLLOW_ANY`, which fails if any component of the path is a symlink. The Go 1.23 standard library has no `openat` on macOS, so the file is resolved by its full path instead of relative to the directory handle; each lookup is still link-free on its own.
+- **Windows** opens the directory and file with `FILE_FLAG_OPEN_REPARSE_POINT`, rejects reparse points, and requires the final path that Windows reports for each open handle to equal the recorded path, ignoring case. A junction, symlink, `subst` drive, mapped drive, or 8.3 short name in a canonical record therefore never matches. The directory is held open without delete sharing while the file is opened, so it cannot be renamed in between.
+- **Other platforms** cannot pin lookups. Canonical records never apply there, and `config trust` proposes records without `canonical`.
+
+**Records without `canonical`.** Records written by earlier versions, and records that `config trust` proposes when it cannot verify a canonical one, apply only to the exact path they name, with no filesystem checks. This keeps existing approvals working instantly, but it is a compatibility exception with a weaker binding: such a record is bound to a path string, not to a directory. If a directory on that path is renamed away and replaced by a symlink or junction to another directory with byte-identical config, the record still applies there, as it did in earlier versions. Run `config trust` again and replace such records with the canonical record it prints; `doctor` notes when a config is trusted only through a record without `canonical`. A record without `canonical` never extends to other spellings, even if its path contains no link.
+
+A registry with canonical records stays readable by earlier versions, which ignore the `canonical` field and honor the record for its exact path only.
+
+**Revoking.** `config untrust` lists every registry entry that applies to the config file under any spelling and digest, marking canonical ones; remove all of them to revoke trust. `config untrust` and `doctor` also name entries for another spelling of the same file that do not apply to the current one, and why.
+
+**Unreachable entries.** Canonical records and the check for other spellings open the paths in registry entries. If an entry is unreachable, for example on a stale network mount, the lookup gives up after a short deadline. Records without `canonical` that name the checked path exactly are still honored, but canonical records are treated as not applying, so the config stays untrusted rather than blocking the hook. `config untrust` and `doctor` say when the check was incomplete. The hook path never resolves symlinks to build a proposal; only `config trust` does, under the same deadline.
 
 **Why the CLI does not write approvals.** A confirmation typed into an agent-controlled shell would not prove that you reviewed it. This design assumes the agent process cannot write the user config or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as you, approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
 
