@@ -716,10 +716,23 @@ func TestInspectProjectConfig_BoundsTrustAliasScanOnUnreachableEntry(t *testing.
 			}
 			writeConfig(t, registryPath, string(registryBytes))
 
-			start := time.Now()
-			info, err := inspectProjectConfigWithRegistry(repo, registryPath)
-			if elapsed := time.Since(start); elapsed > 5*time.Second {
-				t.Fatalf("alias scan was not bounded: took %s", elapsed)
+			// Inspect asynchronously so a regression fails at the watchdog instead of
+			// hanging until the blocked lookups are released in cleanup.
+			type result struct {
+				info *ProjectConfigInfo
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				info, err := inspectProjectConfigWithRegistry(repo, registryPath)
+				done <- result{info, err}
+			}()
+			var info *ProjectConfigInfo
+			select {
+			case r := <-done:
+				info, err = r.info, r.err
+			case <-time.After(5 * time.Second):
+				t.Fatal("alias scan was not bounded: inspection did not return within 5s")
 			}
 			if err != nil {
 				t.Fatal(err)

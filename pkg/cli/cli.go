@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -234,7 +235,7 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because trust is bound to the exact path; remove that entry to revoke it",
 			alias.ConfigPath, digest, info.ConfigPath)
 		if suggestTrust {
-			hint += fmt.Sprintf(", or run `jev-guard config trust %s` and add the printed record to trust this spelling", info.ConfigPath)
+			hint += fmt.Sprintf(", or run `jev-guard config trust %s` and add the printed record to trust this spelling", shellQuoteArg(info.ConfigPath, runtime.GOOS))
 		}
 		hints = append(hints, hint+".")
 	}
@@ -242,6 +243,19 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 		hints = append(hints, "Skipped the check for registry entries under another spelling of this path because it did not finish in time; a registry entry may point to an unreachable location.")
 	}
 	return hints
+}
+
+// shellQuoteArg quotes a path so a suggested command can be pasted into a shell as a
+// single argument. Plain paths stay unquoted. Windows paths use double quotes (cmd and
+// PowerShell); other systems use POSIX single quotes.
+func shellQuoteArg(arg, goos string) string {
+	if arg != "" && !strings.ContainsAny(arg, " \t\n'\"`$&|;<>()*?[]{}!#%^") {
+		return arg
+	}
+	if goos == "windows" {
+		return `"` + strings.ReplaceAll(arg, `"`, `\"`) + `"`
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
 func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {

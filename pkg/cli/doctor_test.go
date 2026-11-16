@@ -334,7 +334,7 @@ func TestDoctorNamesTrustRecordForAnotherSpellingOfThePath(t *testing.T) {
 	out, _ := doctorRun(t, &Runner{}, doctorConfig(t), realRepo, t.TempDir(), true)
 	for _, want := range []string{
 		doctorWarn + " Project config: Registry entry for another spelling of this path: " + filepath.Join(linkRepo, ".jevguard.json"),
-		"run `jev-guard config trust " + filepath.Join(realRepo, ".jevguard.json") + "`",
+		"run `jev-guard config trust " + shellQuoteArg(filepath.Join(realRepo, ".jevguard.json"), runtime.GOOS) + "`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected doctor output to contain %q, got %q", want, out)
@@ -344,5 +344,19 @@ func TestDoctorNamesTrustRecordForAnotherSpellingOfThePath(t *testing.T) {
 	out, _ = doctorRun(t, &Runner{}, doctorConfig(t), linkRepo, t.TempDir(), true)
 	if strings.Contains(out, "another spelling") {
 		t.Errorf("doctor must not report an alias for the exact approved path, got %q", out)
+	}
+}
+
+func TestShellQuoteArgKeepsSuggestedPathOneArgument(t *testing.T) {
+	for _, tc := range []struct{ arg, goos, want string }{
+		{"/home/u/repo/.jevguard.json", "linux", "/home/u/repo/.jevguard.json"},
+		{`C:\Users\RUNNER~1\repo\.jevguard.json`, "windows", `C:\Users\RUNNER~1\repo\.jevguard.json`},
+		{"/Users/Jane Doe/repo/.jevguard.json", "darwin", "'/Users/Jane Doe/repo/.jevguard.json'"},
+		{"/tmp/it's/.jevguard.json", "linux", `'/tmp/it'\''s/.jevguard.json'`},
+		{`C:\Users\Jane Doe\repo\.jevguard.json`, "windows", `"C:\Users\Jane Doe\repo\.jevguard.json"`},
+	} {
+		if got := shellQuoteArg(tc.arg, tc.goos); got != tc.want {
+			t.Errorf("shellQuoteArg(%q, %q) = %s, want %s", tc.arg, tc.goos, got, tc.want)
+		}
 	}
 }
