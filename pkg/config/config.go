@@ -399,6 +399,10 @@ type ProjectConfigInfo struct {
 	// 8.3 short name). It is diagnostic only: an alias record never grants trust to
 	// TrustRecord's path, because trust stays bound to the exact approved path.
 	TrustAliases []ProjectConfigTrust `json:"trust_aliases,omitempty"`
+	// TrustAliasCheckSkipped reports that the alias scan did not finish within
+	// trustAliasScanTimeout, for example because a registry entry is on an unreachable
+	// network mount, so TrustAliases may be incomplete. It is diagnostic only.
+	TrustAliasCheckSkipped bool `json:"trust_alias_check_skipped,omitempty"`
 }
 
 type projectTrustRegistry struct {
@@ -431,8 +435,40 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 		info.TrustIssue = describeTrustRegistryError(err)
 		return info, nil
 	}
-	info.TrustAliases = trustAliasRecords(trustRegistryPath, info.TrustRecord)
+	info.TrustAliases, info.TrustAliasCheckSkipped = boundedTrustAliasRecords(trustRegistryPath, info.TrustRecord)
 	return info, nil
+}
+
+// trustAliasScanTimeout bounds the diagnostic alias scan. A stat on a stale network mount
+// can block until the OS gives up, and Go cannot cancel it, so interactive commands stop
+// waiting after this deadline instead.
+var trustAliasScanTimeout = 500 * time.Millisecond
+
+// trustAliasStat and trustAliasLstat are the filesystem lookups used by the alias scan.
+// Tests replace them to simulate unreachable paths.
+var (
+	trustAliasStat  = os.Stat
+	trustAliasLstat = os.Lstat
+)
+
+// boundedTrustAliasRecords runs trustAliasRecords with trustAliasScanTimeout. On timeout it
+// returns no aliases and skipped=true; the scan keeps running in the background and its
+// result is discarded. The goroutine only touches its own locals and a buffered channel, so
+// it writes no shared state after the caller has returned.
+func boundedTrustAliasRecords(registryPath string, expected ProjectConfigTrust) (aliases []ProjectConfigTrust, skipped bool) {
+	stat, lstat, timeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
+	result := make(chan []ProjectConfigTrust, 1)
+	go func() {
+		result <- trustAliasRecords(registryPath, expected, stat, lstat)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case aliases := <-result:
+		return aliases, false
+	case <-timer.C:
+		return nil, true
+	}
 }
 
 // trustAliasRecords returns registry records whose config_path differs from the expected
@@ -440,16 +476,16 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 // macOS /var versus /private/var, a case variant, or a Windows 8.3 short name. It only reports
 // these records; the trust decision itself never consults it. Records whose paths no longer
 // resolve, and records that could never be approved as written, are skipped.
-func trustAliasRecords(registryPath string, expected ProjectConfigTrust) []ProjectConfigTrust {
+func trustAliasRecords(registryPath string, expected ProjectConfigTrust, stat, lstat func(string) (os.FileInfo, error)) []ProjectConfigTrust {
 	registry, err := readTrustRegistry(registryPath)
 	if err != nil {
 		return nil
 	}
-	wantFile, err := os.Stat(expected.ConfigPath)
+	wantFile, err := stat(expected.ConfigPath)
 	if err != nil {
 		return nil
 	}
-	wantDir, err := os.Stat(expected.ProjectRoot)
+	wantDir, err := stat(expected.ProjectRoot)
 	if err != nil {
 		return nil
 	}
@@ -462,14 +498,14 @@ func trustAliasRecords(registryPath string, expected ProjectConfigTrust) []Proje
 		}
 		// The approved path must name a regular file, as config trust requires; comparing
 		// both the file and its directory excludes hard links from other directories.
-		if linkInfo, err := os.Lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
+		if linkInfo, err := lstat(entry.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
 			continue
 		}
-		file, err := os.Stat(entry.ConfigPath)
+		file, err := stat(entry.ConfigPath)
 		if err != nil || !os.SameFile(file, wantFile) {
 			continue
 		}
-		dir, err := os.Stat(entry.ProjectRoot)
+		dir, err := stat(entry.ProjectRoot)
 		if err != nil || !os.SameFile(dir, wantDir) {
 			continue
 		}

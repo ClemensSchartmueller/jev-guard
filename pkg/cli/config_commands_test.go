@@ -205,3 +205,10 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 		t.Errorf("expected untrust of a trusted path to also name the alias record, got %q", out)
 	}
 }
+
+func TestTrustAliasHintsNoteSkippedAliasCheck(t *testing.T) {
+	hints := trustAliasHints(&config.ProjectConfigInfo{ConfigPath: "/repo/.jevguard.json", TrustAliasCheckSkipped: true}, true)
+	if len(hints) != 1 || !strings.Contains(hints[0], "Skipped the check for registry entries under another spelling") {
+		t.Fatalf("expected a skipped-check note, got %q", hints)
+	}
+}

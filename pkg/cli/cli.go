@@ -238,6 +238,9 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 		}
 		hints = append(hints, hint+".")
 	}
+	if info.TrustAliasCheckSkipped {
+		hints = append(hints, "Skipped the check for registry entries under another spelling of this path because it did not finish in time; a registry entry may point to an unreachable location.")
+	}
 	return hints
 }
 
