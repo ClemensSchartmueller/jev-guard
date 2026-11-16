@@ -15,3 +15,10 @@ func tryLockFile(*os.File) (bool, error) {
 }
 
 func unlockFile(*os.File) error { return nil }
+
+func touchLockFile(*os.File) error { return nil }
+
+func removeLockedFile(path string, f *os.File) {
+	_ = os.Remove(path)
+	_ = f.Close()
+}

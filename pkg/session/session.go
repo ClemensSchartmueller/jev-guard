@@ -325,15 +325,24 @@ func readSessionFile(path string) (*SessionState, bool, error) {
 		return nil, false, fmt.Errorf("failed to read session file: %w", err)
 	}
 
-	var state SessionState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, false, fmt.Errorf("failed to parse session file: %w", err)
+	state, err := decodeSession(data)
+	if err != nil {
+		return nil, false, err
 	}
 
 	if !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > sessionTTL {
 		return nil, true, nil
 	}
-	return &state, false, nil
+	return state, false, nil
+}
+
+// decodeSession parses the content of a session file.
+func decodeSession(data []byte) (*SessionState, error) {
+	var state SessionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("failed to parse session file: %w", err)
+	}
+	return &state, nil
 }
 
 // ErrTaintNotRecorded marks a MarkTainted failure in which neither the taint
@@ -443,8 +452,8 @@ func ClearSession(sessionID string) error {
 }
 
 // removeSessionFile deletes the session file and the listed markers; markers
-// published after the listing survive (see marker.go). The lock file is kept
-// (see withSessionLock).
+// published after the listing survive (see marker.go). The lock file is kept;
+// only the sweep removes lock files (see sweep.go).
 func removeSessionFile(sessionID string, markers *sessionMarkers) error {
 	err := os.Remove(SessionFilePath(sessionID))
 	if err != nil && !os.IsNotExist(err) {

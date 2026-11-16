@@ -1,32 +1,16 @@
-# v0.4.0 — Intent and Tool-Output Hardening
+# Next release (draft)
 
-Changes since v0.3.0.
-
-## Highlights
-
-- Report the model that actually answered a semantic evaluation in `eval --json` (`typesafe_model`) and audit logs (`model`), making changes behind `jev-latest` visible. This completes the model-recording portion of #63; broader calibration and benchmarking remain separate work.
-- Track untrusted Claude Code web and MCP tool results with deterministic session taint. The default `taint_mode` is `audit`, which records where enforcement would ask without changing verdicts. Set `enforce` in user configuration to hold risky actions for confirmation. Tool output is never sent to a classifier. This implements the deterministic portion of #60; optional content classification remains deferred.
-- Harden user-intent authorization: require confidence, retain workspace boundaries and unconditional anti-tampering checks, and cap intent-authorized credential access at confirmation when a call can send data off the machine.
-- Support Codex prompt-intent lifecycle hooks and opt-in Antigravity transcript intent, with transcript protection across agents when enabled.
+Changes since v0.4.0. Assign a version and confirm CI before publishing. The v0.4.0 notes are in the [GitHub release](https://github.com/ClemensSchartmueller/jev-guard/releases/tag/v0.4.0).
 
 ## Fixes
 
-- Close anti-tampering bypasses through shell escapes, wildcard globs, bare command words, and disabled fast-path checks. Bound shell scanning and filesystem resolution work, returning confirmation when a check cannot finish safely.
-- Add an offline policy regression corpus and name the existing policy thresholds without changing their values.
-
-- Use one network-egress heuristic for credential intent authorization and session taint (#76). Preserve URL-target and package-publish coverage while extending taint checks to the shared detector's cloud clients and inline network markers. Tainted sessions can therefore report or prompt on more network-capable calls.
+- Clean up files left by abandoned sessions (#75). Per-session lock files (`<session>.json.lock`) previously accumulated, one per session ID, and expired taint and abort markers stayed on disk until a clear. `end-turn` and `status` now run a cleanup sweep at most once an hour. It deletes markers and session files older than 48 hours, longer than the largest configurable intent TTL, and lock files that have been idle for 7 days once their session file and markers are gone. Every removal happens under the session's lock, taken without waiting, so active sessions are skipped. Lock acquisition now verifies that the lock path still names the locked file and retries otherwise, so removing a lock file never lets two hooks lock the same session at once. Deletion errors, such as Windows refusing to delete an open file, are ignored and never fail a hook.
 - `config untrust` and `doctor` name trust registry records approved under another spelling of the same project path, such as a symlinked checkout, macOS `/private/var`, or a Windows short name (#77). Trust remains bound to the exact approved path. The check stops after a short deadline when a registry entry is unreachable, such as on a stale network mount, and says it was skipped (#88).
-- Check resolved filesystem locations before granting local path proof (#74). Aliases into execution-sensitive directories such as `.claude/`, including new files beneath an aliased directory, retain the model's containment check. Ordinary files in Claude Code worktrees remain eligible for local proof.
 
 ## Upgrade notes
 
-- Run `jev-guard init` for each configured harness and scope to install the updated hooks. Manual hook configurations should follow [the hook examples](hooks.md).
-- Existing users receive audit-only taint behavior by default. Review [tool-output taint](security-model.md#tool-output-taint) before enabling enforcement; its hook coverage is currently Claude Code only.
-- Antigravity transcript intent remains off by default. Enabling it explicitly trusts agents with shell access not to forge the transcript.
-- Provider-independent adapters in open PR #43 are outside this release.
+- No action is needed. The first `end-turn` or `status` after upgrading removes files of sessions abandoned before the upgrade, a bounded amount per sweep (at most 1024 directory entries, 1024 filesystem calls on 128 sessions, and about 150 ms, checked before each filesystem call), resuming where the previous sweep stopped.
 
 ## Remaining issue scope
 
-- #63: model recording has landed; benchmark expansion and model comparisons remain.
-- #60: deterministic taint has landed; content classification requires separate evidence and privacy decisions.
-- #75 and #77: session-file cleanup and trust-path canonicalization remain deferred because they require concurrency and migration design respectively.
+- #77: trust-path canonicalization remains deferred because it requires migration design.
