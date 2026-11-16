@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -41,4 +42,23 @@ func unlockFile(f *os.File) error {
 		return err
 	}
 	return nil
+}
+
+// touchLockFile sets the lock file's modification time to now, through the
+// open handle (opening the path again would hit a sharing violation).
+func touchLockFile(f *os.File) error {
+	ft := syscall.NsecToFiletime(time.Now().UnixNano())
+	return syscall.SetFileTime(syscall.Handle(f.Fd()), nil, nil, &ft)
+}
+
+// removeLockedFile releases the lock and then deletes the lock file. Windows
+// cannot delete a file while any handle is open on it, because Go opens files
+// without FILE_SHARE_DELETE, so the deletion has to come after the close. A
+// process that opens the file in between holds a handle, and the deletion
+// then fails, which is ignored: the file stays and that process keeps a valid
+// lock. verifyLock also covers a file pending deletion. Errors are ignored.
+func removeLockedFile(path string, f *os.File) {
+	_ = unlockFile(f)
+	_ = f.Close()
+	_ = os.Remove(path)
 }

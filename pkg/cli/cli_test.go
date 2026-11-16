@@ -760,3 +760,32 @@ func TestEndTurnCodexPayloadPrintsNothing(t *testing.T) {
 		t.Fatalf("session should be cleared: %+v", state)
 	}
 }
+
+func TestEndTurn_SweepsAbandonedSessionFiles(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	_ = session.SaveSession(&session.SessionState{SessionID: "cur", Prompt: "p"})
+	dir := session.GetSessionsDir()
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	abandoned := []string{"gone.json.lock", "gone.json.taint.1", "gone.json.abort.2"}
+	for _, name := range abandoned {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner, _, _ := newStdinRunner("")
+	if _, code := runner.EvaluateArgs([]string{"end-turn", "--session", "cur"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, name := range abandoned {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s not swept: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cur.json.lock")); err != nil {
+		t.Errorf("active session lock removed: %v", err)
+	}
+}
