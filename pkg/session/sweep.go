@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -327,10 +328,27 @@ func sweepFrom(start int) (visited, next int) {
 	// first entry belongs to a finished session or to none.
 	ordered := make([]*sweepCandidate, len(window))
 	for base := range candidates {
-		c := &sweepCandidate{base: base, markers: markers[base], first: firsts[base]}
-		if len(c.markers) > sweepMaxMarkers {
-			// The rest stay for the next pass over this part of the listing.
-			c.markers = c.markers[:sweepMaxMarkers]
+		c := &sweepCandidate{base: base, first: firsts[base]}
+		// Only markers already seen to be stale count against the cap, so
+		// fresh ones listed first cannot hide stale ones behind them. Any
+		// marker left out keeps the lock file.
+		all := markers[base]
+		for _, p := range all {
+			if age, ok := ages[filepath.Base(p)]; ok && age > staleAge {
+				c.markers = append(c.markers, p)
+			}
+		}
+		c.truncated = len(c.markers) < len(all)
+		if n := len(c.markers); n > sweepMaxMarkers {
+			// Start at a random stale marker, so markers whose removal keeps
+			// failing cannot hide the rest forever. The rest stay for a
+			// later run.
+			off := rand.IntN(n)
+			rotated := make([]string, 0, sweepMaxMarkers)
+			for i := 0; i < sweepMaxMarkers; i++ {
+				rotated = append(rotated, c.markers[(off+i)%n])
+			}
+			c.markers = rotated
 			c.truncated = true
 		}
 		ordered[c.first] = c

@@ -505,6 +505,34 @@ func TestSweep_MarkersCappedPerSession(t *testing.T) {
 	}
 }
 
+// Fresh markers listed before a stale one do not use up the per-session
+// marker cap, so the stale marker is removed; the lock file stays while the
+// fresh markers exist.
+func TestSweep_FreshMarkersDoNotHideStaleOnes(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldMarkers := sweepMaxMarkers
+	sweepMaxMarkers = 2
+	t.Cleanup(func() { sweepMaxMarkers = oldMarkers })
+	lock := sessionLockPath("mixed")
+	writeAged(t, lock, nil, ancient)
+	var fresh []string
+	for i := 0; i < 3; i++ {
+		p := SessionFilePath("mixed") + ".taint.m" + strconv.Itoa(i)
+		writeAged(t, p, nil, hourAgo)
+		fresh = append(fresh, p)
+	}
+	stale := SessionFilePath("mixed") + ".taint.m9"
+	writeAged(t, stale, nil, ancient)
+	sortedListing(t)
+	Sweep()
+	if exists(stale) {
+		t.Fatal("stale marker behind fresh ones was not removed")
+	}
+	if countExisting(fresh) != len(fresh) || !exists(lock) {
+		t.Fatal("fresh markers or the lock file of a session with fresh markers were removed")
+	}
+}
+
 // Concurrent hooks never sweep at the same time: one holding the
 // coordination lock makes the others skip, even with a stale stamp.
 func TestMaybeSweep_ConcurrentRunsOnce(t *testing.T) {
