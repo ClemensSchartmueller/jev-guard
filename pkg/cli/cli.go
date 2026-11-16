@@ -57,6 +57,8 @@ var (
 	trustRegistryPath = config.TrustRegistryPath
 	// inspectProjectConfig hashes a project config and checks it against the trust registry.
 	inspectProjectConfig = config.InspectProjectConfig
+	// proposeTrustRecord computes the record config trust prints; no other command needs it.
+	proposeTrustRecord = config.ProposeTrustRecord
 	// userHomeDir locates agent hook settings for init and doctor.
 	userHomeDir = os.UserHomeDir
 )
@@ -196,7 +198,8 @@ func (r *Runner) handleConfigTrust(args []string) (Action, int) {
 		fmt.Fprintf(r.Stderr, "Error: %v\n", err)
 		return ActionHandled, 1
 	}
-	printTrustProposal(r.Stdout, info)
+	record, note := proposeTrustRecord(info)
+	printTrustProposal(r.Stdout, info, record, note)
 	return ActionHandled, 0
 }
 
@@ -208,9 +211,15 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	}
 	fmt.Fprintf(r.Stdout, "Project config: %s\nProject root: %s\n", info.ConfigPath, info.ProjectRoot)
 	if info.Trusted {
-		fmt.Fprintf(r.Stdout, "Current digest %s is trusted. Remove the registry entry with this project_root and config_path to revoke it.\n", info.SHA256)
+		fmt.Fprintf(r.Stdout, "Current digest %s is trusted. Remove the registry entries listed below to revoke it.\n", info.SHA256)
 	} else {
 		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
+	}
+	if len(info.TrustMatches) > 0 {
+		fmt.Fprintln(r.Stdout, "Registry entries that apply to this config file (remove each one to revoke trust for every spelling of this path):")
+		for _, match := range info.TrustMatches {
+			fmt.Fprintf(r.Stdout, "  project_root=%s config_path=%s sha256=%s%s\n", match.ProjectRoot, match.ConfigPath, match.SHA256, canonicalSuffix(match))
+		}
 	}
 	for _, hint := range trustAliasHints(info, false) {
 		fmt.Fprintln(r.Stdout, hint)
@@ -220,10 +229,12 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	return ActionHandled, 0
 }
 
-// trustAliasHints describes registry records approved under a different spelling of the
-// same config file. Those records never apply to this path; the hint only explains why an
-// approval appears to have no effect and which record to remove. With suggestTrust, it also
-// says how to approve this spelling; config untrust omits that because the user is revoking.
+// trustAliasHints describes registry records that name the same config file under another
+// spelling but do not apply to this one: a record without "canonical": true is bound to its
+// exact spelling, and a canonical record applies only while its path is reached without a
+// symlink or junction. The hint only explains why an approval appears to have no effect and
+// which record to remove. With suggestTrust, it also says how to approve this config; config
+// untrust omits that because the user is revoking.
 func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string {
 	hints := make([]string, 0, len(info.TrustAliases))
 	for _, alias := range info.TrustAliases {
@@ -231,18 +242,43 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 		if alias.SHA256 == info.SHA256 {
 			digest = "the current digest"
 		}
+		reason := "it has no \"canonical\": true, so it applies only to that exact spelling"
+		if alias.Canonical {
+			reason = "its path goes through a symlink or junction, or could not be checked without following one"
+		}
 		hint := fmt.Sprintf(
-			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because trust is bound to the exact path; remove that entry to revoke it",
-			alias.ConfigPath, digest, info.ConfigPath)
+			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because %s; remove that entry to revoke it",
+			alias.ConfigPath, digest, info.ConfigPath, reason)
 		if suggestTrust {
-			hint += fmt.Sprintf(", or run `jev-guard config trust %s` and add the printed record to trust this spelling", shellQuoteArg(info.ConfigPath, runtime.GOOS))
+			hint += fmt.Sprintf(", or run `jev-guard config trust %s` and add the printed record", shellQuoteArg(info.ConfigPath, runtime.GOOS))
 		}
 		hints = append(hints, hint+".")
 	}
 	if info.TrustAliasCheckSkipped {
-		hints = append(hints, "Skipped the check for registry entries under another spelling of this path because it did not finish in time; a registry entry may point to an unreachable location.")
+		hints = append(hints, "Skipped the registry lookups that check the filesystem because they did not finish in time; a registry entry may point to an unreachable location. Only entries without \"canonical\": true for this exact path were honored, so the entries listed here may be incomplete.")
 	}
 	return hints
+}
+
+// legacyTrustHint notes that the current digest is trusted only through records without
+// "canonical": true, which stay bound to a path string rather than a directory.
+func legacyTrustHint(info *config.ProjectConfigInfo) string {
+	if !info.Trusted {
+		return ""
+	}
+	for _, match := range info.TrustMatches {
+		if match.SHA256 == info.SHA256 && match.Canonical {
+			return ""
+		}
+	}
+	return fmt.Sprintf("Trusted through a registry entry without \"canonical\": true, which is bound to the exact path %s and is not checked for symlinks or junctions. Run `jev-guard config trust %s` and replace it with the printed record for the stronger binding.", info.ConfigPath, shellQuoteArg(info.ConfigPath, runtime.GOOS))
+}
+
+func canonicalSuffix(record config.ProjectConfigTrust) string {
+	if record.Canonical {
+		return " canonical=true"
+	}
+	return ""
 }
 
 // shellQuoteArg quotes a path so a suggested command can be pasted into a shell as a
@@ -271,8 +307,8 @@ func inspectCLIProjectConfig(args []string) (*config.ProjectConfigInfo, error) {
 	return inspectProjectConfig(path)
 }
 
-func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
-	entry, _ := json.MarshalIndent(info.TrustRecord, "", "  ")
+func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo, record config.ProjectConfigTrust, note string) {
+	entry, _ := json.MarshalIndent(record, "", "  ")
 	fmt.Fprintf(out, "Project config: %s\n", info.ConfigPath)
 	fmt.Fprintf(out, "Project root: %s\nSHA-256: %s\n", info.ProjectRoot, info.SHA256)
 	fmt.Fprintf(out, "Additive sensitive_files: %v\n", info.SensitiveFiles)
@@ -281,6 +317,11 @@ func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
 	}
 	if len(info.IgnoredKeys) > 0 {
 		fmt.Fprintf(out, "Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
+	}
+	if record.Canonical {
+		fmt.Fprintf(out, "The record names the real directory %s and is marked \"canonical\": true. It applies to every spelling of that directory, but only while %s is reached without any symlink or junction.\n", record.ProjectRoot, record.ConfigPath)
+	} else if note != "" {
+		fmt.Fprintf(out, "The record applies only to the exact path %s: %s.\n", record.ConfigPath, note)
 	}
 	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", trustRegistryPath(), entry)
 	fmt.Fprintln(out, "The registry is user-owned. Review the file and add this record manually; this command does not grant trust.")

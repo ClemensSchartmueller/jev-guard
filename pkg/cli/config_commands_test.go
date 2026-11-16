@@ -20,10 +20,15 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	if err := os.WriteFile(configPath, original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Trust records bind the absolute, lexically cleaned path, not a symlink-resolved one.
-	// On macOS t.TempDir() is under /var (a symlink to /private/var) and on Windows it may be
-	// an 8.3 short name, so EvalSymlinks would produce a path the product never proposes.
-	resolvedRoot, err := filepath.Abs(projectDir)
+	// The command reports the inspected spelling, but the proposed record binds the
+	// symlink-resolved directory. On macOS t.TempDir() is under /var (a symlink to
+	// /private/var) and on Windows it may be an 8.3 short name.
+	inspectedRoot, err := filepath.Abs(projectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspectedConfigPath := filepath.Join(inspectedRoot, ".jevguard.json")
+	resolvedRoot, err := filepath.EvalSymlinks(inspectedRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +39,7 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 		ProjectRoot: resolvedRoot,
 		ConfigPath:  resolvedConfigPath,
 		SHA256:      sha,
+		Canonical:   true,
 	}
 	recordJSON, err := json.MarshalIndent(wantRecord, "", "  ")
 	if err != nil {
@@ -55,8 +61,8 @@ func TestConfigTrustPrintsDigestBoundManualApprovalWithoutEditingProject(t *test
 	output := runConfig("trust", configPath)
 	for _, want := range []string{
 		"SHA-256: " + sha,
-		"Project root: " + resolvedRoot,
-		"Project config: " + resolvedConfigPath,
+		"Project root: " + inspectedRoot,
+		"Project config: " + inspectedConfigPath,
 		"Additive sensitive_files: [.secret]",
 		"Ignored project keys: base_url, mode",
 		"Existing trust registry status: trust registry does not exist",
@@ -154,7 +160,9 @@ func symlinkedProjectAlias(t *testing.T) (realRepo, linkRepo string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTrustRegistry(t, info.TrustRecord)
+	// Approve the symlinked spelling as config trust proposed it before it resolved
+	// symlinks. Such a record stays bound to that exact spelling.
+	writeTrustRegistry(t, config.ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256})
 	return realRepo, linkRepo
 }
 
@@ -169,7 +177,7 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	for _, want := range []string{
 		"Current digest is not trusted.",
 		"Registry entry for another spelling of this path: " + filepath.Join(linkRepo, ".jevguard.json") + " (the current digest).",
-		"It does not apply to " + filepath.Join(realRepo, ".jevguard.json"),
+		"It does not apply to " + filepath.Join(realRepo, ".jevguard.json") + ` because it has no "canonical": true`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected untrust output to contain %q, got %q", want, output)
@@ -196,7 +204,8 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTrustRegistry(t, linkInfo.TrustRecord, realInfo.TrustRecord)
+	legacyLink := config.ProjectConfigTrust{ProjectRoot: linkInfo.ProjectRoot, ConfigPath: linkInfo.ConfigPath, SHA256: linkInfo.SHA256}
+	writeTrustRegistry(t, legacyLink, realInfo.TrustRecord)
 	stdout.Reset()
 	if _, code := runner.EvaluateArgs([]string{"config", "untrust", realRepo}); code != 0 {
 		t.Fatalf("config untrust failed: stderr=%q", stderr.String())
@@ -206,9 +215,83 @@ func TestConfigUntrustNamesRecordForAnotherSpellingOfThePath(t *testing.T) {
 	}
 }
 
+func TestConfigTrustExplainsExactSpellingFallback(t *testing.T) {
+	info := &config.ProjectConfigInfo{ProjectRoot: "/repo", ConfigPath: "/repo/.jevguard.json", SHA256: strings.Repeat("a", 64)}
+	record := config.ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
+	var out bytes.Buffer
+	printTrustProposal(&out, info, record, "resolving the real directory did not finish in time, so the record is bound to this exact path")
+	got := out.String()
+	for _, want := range []string{
+		"The record applies only to the exact path /repo/.jevguard.json: resolving the real directory did not finish in time",
+		`"sha256": "` + info.SHA256 + "\"\n}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected trust proposal to contain %q, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "canonical") {
+		t.Errorf("a fallback record must not be marked canonical, got %q", got)
+	}
+}
+
 func TestTrustAliasHintsNoteSkippedAliasCheck(t *testing.T) {
 	hints := trustAliasHints(&config.ProjectConfigInfo{ConfigPath: "/repo/.jevguard.json", TrustAliasCheckSkipped: true}, true)
-	if len(hints) != 1 || !strings.Contains(hints[0], "Skipped the check for registry entries under another spelling") {
+	if len(hints) != 1 || !strings.Contains(hints[0], "Skipped the registry lookups that check the filesystem") {
 		t.Fatalf("expected a skipped-check note, got %q", hints)
+	}
+}
+
+func TestConfigUntrustThroughAnotherSpellingNamesTheEffectiveRecord(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRepo := filepath.Join(root, "real", "repo")
+	linkRepo := filepath.Join(root, "link", "repo")
+	if err := os.MkdirAll(realRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(realRepo), filepath.Dir(linkRepo)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realRepo, ".jevguard.json"), []byte(`{"sensitive_files":[".x"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// config trust through the symlink proposes the real directory.
+	info, err := inspectProjectConfig(linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, note := proposeTrustRecord(info)
+	if !record.Canonical || record.ConfigPath != filepath.Join(realRepo, ".jevguard.json") {
+		t.Fatalf("expected a canonical record for the real directory, got %+v (%s)", record, note)
+	}
+	writeTrustRegistry(t, record)
+
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr, func() bool { return false })
+	if _, code := runner.EvaluateArgs([]string{"config", "untrust", linkRepo}); code != 0 {
+		t.Fatalf("config untrust failed: stderr=%q", stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"is trusted.",
+		"Registry entries that apply to this config file",
+		"config_path=" + record.ConfigPath + " sha256=" + info.SHA256 + " canonical=true",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("expected untrust output to contain %q, got %q", want, output)
+		}
+	}
+	if strings.Contains(output, "another spelling") {
+		t.Errorf("an effective record must not be described as an alias that does not apply, got %q", output)
+	}
+
+	// Removing the named record revokes trust for both spellings.
+	writeTrustRegistry(t)
+	for _, dir := range []string{linkRepo, realRepo} {
+		if info, err := inspectProjectConfig(dir); err != nil || info.Trusted {
+			t.Errorf("expected %s to be untrusted after removing the record, got info=%+v err=%v", dir, info, err)
+		}
 	}
 }
