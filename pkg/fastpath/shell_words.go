@@ -197,6 +197,24 @@ var interpreterFlags = map[string][]string{
 // spent, the payloads found so far are returned.
 func (r *shellReader) commandPayloads(words []string) []string {
 	var payloads []string
+	// Index the next shell command flag once, rather than searching every suffix.
+	next := make([]int, len(words)+1)
+	argument := make([]int, len(words)+1)
+	argument[len(words)] = len(words)
+	next[len(words)] = len(words)
+	for i := len(words) - 1; i >= 0; i-- {
+		if !r.spend(len(words[i]), 1) {
+			return payloads
+		}
+		argument[i] = argument[i+1]
+		if !strings.HasPrefix(words[i], "-") {
+			argument[i] = i
+		}
+		next[i] = next[i+1]
+		if words[i] == "--command" || strings.HasPrefix(words[i], "--command=") || shortCommandFlag(words[i]) || oversizedShortFlag(words[i]) {
+			next[i] = i
+		}
+	}
 	// suffix[i] is the length of strings.Join(words[i:], " "), so sizes are known before joining.
 	var suffix []int
 	joinedSize := func(i int) int {
@@ -227,27 +245,29 @@ func (r *shellReader) commandPayloads(words []string) []string {
 				return payloads
 			}
 		case shellPrograms[name]:
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
-			for j, flag := range rest {
-				if value, ok := strings.CutPrefix(flag, "--command="); ok {
-					if !add(len(value), func() string { return value }) {
-						return payloads
-					}
-					break
+			j := next[i+1]
+			if j < len(words) {
+				if oversizedShortFlag(words[j]) {
+					r.exhausted = true
+					return payloads
 				}
-				isFlag := flag == "--command" || commandFlag.MatchString(flag)
-				if isFlag && j+1 < len(rest) {
-					value := rest[j+1]
-					if !add(len(value), func() string { return value }) {
-						return payloads
+				value, attached := strings.CutPrefix(words[j], "--command=")
+				if !attached {
+					j = argument[j+1]
+					if j == len(words) {
+						continue
 					}
-					break
+					value = words[j]
+				}
+				if !add(len(value), func() string { return value }) {
+					return payloads
 				}
 			}
 		case name == "cmd":
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
 			for j, flag := range rest {
@@ -261,7 +281,7 @@ func (r *shellReader) commandPayloads(words []string) []string {
 				}
 			}
 		case name == "powershell" || name == "pwsh":
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
 			// PowerShell runs its arguments as a command, with or without -Command.
@@ -282,7 +302,7 @@ func (r *shellReader) commandPayloads(words []string) []string {
 			if len(flags) == 0 {
 				continue
 			}
-			if !r.spend(0, len(flags)*len(rest)) {
+			if !r.spend(len(flags)*joinedSize(i+1), len(flags)*len(rest)) {
 				return payloads
 			}
 			for _, known := range flags {
@@ -430,7 +450,7 @@ func readHeredocs(s string, capture func(string, bool) string, readers ...*shell
 			}
 			out.WriteString(s[i : i+end])
 			i += end - 1
-		case strings.HasPrefix(s[i:], "$(("):
+		case strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "(("):
 			end := strings.Index(s[i:], "))")
 			if end < 0 {
 				out.WriteString(s[i:])
@@ -550,9 +570,6 @@ func readHeredocs(s string, capture func(string, bool) string, readers ...*shell
 			out.WriteByte(c)
 			atWordStart = isShellSpace(c) || strings.IndexByte(";&|(", c) >= 0
 		}
-	}
-	if len(pending) > 0 && len(readers) > 0 {
-		readers[0].exhausted = true
 	}
 	return out.String()
 }
@@ -693,13 +710,27 @@ func posixWords(s string) []string {
 // Optional commands mode preserves unquoted control operators as commandSeparator tokens.
 func posixRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track, braces: true}
+	groupDepth := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && (c == '(' || c == ')'):
+			b.flush()
+			if c == '(' {
+				groupDepth++
+			} else if groupDepth > 0 {
+				groupDepth--
+			} else {
+				b.writeString(commandSeparator)
+				b.flush()
+			}
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
 			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
 				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
 			} else {
 				b.writeString(commandSeparator)
 			}
@@ -911,9 +942,18 @@ func powerShellRead(s string, track bool, commands ...bool) (words, patterns []s
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && (c == '(' || c == ')'):
+			b.flush()
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
-			b.writeString(commandSeparator)
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
+			} else {
+				b.writeString(commandSeparator)
+			}
 			b.flush()
 		case isShellSpace(c):
 			b.flush()
@@ -982,7 +1022,14 @@ func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
 			b.writeByte(c)
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
-			b.writeString(commandSeparator)
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
+			} else {
+				b.writeString(commandSeparator)
+			}
 			b.flush()
 		case isShellSpace(c):
 			b.flush()

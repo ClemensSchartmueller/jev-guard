@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 
 	"jev-guard/pkg/boundary"
@@ -90,6 +91,7 @@ const maxTamperingPathLookups = 8192
 // out still counts.
 func commandWordsMentionJevguard(call *harness.NormalizedToolCall) (deny bool, limit string) {
 	c := &commandCheck{reader: newShellReader(), dirs: callWorkingDirs(call), resolved: map[string]bool{}}
+	c.reader.deadline = time.Now().Add(250 * time.Millisecond)
 	if home, err := os.UserHomeDir(); err == nil {
 		c.home = home
 	}
@@ -181,11 +183,17 @@ func (c *commandCheck) exceed(limit string) {
 
 func (c *commandCheck) wordsTargetJevguard(words, patterns []string) bool {
 	for _, word := range words {
+		if !c.reader.spend(len(word), 1) {
+			return false
+		}
 		if mentionsJevguard(word) || c.wordReachesJevguard(word) {
 			return true
 		}
 	}
 	for _, pattern := range patterns {
+		if !c.reader.spend(len(pattern), 1) {
+			return false
+		}
 		if c.shellPatternTargetsJevguard(pattern) {
 			return true
 		}

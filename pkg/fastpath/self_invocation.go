@@ -2,7 +2,6 @@ package fastpath
 
 import (
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +25,7 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 	r := newShellReader()
 	r.deadline = deadline
 	var result *harness.EvaluationResult
+	unquotedSubstitution := false
 	record := func(words []string) {
 		decision := guardInvocationDecision(words, r)
 		if decision == "" || (result != nil && result.Decision == harness.DecisionDeny) {
@@ -59,13 +59,16 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 			marker, value, _ := strings.Cut(body, "\x00")
 			bodies[marker] = value
 			if !quoted && r.spend(len(value), 0) {
-				substitutions = append(substitutions, commandSubstitutions(value, true)...)
+				found := commandSubstitutions(value, true)
+				unquotedSubstitution = unquotedSubstitution || len(found) > 0
+				substitutions = append(substitutions, found...)
 			}
 			return ""
 		}, r)
 		if !r.spend(2*len(clean), 0) {
 			return
 		}
+		clean = groupStdin(clean)
 		p, _, _ := posixRead(clean, false, true)
 		ps, _, _ := powerShellRead(clean, false, true)
 		readings := [][]string{p, ps}
@@ -77,9 +80,6 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 			readings = [][]string{cmd}
 		}
 		for _, words := range readings {
-			if len(words) > 0 && words[len(words)-1] == pipelineSeparator {
-				r.exhausted = true
-			}
 			if !r.spend(0, len(words)) {
 				return
 			}
@@ -104,7 +104,8 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 				record(segment)
 				payloads := selfInvocationPayloads(r, segment)
 				w := unwrapInvocation(segment, r)
-				if len(w) > 0 && shellPrograms[programName(w[0])] && !hasCommandFlag(w[1:]) {
+				readsStdin := readsShellStdin(w, r)
+				if readsStdin {
 					payloads = append(payloads, stdin...)
 					payloads = append(payloads, upstream...)
 				}
@@ -119,9 +120,9 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 					unwrapped := unwrapInvocation(segment, r)
 					visit(payload, depth+1, len(unwrapped) > 0 && programName(unwrapped[0]) == "cmd")
 				}
-				// Keep only the immediately preceding stage. This is linear even
-				// for pipelines containing thousands of shell stages.
-				upstream = nil
+				if readsStdin || i == len(words) || words[i] != pipelineSeparator {
+					upstream = nil
+				}
 				if i < len(words) && words[i] == pipelineSeparator {
 					upstream = append(upstream, stdin...)
 					size := 0
@@ -177,6 +178,9 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 		}
 	}
 	if result != nil && result.Decision == harness.DecisionDeny {
+		if unquotedSubstitution {
+			result.Reason += "; `…` and $(…) execute in unquoted heredocs: quote the delimiter (<<'EOF') to keep their contents literal"
+		}
 		return result
 	}
 	if limit := r.incomplete(); limit != "" {
@@ -298,11 +302,29 @@ func unwrapInvocation(words []string, readers ...*shellReader) []string {
 	return nil
 }
 
-var commandFlag = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
+func oversizedShortFlag(f string) bool {
+	return len(f) > 128 && f[0] == '-' && f[1] != '-'
+}
+
+// Bound flag inspection even for adversarial megabyte operands.
+func shortCommandFlag(f string) bool {
+	if len(f) < 2 || len(f) > 128 || f[0] != '-' || f[1] == '-' {
+		return false
+	}
+	found := false
+	for i := 1; i < len(f); i++ {
+		c := f[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+		found = found || c == 'c'
+	}
+	return found
+}
 
 func hasCommandFlag(args []string) bool {
 	for _, a := range args {
-		if a == "--command" || strings.HasPrefix(a, "--command=") || commandFlag.MatchString(a) {
+		if a == "--command" || strings.HasPrefix(a, "--command=") || shortCommandFlag(a) {
 			return true
 		}
 	}
@@ -409,15 +431,17 @@ func guardInvocationDecision(words []string, readers ...*shellReader) harness.De
 			name = strings.TrimSuffix(name, ext)
 		}
 		match := name == "jev-guard"
+		badPattern := strings.Contains(name, "[:") || strings.Contains(name, "[=") || strings.Contains(name, "[.")
 		patterns, _ := expandBraces(name, 64)
 		for _, pattern := range patterns {
 			for _, target := range []string{"jev-guard", "jev-guard.exe"} {
-				ok, _ := path.Match(strings.ReplaceAll(pattern, "[!", "[^"), target)
+				ok, err := path.Match(strings.ReplaceAll(pattern, "[!", "[^"), target)
 				match = match || ok
+				badPattern = badPattern || err != nil
 			}
 		}
 		if !match {
-			if strings.Contains(name, "[") && name != "[" && name != "[[" {
+			if badPattern && name != "[" && name != "[[" {
 				return harness.DecisionAsk
 			}
 			return ""
@@ -444,4 +468,97 @@ func guardInvocationDecision(words []string, readers ...*shellReader) harness.De
 		return harness.DecisionAsk
 	}
 	return ""
+}
+
+// A command-string shell can itself launch a shell consuming inherited stdin.
+func readsShellStdin(w []string, r *shellReader) bool {
+	if len(w) == 0 {
+		return false
+	}
+	name := programName(w[0])
+	if name == "iex" || name == "invoke-expression" {
+		return true
+	}
+	if (name == "source" || name == ".") && len(w) > 1 && w[1] == "/dev/stdin" {
+		return true
+	}
+	if !shellPrograms[name] {
+		return false
+	}
+	if !hasCommandFlag(w[1:]) {
+		return true
+	}
+	for _, payload := range r.commandPayloads(w) {
+		if !r.spend(len(payload), 1) {
+			return false
+		}
+		args := posixWords(payload)
+		if len(args) == 1 && shellPrograms[programName(args[0])] {
+			return true
+		}
+	}
+	return false
+}
+
+// Move stdin markers attached to a group to its first command. Quotes are
+// skipped and each byte is visited once; nested groups share the same pass.
+func groupStdin(text string) string {
+	type insertion struct {
+		at     int
+		marker string
+	}
+	var stack []int
+	var inserts []insertion
+	var out strings.Builder
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c == '\\' {
+			i++
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			q := c
+			for i++; i < len(text); i++ {
+				if text[i] == '\\' {
+					i++
+					continue
+				}
+				if text[i] == q {
+					break
+				}
+			}
+			continue
+		}
+		if c == '(' || c == '{' {
+			stack = append(stack, i+1)
+		}
+		if (c == ')' || c == '}') && len(stack) > 0 {
+			at := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			j := i + 1
+			for j < len(text) && (text[j] == ' ' || text[j] == '\t') {
+				j++
+			}
+			if strings.HasPrefix(text[j:], "__guard_stdin_") {
+				end := j
+				for end < len(text) && !isShellSpace(text[end]) {
+					end++
+				}
+				inserts = append(inserts, insertion{at, " " + text[j:end] + " "})
+			}
+		}
+	}
+	if len(inserts) == 0 {
+		return text
+	}
+	// Positions can be nested; a map keeps insertion linear without sorting.
+	markers := map[int]string{}
+	for _, in := range inserts {
+		markers[in.at] += in.marker
+	}
+	for i := 0; i < len(text); i++ {
+		out.WriteString(markers[i])
+		out.WriteByte(text[i])
+	}
+	return out.String()
 }

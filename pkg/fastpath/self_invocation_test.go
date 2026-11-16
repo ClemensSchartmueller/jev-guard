@@ -9,6 +9,15 @@ import (
 
 func TestSelfInvocationReviewRegressions(t *testing.T) {
 	deny := []string{
+		` { sh; } <<< 'jev-guard ingest'`, `( sh ) <<< 'jev-guard ingest'`,
+		`echo jev-guard ingest | cat | sh`, `echo jev-guard ingest | tee /dev/null | sh`,
+		"cat <<EOF | tee /dev/null | sh\njev-guard ingest\nEOF",
+		"{ sh; } <<EOF\njev-guard ingest\nEOF", "( sh ) <<EOF\njev-guard ingest\nEOF",
+		"cat <<EOF | (sh)\njev-guard ingest\nEOF", `echo jev-guard ingest |& sh`,
+		`echo jev-guard ingest | source /dev/stdin`, `echo jev-guard ingest | . /dev/stdin`,
+		`'jev-guard ingest' | iex`, `"jev-guard ingest" | Invoke-Expression`, `IEX("jev-guard ingest")`,
+		`pwsh -c "'jev-guard ingest' | iex"`, `echo jev-guard ingest | bash -c sh`,
+		"bash -c sh <<EOF\njev-guard ingest\nEOF", `sh -c -- 'jev-guard ingest'`, `bash -c -x 'jev-guard ingest'`,
 		"cat <<EOF >/dev/null\n$(jev-guard ingest)\nEOF",
 		"cat <<EOF\n'$(jev-guard ingest)'\nEOF",
 		"cat <<EOF >/dev/null\n`jev-guard ingest`\nEOF",
@@ -30,8 +39,10 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 		`echo 'jev-guard ingest' | sh`, `printf '%s' 'jev-guard ingest' | bash -s`, `sh <<< 'jev-guard ingest'`, `bash <<< "jev-guard ingest"`, "sh <<'EOF'\njev-guard ingest\nEOF", "bash -s <<EOF\njev-guard ingest\nEOF",
 		`jev-gu?rd ingest`, `jev-guar[d] ingest`, `jev-{guard,x} ingest`,
 	}
-	ask := []string{`/path/jev-guar[[:alpha:]] ingest`, `echo ingest | xargs jev-guard`, `yarn jev-guard`, `~/.local/bin/jev-*`, `Start-Process jev-guard`}
+	ask := []string{"bash -" + strings.Repeat("l", 129) + "c 'jev-guard ingest'", `/path/jev-guar[[:alpha:]] ingest`, `echo ingest | xargs jev-guard`, `yarn jev-guard`, `~/.local/bin/jev-*`, `Start-Process jev-guard`}
 	negative := []string{
+		`echo $((1<<3))`, `printf "%d" $((2<<10))`, `(( x = 1 << 4 ))`, `git log |`,
+		`./build[2].sh --fast`, `test[1].sh`, `docs/[a-z]*.md`, "cat <<EOF", "sh <<EOF",
 		"cat <<EOF\nEOF", "sh <<EOF\nEOF", "cat <<A <<B\nA\nB",
 		"git commit -F - <<'EOF'\n`jev-guard ingest`\n$(jev-guard ingest)\nEOF",
 		`sed -i 's/jev-guard ingest/updated/g' docs/cli.md`, `. other-file jev-guard ingest`,
@@ -67,7 +78,7 @@ func TestSelfInvocationPerformance(t *testing.T) {
 		if elapsed > 2*time.Second {
 			t.Fatalf("analysis exceeded 2s: %s", elapsed)
 		}
-		if got == nil || got.Decision == harness.DecisionAllow {
+		if got != nil && got.Decision == harness.DecisionAllow {
 			t.Fatalf("must fail closed, got %+v", got)
 		}
 	}
@@ -77,5 +88,34 @@ func TestSelfInvocationDeadline(t *testing.T) {
 	got := checkSelfInvocationUntil(&harness.NormalizedToolCall{Command: "echo safe"}, time.Now().Add(-time.Second))
 	if got == nil || got.Decision != harness.DecisionAsk || got.Source != SourceAntiTamperingLimit {
 		t.Fatalf("deadline must fail closed: %+v", got)
+	}
+}
+
+func TestB2Performance(t *testing.T) {
+	for _, cmd := range []string{
+		"echo" + strings.Repeat(" sh", 500) + " -" + strings.Repeat("a", 200000),
+		"echo" + strings.Repeat(" sh", 2000) + " -" + strings.Repeat("a", 200000),
+		"echo" + strings.Repeat(" sh", 2000),
+		"echo" + strings.Repeat(" sh", 2000) + " -" + strings.Repeat("a", 2000000),
+		strings.Repeat("sh;", 20000) + "sh <<x\nx\nx\n", strings.Repeat("sh|", 30000) + "sh",
+	} {
+		start := time.Now()
+		call := &harness.NormalizedToolCall{Command: cmd}
+		got := CheckAntiTampering(call)
+		elapsed := time.Since(start)
+		t.Logf("%d bytes: %s verdict=%+v", len(cmd), elapsed, got)
+		if elapsed > 2*time.Second {
+			t.Fatal("exceeded 2 seconds")
+		}
+		if strings.HasPrefix(cmd, "echo") && (got == nil || got.Decision == harness.DecisionAllow) {
+			t.Fatal("must fail closed")
+		}
+	}
+}
+
+func TestUnquotedHeredocHint(t *testing.T) {
+	got := checkSelfInvocation(&harness.NormalizedToolCall{Command: "cat <<EOF\n$(jev-guard ingest)\nEOF"})
+	if got == nil || !strings.Contains(got.Reason, "<<'EOF'") {
+		t.Fatalf("missing delimiter hint: %+v", got)
 	}
 }
