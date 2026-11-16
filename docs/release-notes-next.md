@@ -8,7 +8,7 @@ Changes since v0.4.0. Assign a version and confirm CI before publishing. The v0.
 
 ## Upgrade notes
 
-- No action is needed. The first `end-turn` or `status` after upgrading removes files of sessions abandoned before the upgrade, a bounded amount per sweep (at most 1024 directory entries, 128 sessions, and about 150 ms), resuming where the previous sweep stopped.
+- No action is needed. The first `end-turn` or `status` after upgrading removes files of sessions abandoned before the upgrade, a bounded amount per sweep (at most 1024 directory entries, 1024 filesystem calls on 128 sessions, and about 150 ms, checked before each filesystem call), resuming where the previous sweep stopped.
 
 ## Remaining issue scope
 

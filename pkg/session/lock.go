@@ -57,7 +57,7 @@ func withSessionLock(sessionID string, fn func() error) error {
 // withLockFile is withSessionLock for a caller that knows the session's file
 // name but not its ID, as a directory scan does.
 func withLockFile(path string, fn func() error) error {
-	l, err := acquireLock(path, true, true)
+	l, err := acquireLock(path, true, true, nil)
 	if err != nil {
 		return err
 	}
@@ -80,17 +80,33 @@ type heldLock struct {
 // longer names the locked file. With touch set it refreshes
 // a stale modification time, which records the lock file as in use; the sweep
 // passes false so that its own visits do not keep a file alive.
-func acquireLock(path string, wait, touch bool) (*heldLock, error) {
-	if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
-		return nil, fmt.Errorf("failed to create sessions directory: %w", err)
+//
+// step, when not nil, is called before each filesystem call of the
+// acquisition (open, lock, stat, touch); when it returns false the
+// acquisition gives up and returns nil, nil, closing and unlocking whatever it
+// already holds (those releases always run and are not charged). A caller
+// passing step (the sweep) also never creates the sessions directory.
+func acquireLock(path string, wait, touch bool, step func() bool) (*heldLock, error) {
+	if step == nil {
+		if err := os.MkdirAll(GetSessionsDir(), 0700); err != nil {
+			return nil, fmt.Errorf("failed to create sessions directory: %w", err)
+		}
+		step = func() bool { return true }
 	}
 	deadline := time.Now().Add(lockTimeout)
 	for {
+		if !step() {
+			return nil, nil
+		}
 		f, err := openLockFile(path, os.O_CREATE|os.O_RDWR, 0600)
 		if err == nil {
+			if !step() {
+				_ = f.Close()
+				return nil, nil
+			}
 			locked, lockErr := tryLockFile(f)
 			if locked {
-				l, verifyErr := verifyLock(path, f, touch)
+				l, verifyErr := verifyLock(path, f, touch, step)
 				if l != nil {
 					return l, nil
 				}
@@ -127,13 +143,21 @@ func acquireLock(path string, wait, touch bool) (*heldLock, error) {
 // verifyLock checks, while f is locked, that path still names f. It returns
 // nil, nil when the path is missing or names another file, which happens when
 // the sweep removed the lock file between this process's open and lock.
-func verifyLock(path string, f *os.File, touch bool) (*heldLock, error) {
+// step is charged before each filesystem call, as in acquireLock; when it
+// refuses, verifyLock returns nil, nil like a failed verification.
+func verifyLock(path string, f *os.File, touch bool, step func() bool) (*heldLock, error) {
 	if afterLockHook != nil {
 		afterLockHook(path)
+	}
+	if !step() {
+		return nil, nil
 	}
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check session lock %s: %w", path, err)
+	}
+	if !step() {
+		return nil, nil
 	}
 	pathInfo, err := statLockPath(path)
 	if err != nil {
@@ -146,7 +170,7 @@ func verifyLock(path string, f *os.File, touch bool) (*heldLock, error) {
 	if !os.SameFile(info, pathInfo) {
 		return nil, nil
 	}
-	if age := time.Since(info.ModTime()); touch && (age > lockTouchInterval || age < -lockTouchInterval) {
+	if age := time.Since(info.ModTime()); touch && (age > lockTouchInterval || age < -lockTouchInterval) && step() {
 		_ = touchLockFile(f)
 	}
 	return &heldLock{path: path, f: f, info: info}, nil

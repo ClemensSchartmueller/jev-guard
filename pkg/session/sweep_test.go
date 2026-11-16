@@ -300,7 +300,7 @@ func TestAcquireLock_NoWaitSkipsRetryableOpenError(t *testing.T) {
 		return nil, errTransient
 	}
 	begin := time.Now()
-	l, err := acquireLock(sessionLockPath("pending"), false, false)
+	l, err := acquireLock(sessionLockPath("pending"), false, false, nil)
 	if l != nil || err != nil {
 		t.Fatalf("acquireLock = %v, %v; want nil, nil", l, err)
 	}
@@ -309,7 +309,7 @@ func TestAcquireLock_NoWaitSkipsRetryableOpenError(t *testing.T) {
 	}
 	// A waiting acquisition keeps retrying the same error.
 	lockTimeout = 0
-	if _, err := acquireLock(sessionLockPath("pending"), true, false); !errors.Is(err, ErrLockTimeout) {
+	if _, err := acquireLock(sessionLockPath("pending"), true, false, nil); !errors.Is(err, ErrLockTimeout) {
 		t.Fatalf("waiting acquisition = %v, want timeout", err)
 	}
 }
@@ -330,7 +330,7 @@ func TestAcquireLock_NoWaitSkipsVerificationFailure(t *testing.T) {
 	}
 	path := sessionLockPath("moved")
 	begin := time.Now()
-	l, err := acquireLock(path, false, false)
+	l, err := acquireLock(path, false, false, nil)
 	if l != nil || err != nil {
 		t.Fatalf("acquireLock = %v, %v; want nil, nil", l, err)
 	}
@@ -338,7 +338,7 @@ func TestAcquireLock_NoWaitSkipsVerificationFailure(t *testing.T) {
 		t.Fatalf("no-wait acquisition retried: %d verifications, %d sleeps", stats, *sleeps)
 	}
 	statLockPath = oldStat
-	l, err = acquireLock(path, false, false)
+	l, err = acquireLock(path, false, false, nil)
 	if l == nil || err != nil {
 		t.Fatalf("lock not free after a skipped acquisition: %v, %v", l, err)
 	}
@@ -414,23 +414,27 @@ func TestSweep_DeadlineStopsAndLaterRunContinues(t *testing.T) {
 		writeAged(t, p, nil, ancient)
 		locks = append(locks, p)
 	}
-	// The clock passes the deadline right after the second session's lock
-	// is taken: the first session is finished, the second is cut short.
+	// The clock passes the deadline while the second session is visited
+	// under its lock (at its session file check): the first session is
+	// finished, the second is cut short.
 	var expired atomic.Bool
-	acquired := 0
-	oldNow := sweepNow
+	checked := 0
+	oldNow, oldLstat := sweepNow, sweepLstat
 	sweepNow = func() time.Time {
 		if expired.Load() {
 			return time.Now().Add(time.Hour)
 		}
 		return time.Now()
 	}
-	afterLockHook = func(string) {
-		if acquired++; acquired == 2 {
-			expired.Store(true)
+	sweepLstat = func(p string) (os.FileInfo, error) {
+		if strings.HasSuffix(p, ".json") {
+			if checked++; checked == 2 {
+				expired.Store(true)
+			}
 		}
+		return os.Lstat(p)
 	}
-	t.Cleanup(func() { sweepNow = oldNow; afterLockHook = nil })
+	t.Cleanup(func() { sweepNow, sweepLstat = oldNow, oldLstat })
 
 	visited, next := sweepFrom(0)
 	if visited != 2 {
@@ -443,7 +447,7 @@ func TestSweep_DeadlineStopsAndLaterRunContinues(t *testing.T) {
 		t.Fatalf("cursor = %d, want 0 (the unfinished session is first after a removal)", next)
 	}
 	expired.Store(false)
-	afterLockHook = nil
+	sweepLstat = oldLstat
 	if _, next := sweepFrom(next); next != 0 {
 		t.Fatalf("cursor after the complete listing = %d, want 0", next)
 	}
@@ -452,8 +456,8 @@ func TestSweep_DeadlineStopsAndLaterRunContinues(t *testing.T) {
 	}
 }
 
-// A sweep cannot start before the listing when its deadline has passed, and
-// then keeps its cursor.
+// A sweep cannot start the listing when its deadline has passed. It then
+// does nothing and restarts the cursor rather than repeat the same skip.
 func TestSweep_NoBudgetDoesNothing(t *testing.T) {
 	setupTestJevguardDir(t)
 	p := sessionLockPath("x")
@@ -461,8 +465,8 @@ func TestSweep_NoBudgetDoesNothing(t *testing.T) {
 	oldBudget := sweepBudget
 	sweepBudget = 0
 	t.Cleanup(func() { sweepBudget = oldBudget })
-	if visited, next := sweepFrom(3); visited != 0 || next != 3 {
-		t.Fatalf("sweepFrom = %d, %d; want 0, 3", visited, next)
+	if visited, next := sweepFrom(3); visited != 0 || next != 0 {
+		t.Fatalf("sweepFrom = %d, %d; want 0, 0", visited, next)
 	}
 	if !exists(p) {
 		t.Fatal("sweep without budget removed a file")
@@ -554,3 +558,227 @@ func TestSweep_CursorWrapsWhenListingShrank(t *testing.T) {
 		t.Fatal("wrapped sweep left abandoned lock files")
 	}
 }
+
+// listingClock simulates storage so slow that the listing deadline passes
+// after limit names have been read in a run (the visiting deadline is still
+// ahead). reset starts a new run.
+func listingClock(t *testing.T, limit int) (reset func(), exhaustedBeforeCursor *int) {
+	t.Helper()
+	base := time.Now()
+	read := 0
+	exhausted := 0
+	oldNow, oldRead := sweepNow, sweepReadNames
+	sweepNow = func() time.Time {
+		if read >= limit {
+			return base.Add(sweepBudget * 3 / 4)
+		}
+		return base
+	}
+	sweepReadNames = func(f *os.File, n int) ([]string, error) {
+		names, err := oldRead(f, n)
+		read += len(names)
+		return names, err
+	}
+	t.Cleanup(func() { sweepNow, sweepReadNames = oldNow, oldRead })
+	return func() { read = 0 }, &exhausted
+}
+
+// A saved cursor the listing cannot reach within its deadline must not stall
+// the sweep: the old design returned the unchanged cursor every run, so no
+// later session was ever swept. Now an unreachable cursor restarts from the
+// beginning, and the abandoned files are cleared within a bounded number of
+// runs while the listing deadline keeps expiring.
+func TestSweep_UnreachableCursorStillProgresses(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldEntries, oldChunk := sweepMaxEntries, sweepReadChunk
+	sweepMaxEntries, sweepReadChunk = 2, 1
+	t.Cleanup(func() { sweepMaxEntries, sweepReadChunk = oldEntries, oldChunk })
+	var fresh, abandoned []string
+	for i := 0; i < 3; i++ {
+		p := sessionLockPath("fresh" + strconv.Itoa(i))
+		writeAged(t, p, nil, hourAgo)
+		fresh = append(fresh, p)
+	}
+	for i := 0; i < 8; i++ {
+		p := sessionLockPath("old" + strconv.Itoa(i))
+		writeAged(t, p, nil, ancient)
+		abandoned = append(abandoned, p)
+	}
+	// Six names per run: the listing never gets near cursor 40.
+	reset, _ := listingClock(t, 6)
+
+	next := 40
+	for run := 1; countExisting(abandoned) > 0; run++ {
+		if run > 30 {
+			t.Fatalf("%d abandoned lock files left after 30 runs", countExisting(abandoned))
+		}
+		reset()
+		prev := next
+		_, next = sweepFrom(prev)
+		if prev >= 6 && next == prev {
+			t.Fatalf("run %d returned its unreachable cursor %d unchanged", run, prev)
+		}
+		if run == 1 && next != 0 {
+			t.Fatalf("unreachable cursor 40 led to cursor %d, want a restart at 0", next)
+		}
+	}
+	if n := countExisting(fresh); n != len(fresh) {
+		t.Fatalf("%d recently used lock files swept", len(fresh)-n)
+	}
+}
+
+// A run that falls back from an unreachable cursor still processes the names
+// it read at the start of the listing when time allows (here the name budget,
+// not the deadline, stops the skip).
+func TestSweep_NameBudgetFallsBackToStart(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldNames := sweepMaxNames
+	sweepMaxNames = 4
+	t.Cleanup(func() { sweepMaxNames = oldNames })
+	var locks []string
+	for _, id := range []string{"a", "b", "c"} {
+		p := sessionLockPath(id)
+		writeAged(t, p, nil, ancient)
+		locks = append(locks, p)
+	}
+	if visited, _ := sweepFrom(100); visited != 3 {
+		t.Fatalf("fallback run visited %d sessions, want 3", visited)
+	}
+	if n := countExisting(locks); n != 0 {
+		t.Fatalf("%d abandoned lock files left", n)
+	}
+}
+
+// countVisitCalls counts the filesystem calls the sweep makes on sessions
+// after its listing, through their seams: opening and verifying lock files,
+// lstat, open, and remove. The listing's own lstats are not counted: they are
+// bounded by the window, not by sweepMaxOps.
+func countVisitCalls(t *testing.T) *int {
+	t.Helper()
+	calls, visiting := 0, false
+	count := func() {
+		if visiting {
+			calls++
+		}
+	}
+	oldOpenLock, oldStatLock := openLockFile, statLockPath
+	oldLstat, oldOpen, oldRemove := sweepLstat, sweepOpen, sweepRemove
+	openLockFile = func(p string, flag int, perm os.FileMode) (*os.File, error) {
+		visiting = true // the first lock acquisition ends the listing
+		count()
+		return oldOpenLock(p, flag, perm)
+	}
+	statLockPath = func(p string) (os.FileInfo, error) { count(); return oldStatLock(p) }
+	sweepLstat = func(p string) (os.FileInfo, error) { count(); return oldLstat(p) }
+	sweepOpen = func(p string) (*os.File, error) {
+		if p == GetSessionsDir() {
+			visiting = false // a new run lists the directory
+		}
+		count()
+		return oldOpen(p)
+	}
+	sweepRemove = func(p string) error { count(); return oldRemove(p) }
+	t.Cleanup(func() {
+		openLockFile, statLockPath = oldOpenLock, oldStatLock
+		sweepLstat, sweepOpen, sweepRemove = oldLstat, oldOpen, oldRemove
+	})
+	return &calls
+}
+
+// Many expired markers across sessions cannot push a run past its operation
+// cap: every lstat and remove is charged, not one token per marker. Later
+// runs finish the work.
+func TestSweep_OpCapCountsEveryCall(t *testing.T) {
+	setupTestJevguardDir(t)
+	const opCap = 25
+	oldOps := sweepMaxOps
+	sweepMaxOps = opCap
+	t.Cleanup(func() { sweepMaxOps = oldOps })
+	var all []string
+	for s := 0; s < 4; s++ {
+		id := "m" + strconv.Itoa(s)
+		writeAged(t, sessionLockPath(id), nil, ancient)
+		all = append(all, sessionLockPath(id))
+		for i := 0; i < 6; i++ {
+			p := SessionFilePath(id) + ".taint.x" + strconv.Itoa(i)
+			writeAged(t, p, nil, ancient)
+			all = append(all, p)
+		}
+	}
+	calls := countVisitCalls(t)
+	_, next := sweepFrom(0)
+	if *calls > opCap {
+		t.Fatalf("visiting made %d filesystem calls, cap %d", *calls, opCap)
+	}
+	if *calls < opCap-5 {
+		t.Fatalf("visiting made only %d calls; the test should exhaust the cap of %d", *calls, opCap)
+	}
+	if countExisting(all) == 0 {
+		t.Fatal("one run removed everything; the cap was not reached")
+	}
+	for run := 0; run < 20 && countExisting(all) > 0; run++ {
+		*calls = 0
+		_, next = sweepFrom(next)
+		if *calls > opCap {
+			t.Fatalf("later run made %d filesystem calls, cap %d", *calls, opCap)
+		}
+	}
+	if n := countExisting(all); n != 0 {
+		t.Fatalf("%d files left after later runs", n)
+	}
+}
+
+// A stale session file larger than the read cap is kept and never read in
+// full: not opened when its size is known, and cut off at the cap when it
+// grew after the size check.
+func TestSweep_OversizedSessionFileKept(t *testing.T) {
+	setupTestJevguardDir(t)
+	data, _ := json.Marshal(SessionState{SessionID: "big", Prompt: strings.Repeat("p", 200), UpdatedAt: time.Now().Add(-ancient)})
+	path := SessionFilePath("big")
+	writeAged(t, path, data, ancient)
+	writeAged(t, sessionLockPath("big"), nil, ancient)
+	oldCap, oldOpen, oldLstat := sweepMaxSessionFile, sweepOpen, sweepLstat
+	sweepMaxSessionFile = 64
+	t.Cleanup(func() { sweepMaxSessionFile, sweepOpen, sweepLstat = oldCap, oldOpen, oldLstat })
+	opens := 0
+	sweepOpen = func(p string) (*os.File, error) {
+		if p == path {
+			opens++
+		}
+		return oldOpen(p)
+	}
+
+	Sweep()
+	if !exists(path) || !exists(sessionLockPath("big")) {
+		t.Fatal("oversized session file or its lock was swept")
+	}
+	if opens != 0 {
+		t.Fatalf("oversized session file opened %d times", opens)
+	}
+
+	// The lstat reports a small file (it grew afterwards): the read stops at
+	// the cap, so the file, which would be reaped if read whole, is kept.
+	sweepLstat = func(p string) (os.FileInfo, error) {
+		info, err := oldLstat(p)
+		if err == nil && p == path {
+			return smallInfo{info}, nil
+		}
+		return info, err
+	}
+	Sweep()
+	if opens != 1 {
+		t.Fatalf("session file opened %d times, want 1", opens)
+	}
+	if !exists(path) {
+		t.Fatal("session file larger than the read cap was swept")
+	}
+	sweepMaxSessionFile = oldCap
+	Sweep()
+	if exists(path) {
+		t.Fatal("stale session file within the cap was not swept")
+	}
+}
+
+type smallInfo struct{ os.FileInfo }
+
+func (smallInfo) Size() int64 { return 10 }
