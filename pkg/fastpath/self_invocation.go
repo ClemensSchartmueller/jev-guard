@@ -37,6 +37,7 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 		}
 		result = &harness.EvaluationResult{Decision: decision, Reason: reason, Source: SourceSelfInvocation, Confidence: 1}
 	}
+	posixOnlyTool := call.ToolName == "Bash"
 	var visit func(string, int, bool)
 	visit = func(text string, depth int, windows bool) {
 		if len(text) > maxGuardCommandBytes || !r.spend(len(text), 0) {
@@ -70,8 +71,15 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 		}
 		clean = groupStdin(clean)
 		p, _, _ := posixRead(clean, false, true)
-		ps, _, _ := powerShellRead(clean, false, true)
-		readings := [][]string{p, ps}
+		readings := [][]string{p}
+		// Claude Code's Bash tool always runs bash (Git Bash on Windows), so its
+		// top-level text gets only the POSIX reading: a PowerShell reading would split
+		// a backslash-newline continuation into separate commands. Every other tool,
+		// and every nested payload, is read both ways because its shell is unknown.
+		if !(posixOnlyTool && depth == 0) {
+			ps, _, _ := powerShellRead(clean, false, true)
+			readings = append(readings, ps)
+		}
 		if windows {
 			if !r.spend(len(text), 0) {
 				return

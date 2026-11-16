@@ -163,3 +163,22 @@ func TestUnquotedHeredocHint(t *testing.T) {
 		t.Fatalf("missing delimiter hint: %+v", got)
 	}
 }
+
+// Claude Code's Bash tool always runs bash, where a backslash-newline continues
+// the line. Other tools may run PowerShell, where it does not, so they keep the
+// stricter reading.
+func TestSelfInvocationBashToolLineContinuation(t *testing.T) {
+	for _, cmd := range []string{"rm -rf ./build/* \\\n  ./dist/*", "ls \\\n  ./dist/*", "echo a \\\n jev-guard ingest"} {
+		if got := checkSelfInvocation(&harness.NormalizedToolCall{ToolName: "Bash", Command: cmd}); got != nil {
+			t.Errorf("Bash %q: got %+v, want no verdict", cmd, got)
+		}
+	}
+	for _, cmd := range []string{"jev-guard ingest \\\n  --prompt x", "bash -c 'jev-guard ingest'", "pwsh -c 'echo ok\njev-guard ingest'"} {
+		if got := checkSelfInvocation(&harness.NormalizedToolCall{ToolName: "Bash", Command: cmd}); got == nil || got.Decision != harness.DecisionDeny {
+			t.Errorf("Bash %q: got %+v, want deny", cmd, got)
+		}
+	}
+	if got := checkSelfInvocation(&harness.NormalizedToolCall{ToolName: "exec_command", Command: "echo ok \\\njev-guard ingest"}); got == nil || got.Decision != harness.DecisionDeny {
+		t.Errorf("unknown shell: got %+v, want deny (PowerShell would run the second line)", got)
+	}
+}
