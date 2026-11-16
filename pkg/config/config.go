@@ -377,7 +377,9 @@ func FindProjectConfigInDirectory(dir string) string {
 	return ""
 }
 
-// ProjectConfigTrust is one exact approval record in trusted-project-configs.json.
+// ProjectConfigTrust is one approval record in trusted-project-configs.json. It approves the
+// config file's exact SHA-256 digest at one real location. config trust proposes the
+// symlink-resolved spelling; see splitExactTrustRecords and identityTrustRecords for which spellings a record covers.
 type ProjectConfigTrust struct {
 	ProjectRoot string `json:"project_root"`
 	ConfigPath  string `json:"config_path"`
@@ -394,15 +396,25 @@ type ProjectConfigInfo struct {
 	Trusted        bool               `json:"trusted"`
 	TrustIssue     string             `json:"trust_issue,omitempty"`
 	TrustRecord    ProjectConfigTrust `json:"trust_record"`
+	// TrustMatches lists the registry records, for any digest, that apply to this config
+	// file: the record for this exact spelling, and records whose path names the same real
+	// file without going through a symlink or junction. Removing all of them revokes trust.
+	TrustMatches []ProjectConfigTrust `json:"trust_matches,omitempty"`
 	// TrustAliases lists registry records whose config_path is a different spelling of the
-	// same config file (a symlinked parent, macOS /var versus /private/var, or a Windows
-	// 8.3 short name). It is diagnostic only: an alias record never grants trust to
-	// TrustRecord's path, because trust stays bound to the exact approved path.
+	// same config file that do not apply to this spelling, because their path goes through
+	// a symlink or junction and such records stay bound to their exact spelling. It is
+	// diagnostic only and never grants trust.
 	TrustAliases []ProjectConfigTrust `json:"trust_aliases,omitempty"`
-	// TrustAliasCheckSkipped reports that the alias scan did not finish within
-	// trustAliasScanTimeout, for example because a registry entry is on an unreachable
-	// network mount, so TrustAliases may be incomplete. It is diagnostic only.
+	// TrustAliasCheckSkipped reports that the registry scan comparing other entries by file
+	// identity did not finish within trustAliasScanTimeout, for example because an entry is
+	// on an unreachable network mount. Exact-spelling records were still honored, but
+	// TrustMatches and TrustAliases may be incomplete, and a record that would apply only by
+	// file identity was treated as not applying (fail closed).
 	TrustAliasCheckSkipped bool `json:"trust_alias_check_skipped,omitempty"`
+
+	// file identifies the config file whose bytes were hashed; trust lookups compare
+	// registry records against it with os.SameFile.
+	file os.FileInfo
 }
 
 type projectTrustRegistry struct {
@@ -430,45 +442,87 @@ func inspectProjectConfigWithRegistry(path, trustRegistryPath string) (*ProjectC
 	if err != nil {
 		return nil, err
 	}
-	info.Trusted, err = trustRecordExists(trustRegistryPath, info.TrustRecord)
+	registry, err := readTrustRegistry(trustRegistryPath)
 	if err != nil {
 		info.TrustIssue = describeTrustRegistryError(err)
 		return info, nil
 	}
-	info.TrustAliases, info.TrustAliasCheckSkipped = boundedTrustAliasRecords(trustRegistryPath, info.TrustRecord)
+	info.TrustMatches, info.TrustAliases, info.TrustAliasCheckSkipped = boundedTrustScan(registry.Entries, info, false, true)
+	for _, match := range info.TrustMatches {
+		if match.SHA256 == info.SHA256 {
+			info.Trusted = true
+		}
+	}
 	return info, nil
 }
 
-// trustAliasScanTimeout bounds the diagnostic alias scan. A stat on a stale network mount
-// can block until the OS gives up, and Go cannot cancel it, so interactive commands stop
-// waiting after this deadline instead.
+// trustAliasScanTimeout bounds every registry lookup that touches another entry's path, in
+// both the hook and the interactive commands. A stat on a stale network mount can block until
+// the OS gives up, and Go cannot cancel it, so callers stop waiting after this deadline.
 var trustAliasScanTimeout = 500 * time.Millisecond
 
-// trustAliasStat and trustAliasLstat are the filesystem lookups used by the alias scan.
-// Tests replace them to simulate unreachable paths.
+// trustAliasStat and trustAliasLstat are the filesystem lookups used on registry entry paths
+// (identity matching and the alias scan). Tests replace them to simulate unreachable paths.
 var (
 	trustAliasStat  = os.Stat
 	trustAliasLstat = os.Lstat
 )
 
-// boundedTrustAliasRecords runs trustAliasRecords with trustAliasScanTimeout. On timeout it
-// returns no aliases and skipped=true; the scan keeps running in the background and its
-// result is discarded. The goroutine only touches its own locals and a buffered channel, so
-// it writes no shared state after the caller has returned.
-func boundedTrustAliasRecords(registryPath string, expected ProjectConfigTrust) (aliases []ProjectConfigTrust, skipped bool) {
-	stat, lstat, timeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
-	result := make(chan []ProjectConfigTrust, 1)
+// boundedTrustScan finds the registry entries that apply to info (matches) and, with
+// wantAliases, the entries for a linked spelling of the same file that do not apply
+// (aliases). Exact-spelling matches need no filesystem access and are always returned. The
+// identity-based checks run in one goroutine under trustAliasScanTimeout; on timeout they are
+// dropped, so only exact matches count (fail closed), aliases are empty, and skipped is true.
+// The goroutine works on copies of its inputs and reports through a buffered channel, so a
+// blocked scan writes no shared state after the caller has returned.
+func boundedTrustScan(entries []ProjectConfigTrust, info *ProjectConfigInfo, currentDigestOnly, wantAliases bool) (matches, aliases []ProjectConfigTrust, skipped bool) {
+	exact, rest := splitExactTrustRecords(entries, info, currentDigestOnly)
+	if len(rest) == 0 || (currentDigestOnly && len(exact) > 0) {
+		// Nothing needs the filesystem, or the hook already has its answer.
+		return exact, nil, false
+	}
+	target := trustTarget{
+		projectRoot: info.ProjectRoot,
+		configPath:  info.ConfigPath,
+		file:        info.file,
+		record:      info.TrustRecord,
+	}
+	lookup := trustLookup{stat: trustAliasStat, lstat: trustAliasLstat}
+	timeout := trustAliasScanTimeout
+	entries = append([]ProjectConfigTrust(nil), entries...)
+	type scanResult struct{ matches, aliases []ProjectConfigTrust }
+	result := make(chan scanResult, 1)
 	go func() {
-		result <- trustAliasRecords(registryPath, expected, stat, lstat)
+		var r scanResult
+		r.matches = identityTrustRecords(rest, target, lookup)
+		if wantAliases {
+			r.aliases = trustAliasRecords(entries, target.record, lookup)
+		}
+		result <- r
 	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case aliases := <-result:
-		return aliases, false
+	case r := <-result:
+		matches = append(exact, r.matches...)
+		for _, alias := range r.aliases {
+			if !containsTrustRecord(matches, alias) {
+				aliases = append(aliases, alias)
+			}
+		}
+		return matches, aliases, false
 	case <-timer.C:
-		return nil, true
+		return exact, nil, true
 	}
+}
+
+func containsTrustRecord(records []ProjectConfigTrust, record ProjectConfigTrust) bool {
+	for _, candidate := range records {
+		if candidate == record {
+			return true
+		}
+	}
+	return false
 }
 
 // trustAliasRecords returns registry records whose config_path differs from the expected
@@ -476,11 +530,8 @@ func boundedTrustAliasRecords(registryPath string, expected ProjectConfigTrust) 
 // macOS /var versus /private/var, a case variant, or a Windows 8.3 short name. It only reports
 // these records; the trust decision itself never consults it. Records whose paths no longer
 // resolve, and records that could never be approved as written, are skipped.
-func trustAliasRecords(registryPath string, expected ProjectConfigTrust, stat, lstat func(string) (os.FileInfo, error)) []ProjectConfigTrust {
-	registry, err := readTrustRegistry(registryPath)
-	if err != nil {
-		return nil
-	}
+func trustAliasRecords(entries []ProjectConfigTrust, expected ProjectConfigTrust, lookup trustLookup) []ProjectConfigTrust {
+	stat, lstat := lookup.stat, lookup.lstat
 	wantFile, err := stat(expected.ConfigPath)
 	if err != nil {
 		return nil
@@ -490,7 +541,7 @@ func trustAliasRecords(registryPath string, expected ProjectConfigTrust, stat, l
 		return nil
 	}
 	var aliases []ProjectConfigTrust
-	for _, entry := range registry.Entries {
+	for _, entry := range entries {
 		if entry.ConfigPath == expected.ConfigPath || !filepath.IsAbs(entry.ConfigPath) ||
 			entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
 			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(expected.ConfigPath)) {
@@ -560,29 +611,36 @@ func canonicalProjectConfigPath(path string) (string, error) {
 }
 
 func readConfigFile(path string) ([]byte, error) {
+	data, _, err := readConfigFileWithInfo(path)
+	return data, err
+}
+
+// readConfigFileWithInfo reads a regular config file and returns the identity of the opened
+// file, so callers can bind decisions to the file whose bytes they read.
+func readConfigFileWithInfo(path string) ([]byte, os.FileInfo, error) {
 	file, err := openRegularConfigFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !openedInfo.Mode().IsRegular() {
-		return nil, fmt.Errorf("configuration file must be a regular file: %s", path)
+		return nil, nil, fmt.Errorf("configuration file must be a regular file: %s", path)
 	}
 	if openedInfo.Size() > MaxConfigFileSize {
-		return nil, fmt.Errorf("configuration file exceeds the %d byte limit: %s", MaxConfigFileSize, path)
+		return nil, nil, fmt.Errorf("configuration file exceeds the %d byte limit: %s", MaxConfigFileSize, path)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, MaxConfigFileSize+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(data) > MaxConfigFileSize {
-		return nil, fmt.Errorf("configuration file exceeds the %d byte limit: %s", MaxConfigFileSize, path)
+		return nil, nil, fmt.Errorf("configuration file exceeds the %d byte limit: %s", MaxConfigFileSize, path)
 	}
-	return data, nil
+	return data, openedInfo, nil
 }
 
 func inspectProjectConfigFile(path string) (*ProjectConfigInfo, error) {
@@ -590,7 +648,7 @@ func inspectProjectConfigFile(path string) (*ProjectConfigInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve project config: %w", err)
 	}
-	data, err := readConfigFile(canonical)
+	data, file, err := readConfigFileWithInfo(canonical)
 	if err != nil {
 		return nil, fmt.Errorf("read project config: %w", err)
 	}
@@ -616,32 +674,137 @@ func inspectProjectConfigFile(path string) (*ProjectConfigInfo, error) {
 		}
 	}
 	digest := sha256.Sum256(data)
-	record := ProjectConfigTrust{
-		ProjectRoot: filepath.Clean(root),
-		ConfigPath:  canonical,
-		SHA256:      hex.EncodeToString(digest[:]),
-	}
-	return &ProjectConfigInfo{
-		ProjectRoot:    record.ProjectRoot,
-		ConfigPath:     record.ConfigPath,
-		SHA256:         record.SHA256,
+	info := &ProjectConfigInfo{
+		ProjectRoot:    filepath.Clean(root),
+		ConfigPath:     canonical,
+		SHA256:         hex.EncodeToString(digest[:]),
 		SensitiveFiles: sensitiveFiles,
 		IgnoredKeys:    ignored,
-		TrustRecord:    record,
-	}, nil
+		file:           file,
+	}
+	info.TrustRecord = proposedTrustRecord(info)
+	return info, nil
 }
 
-func trustRecordExists(registryPath string, expected ProjectConfigTrust) (bool, error) {
-	registry, err := readTrustRegistry(registryPath)
-	if err != nil {
-		return false, err
+// proposedTrustRecord returns the record config trust proposes: the config file under its
+// symlink-resolved directory, so the approval names one real location and keeps applying
+// when the project is reached through another spelling. If the directory cannot be resolved,
+// or the resolved spelling does not name the file that was hashed, it falls back to the
+// inspected spelling, which then only matches exactly.
+func proposedTrustRecord(info *ProjectConfigInfo) ProjectConfigTrust {
+	record := ProjectConfigTrust{ProjectRoot: info.ProjectRoot, ConfigPath: info.ConfigPath, SHA256: info.SHA256}
+	resolvedRoot, err := filepath.EvalSymlinks(info.ProjectRoot)
+	if err != nil || !filepath.IsAbs(resolvedRoot) {
+		return record
 	}
-	for _, entry := range registry.Entries {
-		if entry == expected {
-			return true, nil
+	resolved := ProjectConfigTrust{
+		ProjectRoot: filepath.Clean(resolvedRoot),
+		ConfigPath:  filepath.Join(resolvedRoot, filepath.Base(info.ConfigPath)),
+		SHA256:      info.SHA256,
+	}
+	target := trustTarget{projectRoot: info.ProjectRoot, configPath: info.ConfigPath, file: info.file}
+	if !trustRecordNamesFile(resolved, target, trustLookup{stat: os.Stat, lstat: os.Lstat}) {
+		return record
+	}
+	return resolved
+}
+
+// trustLookup holds the filesystem lookups used on registry entry paths, so a bounded scan
+// can capture them once and tests can substitute slow ones.
+type trustLookup struct {
+	stat, lstat func(string) (os.FileInfo, error)
+}
+
+// trustTarget is the immutable part of a ProjectConfigInfo that identity matching reads. A
+// bounded scan works on a copy so it never reads fields the caller may still be writing.
+type trustTarget struct {
+	projectRoot, configPath string
+	file                    os.FileInfo
+	record                  ProjectConfigTrust
+}
+
+// splitExactTrustRecords partitions the registry entries that may approve info's config file.
+// With currentDigestOnly, only entries for info's exact digest are considered. exact holds the
+// entries that name the inspected spelling exactly (the behavior before trust followed file
+// identity, so existing records keep working for the spelling they were approved under); it
+// needs no filesystem access. rest holds the other entries, which identityTrustRecords checks.
+func splitExactTrustRecords(entries []ProjectConfigTrust, info *ProjectConfigInfo, currentDigestOnly bool) (exact, rest []ProjectConfigTrust) {
+	for _, entry := range entries {
+		if currentDigestOnly && entry.SHA256 != info.SHA256 {
+			continue
+		}
+		if entry.ProjectRoot == info.ProjectRoot && entry.ConfigPath == info.ConfigPath {
+			exact = append(exact, entry)
+		} else {
+			rest = append(rest, entry)
 		}
 	}
-	return false, nil
+	return exact, rest
+}
+
+// identityTrustRecords returns the entries that apply to target by file identity: the entry's
+// path contains no symlink or junction, and its config file and project root are the same file
+// and directory (os.SameFile) as the inspected ones at lookup time.
+//
+// This lets a record for /private/var/x/repo trust /var/x/repo, a symlinked checkout, a case
+// variant, or a Windows 8.3 short name. Because the recorded path must not go through a link,
+// swapping a symlink after approval cannot move trust to another directory; a record that does
+// go through a link only applies to its exact spelling. The lookups can block on unreachable
+// paths, so callers run this through boundedTrustScan.
+func identityTrustRecords(entries []ProjectConfigTrust, target trustTarget, lookup trustLookup) []ProjectConfigTrust {
+	var matches []ProjectConfigTrust
+	for _, entry := range entries {
+		if !filepath.IsAbs(entry.ConfigPath) || entry.ProjectRoot != filepath.Dir(entry.ConfigPath) ||
+			!strings.EqualFold(filepath.Base(entry.ConfigPath), filepath.Base(target.configPath)) {
+			continue
+		}
+		if pathHasLinkComponent(entry.ProjectRoot, lookup) {
+			continue
+		}
+		if trustRecordNamesFile(entry, target, lookup) {
+			matches = append(matches, entry)
+		}
+	}
+	return matches
+}
+
+// trustRecordNamesFile reports whether record names, as a regular non-symlink file, the same
+// file that target hashed, inside the same directory as target's project root. Comparing the
+// directory too excludes hard links from other directories.
+func trustRecordNamesFile(record ProjectConfigTrust, target trustTarget, lookup trustLookup) bool {
+	if target.file == nil {
+		return false
+	}
+	if linkInfo, err := lookup.lstat(record.ConfigPath); err != nil || !linkInfo.Mode().IsRegular() {
+		return false
+	}
+	file, err := lookup.stat(record.ConfigPath)
+	if err != nil || !os.SameFile(file, target.file) {
+		return false
+	}
+	dir, err := lookup.stat(record.ProjectRoot)
+	if err != nil {
+		return false
+	}
+	wantDir, err := lookup.stat(target.projectRoot)
+	return err == nil && os.SameFile(dir, wantDir)
+}
+
+// pathHasLinkComponent reports whether dir or any of its ancestors is a symlink, a Windows
+// junction or other reparse point (reported as irregular since Go 1.23), or cannot be
+// inspected. It fails closed: any doubt counts as a link.
+func pathHasLinkComponent(dir string, lookup trustLookup) bool {
+	for {
+		info, err := lookup.lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 func describeTrustRegistryError(err error) string {
@@ -863,14 +1026,21 @@ func applyTrustedProjectConfig(cfg *Config, candidateDirs, workspaceRoots []stri
 				cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("project config at %s ignored: %v", path, err))
 				continue
 			}
-			info.Trusted, err = trustRecordExists(registryPath, info.TrustRecord)
+			registry, err := readTrustRegistry(registryPath)
 			if err != nil {
 				info.TrustIssue = describeTrustRegistryError(err)
 				cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("project config at %s ignored: %s", canonical, info.TrustIssue))
 				continue
 			}
+			matches, _, skipped := boundedTrustScan(registry.Entries, info, true, false)
+			info.Trusted = len(matches) > 0
+			info.TrustAliasCheckSkipped = skipped
 			if !info.Trusted {
-				cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("project config at %s is not trusted; built-in defaults and any valid user settings remain active", canonical))
+				reason := ""
+				if skipped {
+					reason = " (the registry lookup for other spellings of this path did not finish in time; an entry may point to an unreachable location)"
+				}
+				cfg.Diagnostics = append(cfg.Diagnostics, fmt.Sprintf("project config at %s is not trusted%s; built-in defaults and any valid user settings remain active", canonical, reason))
 				continue
 			}
 			cfg.ProjectConfig = info

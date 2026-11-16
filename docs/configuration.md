@@ -138,7 +138,16 @@ jev-guard config untrust .jevguard.json
 
 The digest is checked on every invocation, so editing or replacing the config requires a new reviewed record. `config untrust` identifies the registry entry to remove.
 
-Trust is bound to the exact path in the record. If you approved the project through another spelling of the same directory, such as a symlinked checkout, macOS `/var` versus `/private/var`, or a Windows 8.3 short name, the record does not apply to this path. `config untrust` and `doctor` name such records so you can remove them or approve this spelling. If a registry entry is unreachable, for example on a stale network mount, the check gives up after a short deadline and says it was skipped.
+`config trust` proposes the config under its symlink-resolved directory, so one record names one real directory. A record applies to a config file when:
+
+- its `config_path` is exactly the spelling being checked, or
+- no component of its path is a symlink or Windows junction, and its `config_path` and `project_root` are the same file and directory (by file identity) as the one being checked.
+
+So a project approved once is trusted whether it is reached through a symlinked checkout, macOS `/var` or `/private/var`, a case variant, or a Windows 8.3 short name such as `RUNNER~1`. The digest is still checked, and file identity is checked on every lookup, so repointing a symlink at another directory, even one with byte-identical config, does not move trust there. A hard link to the config in another directory is not trusted either.
+
+Records written by earlier versions name the path as it was given. They keep working for that exact spelling. If such a path goes through a symlink or junction, the record is not extended to other spellings, because the link could have pointed elsewhere when it was approved; run `config trust` again and replace it with the record it prints. `config untrust` lists every registry entry that applies to the config file under any spelling and digest; remove all of them to revoke trust. `config untrust` and `doctor` also name entries for a linked spelling that do not apply to the current one.
+
+Comparing file identity means looking up the paths in other registry entries. If an entry is unreachable, for example on a stale network mount, the lookup gives up after a short deadline. Entries that name the checked spelling exactly are still honored, but entries that would only apply by file identity are treated as not applying, so the config stays untrusted rather than blocking the hook. `config untrust` and `doctor` say when the check was incomplete.
 
 **Why the CLI does not write approvals.** A confirmation typed into an agent-controlled shell would not prove that you reviewed it. This design assumes the agent process cannot write the user config or `~/.jevguard/trusted-project-configs.json`. If an agent can run arbitrary commands with the same filesystem access as you, approval text and file ownership alone cannot enforce that boundary; protect those files with an OS or product-level permission boundary outside the agent's writable paths.
 

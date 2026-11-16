@@ -208,9 +208,15 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 	}
 	fmt.Fprintf(r.Stdout, "Project config: %s\nProject root: %s\n", info.ConfigPath, info.ProjectRoot)
 	if info.Trusted {
-		fmt.Fprintf(r.Stdout, "Current digest %s is trusted. Remove the registry entry with this project_root and config_path to revoke it.\n", info.SHA256)
+		fmt.Fprintf(r.Stdout, "Current digest %s is trusted. Remove the registry entries listed below to revoke it.\n", info.SHA256)
 	} else {
 		fmt.Fprintln(r.Stdout, "Current digest is not trusted. Remove any registry entry with this project_root and config_path to revoke older digests.")
+	}
+	if len(info.TrustMatches) > 0 {
+		fmt.Fprintln(r.Stdout, "Registry entries that apply to this config file (remove each one to revoke trust for every spelling of this path):")
+		for _, match := range info.TrustMatches {
+			fmt.Fprintf(r.Stdout, "  project_root=%s config_path=%s sha256=%s\n", match.ProjectRoot, match.ConfigPath, match.SHA256)
+		}
 	}
 	for _, hint := range trustAliasHints(info, false) {
 		fmt.Fprintln(r.Stdout, hint)
@@ -221,7 +227,8 @@ func (r *Runner) handleConfigUntrust(args []string) (Action, int) {
 }
 
 // trustAliasHints describes registry records approved under a different spelling of the
-// same config file. Those records never apply to this path; the hint only explains why an
+// same config file whose path goes through a symlink or junction. Such records stay bound
+// to their exact spelling and never apply to this path; the hint only explains why an
 // approval appears to have no effect and which record to remove. With suggestTrust, it also
 // says how to approve this spelling; config untrust omits that because the user is revoking.
 func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string {
@@ -232,7 +239,7 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 			digest = "the current digest"
 		}
 		hint := fmt.Sprintf(
-			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because trust is bound to the exact path; remove that entry to revoke it",
+			"Registry entry for another spelling of this path: %s (%s). It does not apply to %s because its path goes through a symlink or junction, so it is bound to that exact spelling; remove that entry to revoke it",
 			alias.ConfigPath, digest, info.ConfigPath)
 		if suggestTrust {
 			hint += fmt.Sprintf(", or run `jev-guard config trust %s` and add the printed record to trust this spelling", shellQuoteArg(info.ConfigPath, runtime.GOOS))
@@ -240,7 +247,7 @@ func trustAliasHints(info *config.ProjectConfigInfo, suggestTrust bool) []string
 		hints = append(hints, hint+".")
 	}
 	if info.TrustAliasCheckSkipped {
-		hints = append(hints, "Skipped the check for registry entries under another spelling of this path because it did not finish in time; a registry entry may point to an unreachable location.")
+		hints = append(hints, "Skipped the check for registry entries under another spelling of this path because it did not finish in time; a registry entry may point to an unreachable location. Only entries for this exact path were honored, so the entries listed here may be incomplete.")
 	}
 	return hints
 }
@@ -281,6 +288,9 @@ func printTrustProposal(out io.Writer, info *config.ProjectConfigInfo) {
 	}
 	if len(info.IgnoredKeys) > 0 {
 		fmt.Fprintf(out, "Ignored project keys: %s\n", strings.Join(info.IgnoredKeys, ", "))
+	}
+	if info.TrustRecord.ConfigPath != info.ConfigPath {
+		fmt.Fprintf(out, "The record names the symlink-resolved path %s, so it also applies when the project is reached through another spelling of the same directory.\n", info.TrustRecord.ConfigPath)
 	}
 	fmt.Fprintf(out, "Trust record to add to %s:\n%s\n", trustRegistryPath(), entry)
 	fmt.Fprintln(out, "The registry is user-owned. Review the file and add this record manually; this command does not grant trust.")

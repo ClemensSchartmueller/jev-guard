@@ -15,10 +15,12 @@ Changes since v0.3.0.
 - Add an offline policy regression corpus and name the existing policy thresholds without changing their values.
 
 - Use one network-egress heuristic for credential intent authorization and session taint (#76). Preserve URL-target and package-publish coverage while extending taint checks to the shared detector's cloud clients and inline network markers. Tainted sessions can therefore report or prompt on more network-capable calls.
-- `config untrust` and `doctor` name trust registry records approved under another spelling of the same project path, such as a symlinked checkout, macOS `/private/var`, or a Windows short name (#77). Trust remains bound to the exact approved path. The check stops after a short deadline when a registry entry is unreachable, such as on a stale network mount, and says it was skipped (#88).
+- Honor project config trust approved under another spelling of the same directory, such as a symlinked checkout, macOS `/var` versus `/private/var`, a case variant, or a Windows short name (#77). `config trust` now proposes the symlink-resolved path, and a record applies to any spelling of the same real file and directory (checked by file identity at lookup) unless its own path goes through a symlink or junction. A repointed symlink does not inherit trust, and the digest is still checked. `config untrust` lists every registry entry to remove, and `config untrust` and `doctor` name records for a linked spelling that do not apply. Lookups of other registry entries stop after a short deadline when an entry is unreachable, such as on a stale network mount: exact-path records are still honored, identity-only matches fail closed, and `config untrust` and `doctor` say the check was incomplete (#88).
 - Check resolved filesystem locations before granting local path proof (#74). Aliases into execution-sensitive directories such as `.claude/`, including new files beneath an aliased directory, retain the model's containment check. Ordinary files in Claude Code worktrees remain eligible for local proof.
 
 ## Upgrade notes
+
+- Existing project trust records keep working for the exact path they name. A record whose path goes through a symlink or junction applies only to that spelling; run `jev-guard config trust` again and replace it with the printed record to cover other spellings of the same directory.
 
 - Run `jev-guard init` for each configured harness and scope to install the updated hooks. Manual hook configurations should follow [the hook examples](hooks.md).
 - Existing users receive audit-only taint behavior by default. Review [tool-output taint](security-model.md#tool-output-taint) before enabling enforcement; its hook coverage is currently Claude Code only.
