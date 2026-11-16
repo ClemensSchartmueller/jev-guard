@@ -696,6 +696,17 @@ func (b *wordBuilder) flush() {
 	b.glob = false
 }
 
+// commentMayStart reports whether a '#' at i can begin a comment: only at the start of
+// input or after whitespace or an operator that ends a word. After ')' (the end of $(...),
+// $((...)), <(...) or an array) the shell keeps '#' in the word, so it is not a comment
+// there; reading it as a word only over-scans, which fails safe.
+func commentMayStart(s string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	return strings.IndexByte(" \t\r\n;&|(<>", s[i-1]) >= 0
+}
+
 // posixWords splits like sh and bash: backslash escapes, single and double quotes, adjacent
 // segments, line continuations, and the $'...' and $"..." forms.
 func posixWords(s string) []string {
@@ -711,7 +722,7 @@ func posixRead(s string, track bool, commands ...bool) (words, patterns []string
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case len(commands) > 0 && commands[0] && c == '#' && !b.started:
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started && commentMayStart(s, i):
 			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
 				i += end - 1
 			} else {
@@ -952,7 +963,7 @@ func powerShellRead(s string, track bool, commands ...bool) (words, patterns []s
 				i = len(s)
 			}
 
-		case len(commands) > 0 && commands[0] && c == '#' && !b.started:
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started && commentMayStart(s, i):
 			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
 				i += end - 1
 			} else {

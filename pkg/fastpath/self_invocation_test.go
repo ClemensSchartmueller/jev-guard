@@ -33,6 +33,17 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 		"cat <<EOF | sh\n# it's\njev-guard ingest\nEOF",
 		"cat <<EOF | (cat | sh)\njev-guard ingest\nEOF",
 		"<# say \"hi #>\njev-guard ingest",
+		// Shells whose options take a value still read stdin as a script.
+		"bash -euo pipefail <<'EOF'\njev-guard end-turn\nEOF",
+		`echo jev-guard clear-intent --all | bash -euo pipefail`, `echo jev-guard ingest | bash -o pipefail`,
+		`echo jev-guard ingest | sh -o errexit`, `echo jev-guard ingest | bash +x`, `echo jev-guard ingest | bash -O extglob`,
+		`echo jev-guard ingest | bash --rcfile /dev/null`, `bash -o pipefail <<< 'jev-guard ingest'`,
+		"bash +e <<EOF\njev-guard ingest\nEOF", "cat <<EOF | bash -o pipefail\njev-guard ingest\nEOF",
+		// A '#' glued to a closing ')' is part of the word, not a comment.
+		`echo $(true)#; jev-guard ingest`, `echo $((1))#; jev-guard ingest`, `x=$(true)#; jev-guard ingest`,
+		`echo $(date +%s)#build; jev-guard clear-intent --all`, `echo <(true)#; jev-guard ingest`,
+		`a=(1 2)#; jev-guard ingest`, `arr=($(true))#; jev-guard ingest`, `bash -c 'echo $(true)#; jev-guard ingest'`,
+		"echo $(true)#; cat <<EOF | sh\njev-guard ingest\nEOF",
 
 		` { sh; } <<< 'jev-guard ingest'`, `( sh ) <<< 'jev-guard ingest'`,
 		`echo jev-guard ingest | cat | sh`, `echo jev-guard ingest | tee /dev/null | sh`,
@@ -71,6 +82,8 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 		"echo $#",
 		"grep 'jev-guard ingest' docs/cli.md | bash scripts/count.sh",
 		"rg -l 'jev-guard ingest' | sh ./scripts/x.sh",
+		"bash -euo pipefail scripts/ci.sh <<< 'jev-guard ingest'",
+		"echo jev-guard ingest | bash -o pipefail scripts/ci.sh",
 
 		`echo $((1<<3))`, `printf "%d" $((2<<10))`, `(( x = 1 << 4 ))`, `git log |`,
 		`./build[2].sh --fast`, `test[1].sh`, `docs/[a-z]*.md`, "cat <<EOF", "sh <<EOF",

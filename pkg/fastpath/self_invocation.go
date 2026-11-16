@@ -487,13 +487,26 @@ func readsShellStdin(w []string, r *shellReader) bool {
 		return false
 	}
 	if !hasCommandFlag(w[1:]) {
-		for _, arg := range w[1:] {
+		args := w[1:]
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
 			if arg == "-s" || arg == "-" || arg == "/dev/stdin" {
 				return true
 			}
-			if !strings.HasPrefix(arg, "-") {
-				return false
+			if arg == "--rcfile" || arg == "--init-file" {
+				i++ // The value names a startup file, not the script.
+				continue
 			}
+			if strings.HasPrefix(arg, "--") {
+				continue
+			}
+			if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+") {
+				// Each o/O in a short cluster (-euo pipefail, +O extglob) takes the
+				// following word as its option name, which is not a script operand.
+				i += strings.Count(arg[1:], "o") + strings.Count(arg[1:], "O")
+				continue
+			}
+			return false // The first real operand is a script file.
 		}
 		return true
 	}
