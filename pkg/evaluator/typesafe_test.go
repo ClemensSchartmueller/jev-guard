@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -245,6 +247,16 @@ func TestClient_Evaluate_RecordsAnsweringModel(t *testing.T) {
 }
 
 func TestClient_TransportIgnoresEnvironment(t *testing.T) {
+	if os.Getenv("JEV_TRANSPORT_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClient_TransportIgnoresEnvironment$")
+		cmd.Env = append(os.Environ(), "JEV_TRANSPORT_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("child failed: %v\n%s", err, out)
+		}
+		return
+	}
+	// A fresh process prevents cached proxy settings or roots hiding regressions.
+
 	// Use a non-loopback URL so ProxyFromEnvironment's loopback exemption cannot
 	// hide a regression. Only the test's dialer maps the endpoint to loopback.
 	var proxyConnections atomic.Int32
@@ -284,9 +296,6 @@ func TestClient_TransportIgnoresEnvironment(t *testing.T) {
 		t.Fatal("expected explicit *http.Transport")
 	}
 	defer transport.CloseIdleConnections()
-	if transport.Proxy != nil {
-		t.Fatal("proxy must be disabled")
-	}
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
 		t.Fatal("TLS minimum must be 1.2")
 	}
@@ -312,5 +321,41 @@ func TestClient_TransportIgnoresEnvironment(t *testing.T) {
 	}
 	if endpointRequests.Load() != 0 {
 		t.Fatal("sent API key to untrusted TLS endpoint")
+	}
+}
+
+func TestClient_HTTP2DebugDoesNotLeakKey(t *testing.T) {
+	const key = "secret-http2-regression-key"
+	if os.Getenv("JEV_HTTP2_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClient_HTTP2DebugDoesNotLeakKey$")
+		cmd.Env = append(os.Environ(), "JEV_HTTP2_CHILD=1", "GODEBUG=http2debug=2")
+		out, err := cmd.CombinedOutput()
+		if strings.Contains(string(out), key) {
+			t.Fatal("API key appeared in child stdout/stderr")
+		}
+		if err != nil {
+			t.Fatalf("child failed: %v\n%s", err, out)
+		}
+		return
+	}
+	proto := make(chan string, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proto <- r.Proto
+		w.Write([]byte(`{"answers":{}}`))
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	client := NewClient(key, server.URL, "", time.Second)
+	transport := client.HTTPClient.Transport.(*http.Transport)
+	defer transport.CloseIdleConnections()
+	// Inject trust only into this client's TLS configuration.
+	transport.TLSClientConfig.RootCAs = x509.NewCertPool()
+	transport.TLSClientConfig.RootCAs.AddCert(server.Certificate())
+	if _, err := client.Evaluate(context.Background(), &harness.NormalizedToolCall{ToolName: "bash", Command: "ls"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-proto; got != "HTTP/1.1" {
+		t.Fatalf("request protocol = %s, want HTTP/1.1", got)
 	}
 }

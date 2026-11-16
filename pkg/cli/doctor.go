@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"jev-guard/pkg/config"
+	"jev-guard/pkg/evaluator"
 )
 
 const (
@@ -117,7 +118,7 @@ func (r *Runner) runDoctor(cfg *config.Config, cwd, home string, offline bool) i
 		}
 		client := r.HTTPClient
 		if client == nil {
-			client = &http.Client{}
+			client = &http.Client{Transport: evaluator.NewTransport()}
 		}
 		c := *client
 		c.Timeout = timeout
