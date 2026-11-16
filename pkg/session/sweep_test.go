@@ -3,9 +3,11 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -621,6 +623,70 @@ func TestSweep_UnreachableCursorStillProgresses(t *testing.T) {
 		if run == 1 && next != 0 {
 			t.Fatalf("unreachable cursor 40 led to cursor %d, want a restart at 0", next)
 		}
+	}
+	if n := countExisting(fresh); n != len(fresh) {
+		t.Fatalf("%d recently used lock files swept", len(fresh)-n)
+	}
+}
+
+// sortedListing makes the sweep read directory names in sorted order, so a
+// test can place entries at known listing positions.
+func sortedListing(t *testing.T) {
+	t.Helper()
+	oldRead := sweepReadNames
+	pending := map[*os.File][]string{}
+	sweepReadNames = func(f *os.File, n int) ([]string, error) {
+		rest, ok := pending[f]
+		if !ok {
+			all, err := oldRead(f, -1)
+			if err != nil {
+				return nil, err
+			}
+			sort.Strings(all)
+			rest = all
+		}
+		if len(rest) == 0 {
+			delete(pending, f)
+			return nil, io.EOF
+		}
+		if n <= 0 || n > len(rest) {
+			n = len(rest)
+		}
+		pending[f] = rest[n:]
+		return rest[:n], nil
+	}
+	t.Cleanup(func() { sweepReadNames = oldRead })
+}
+
+// A run that reaches its cursor with time left must inspect the entry there
+// before reading further names. Otherwise a fresh (undeletable) prefix can
+// make the cursor cycle: with a window of 2, one name per read, and the
+// listing deadline spent after six names, cursors went 0 -> 2 -> 4 -> 0
+// forever, because the run at cursor 4 read entries 4 and 5 before
+// inspecting either, although entry 4 could be inspected after five names.
+func TestSweep_CursorEntryInspectedBeforeReadingFurther(t *testing.T) {
+	setupTestJevguardDir(t)
+	oldEntries, oldChunk := sweepMaxEntries, sweepReadChunk
+	sweepMaxEntries, sweepReadChunk = 2, 1
+	t.Cleanup(func() { sweepMaxEntries, sweepReadChunk = oldEntries, oldChunk })
+	var fresh []string
+	for _, id := range []string{"s0", "s1", "s2", "s3", "s5"} {
+		p := sessionLockPath(id)
+		writeAged(t, p, nil, hourAgo)
+		fresh = append(fresh, p)
+	}
+	abandoned := sessionLockPath("s4")
+	writeAged(t, abandoned, nil, ancient)
+	sortedListing(t)
+	reset, _ := listingClock(t, 6)
+
+	next := 0
+	for run := 1; exists(abandoned); run++ {
+		if run > 6 {
+			t.Fatalf("abandoned lock file at listing position 4 left after 6 runs (cursor %d)", next)
+		}
+		reset()
+		_, next = sweepFrom(next)
 	}
 	if n := countExisting(fresh); n != len(fresh) {
 		t.Fatalf("%d recently used lock files swept", len(fresh)-n)

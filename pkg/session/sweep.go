@@ -59,26 +59,38 @@ import (
 //
 // Progress: the position in the directory listing is persisted as a cursor,
 // and each run reads the names before the cursor (names only) to get there.
-// Every run ends in one of three ways:
+// It stops reading at the entry at the cursor and inspects it before reading
+// any further name, and from there inspects each name as it reads it, so a
+// run that has read the name at the cursor with listing time left always
+// inspects that entry. Every run ends in one of three ways:
 //
-//  1. It read entries at the cursor and processed some of them: the next
-//     cursor is past the first entry it started at, or that entry was
+//  1. It inspected entries at the cursor and processed some of them: the
+//     next cursor is past the first entry it started at, or that entry was
 //     removed and the listing shrank. A run never returns its own start
 //     unchanged with nothing removed.
 //  2. It reached the end of the listing: the cursor wraps to 0.
 //  3. It could not reach the cursor (the name budget or the listing deadline
-//     ran out while skipping, or the listing shrank below it), or could not
-//     inspect any entry at it: it falls back to the start of the listing,
-//     processes the names it already read there if time allows, and returns
-//     a cursor counted from 0.
+//     ran out while skipping or right at the cursor, or the listing shrank
+//     below it): it falls back to the start of the listing, processes the
+//     names it already read there if time allows, and returns a cursor
+//     counted from 0 that does not pass any entry it did not inspect.
 //
-// The cursor therefore never repeats the same failed skip: after an
-// unreachable cursor the next run starts at (or near) 0, where skipping is
-// free, and advances from there. Between two resets the cursor only grows or
-// the directory shrinks, so every entry that one run can reach (within
-// sweepMaxNames names and the listing deadline, which bounds what any single
-// run can read) is visited within a bounded number of runs. Entries beyond
-// that horizon cannot be reached by any bounded run, positional or not; the
+// Progress argument. Assume the directory changes only by the sweep's own
+// removals and that reading a given prefix of names costs about the same in
+// every run. Call position p reachable when a run whose cursor is p reads
+// names 0..p within sweepMaxNames and the listing deadline and still has
+// time to inspect p. A run with cursor c <= p does exactly a prefix of that
+// work before inspecting c, so c is reachable too and the run inspects c and
+// returns a cursor past c (case 1), or one past the end (case 2), or c's entry
+// is gone and p's entry moved to p-1. Hence, from any cursor at or before a
+// reachable entry, the cursor passes that entry within p+1 runs and the run
+// whose window holds it inspects it, even when every entry in front of it is
+// in use and cannot be removed. From a cursor beyond p, the cursor grows each
+// run until it wraps or becomes unreachable (case 3, cursor counted from 0),
+// which takes at most sweepMaxNames runs. An inspected entry that needs
+// cleanup is then visited; the first session a run visits gets the whole
+// op budget and at least half of sweepBudget. Entries beyond the reachable
+// horizon cannot be reached by any bounded run, positional or not; the
 // horizon is large because reading names is cheap, and it widens as the
 // sweep removes abandoned entries in front of them.
 //
@@ -382,12 +394,15 @@ type windowEntry struct {
 // position start, at most sweepMaxEntries of them, together with the window's
 // actual start and whether the listing ended within the window. Names before
 // start are skipped unread beyond the name itself; every name read counts
-// against sweepMaxNames. When no name at start could be read (the name budget
-// or the deadline ran out while skipping, or the listing has fewer entries),
-// the window falls back to the names already read from position 0. Session,
-// lock, and marker names in the window are lstat'ed, each after a deadline
-// check; the window ends before the first one the deadline leaves unchecked,
-// and is empty when nothing could be inspected.
+// against sweepMaxNames. Reading stops at the entry at start, and from there
+// each name is inspected before the next one is read: session, lock, and
+// marker names are lstat'ed, each after a deadline check, and the window ends
+// before the first one the deadline leaves unchecked. A run that reads the
+// name at start with time left therefore always inspects that entry. When no
+// entry at start could be inspected (the name budget or the deadline ran out
+// while skipping or at the cursor, or the listing has fewer entries), the
+// window falls back to the names already read from position 0, inspected the
+// same way. The window is empty when nothing could be inspected.
 func readWindow(dir string, start int, deadline time.Time) (window []windowEntry, at int, eof bool) {
 	names := &sweepBudgetState{deadline: deadline, ops: sweepMaxNames}
 	if !names.step() {
@@ -398,12 +413,32 @@ func readWindow(dir string, start int, deadline time.Time) (window []windowEntry
 		return nil, 0, false
 	}
 	defer f.Close()
-	var head, list []string
-	pos, ended := 0, false
-	for len(list) < sweepMaxEntries {
+	// inspect appends name to window, lstat'ing it first if the sweep looks
+	// at it. It reports false, appending nothing, when the deadline passed.
+	inspect := func(name string) bool {
+		we := windowEntry{name: name}
+		if sweepRelevant(name) {
+			if !sweepNow().Before(deadline) {
+				return false
+			}
+			if info, err := sweepLstat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() {
+				we.regular = true
+				we.age = time.Since(info.ModTime())
+			}
+		}
+		window = append(window, we)
+		return true
+	}
+	var head []string
+	pos, ended, cut := 0, false, false
+	for len(window) < sweepMaxEntries && !cut {
 		n := sweepReadChunk
-		if start+sweepMaxEntries-pos < n {
-			n = start + sweepMaxEntries - pos // never read past the window
+		if pos < start {
+			if start+1-pos < n {
+				n = start + 1 - pos // stop at the cursor entry and inspect it first
+			}
+		} else if sweepMaxEntries-len(window) < n {
+			n = sweepMaxEntries - len(window) // never read past the window
 		}
 		if names.ops < n {
 			n = names.ops
@@ -415,7 +450,10 @@ func readWindow(dir string, start int, deadline time.Time) (window []windowEntry
 		for _, name := range chunk {
 			switch {
 			case pos >= start:
-				list = append(list, name)
+				// Names after the first uninspected one are dropped.
+				if !cut && !inspect(name) {
+					cut = true
+				}
 			case len(head) < sweepMaxEntries:
 				head = append(head, name)
 			}
@@ -429,27 +467,17 @@ func readWindow(dir string, start int, deadline time.Time) (window []windowEntry
 			break
 		}
 	}
-	at, eof = start, ended
-	if len(list) == 0 && start > 0 {
-		// The cursor is unreachable in this run: start over from 0 with
-		// the names already read, so the next run never repeats this skip.
-		list, at, eof = head, 0, ended && pos <= sweepMaxEntries
+	if len(window) > 0 || start == 0 {
+		return window, start, ended && !cut
 	}
-	for _, name := range list {
-		we := windowEntry{name: name}
-		if sweepRelevant(name) {
-			if !sweepNow().Before(deadline) {
-				// Not inspected: the cursor ends before it.
-				return window, at, false
-			}
-			if info, err := sweepLstat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() {
-				we.regular = true
-				we.age = time.Since(info.ModTime())
-			}
+	// No entry at the cursor was inspected in this run: start over from 0
+	// with the names already read, so the next run never repeats this skip.
+	for _, name := range head {
+		if !inspect(name) {
+			return window, 0, false
 		}
-		window = append(window, we)
 	}
-	return window, at, eof
+	return window, 0, ended && pos <= sweepMaxEntries
 }
 
 // sweepRelevant reports whether the sweep looks at a directory entry: a
