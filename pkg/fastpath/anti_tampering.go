@@ -21,8 +21,9 @@ import (
 const SourceAntiTamperingLimit = "anti_tampering_limit"
 
 // CheckAntiTampering denies any access to jev-guard's own configuration, log, or
-// session state. It is a hard invariant: it runs before every other check and does
-// not depend on fastpath_enabled or user intent. It returns ASK (source
+// session state, including state-changing invocations of its CLI. Read/evaluation
+// CLI invocations return ASK with source fastpath_self_invocation. This invariant
+// runs before every other check, independent of fastpath_enabled or user intent. It returns ASK (source
 // anti_tampering_limit) when a command is too large to read word by word and its
 // text names no protected file. Returns nil when the call is clean.
 func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
@@ -44,7 +45,7 @@ func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationRes
 	} else if limit != "" {
 		overLimit = limit
 	} else {
-		return nil
+		return checkSelfInvocation(call)
 	}
 
 	if overLimit != "" {

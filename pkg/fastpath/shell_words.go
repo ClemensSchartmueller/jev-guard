@@ -606,11 +606,16 @@ func posixWords(s string) []string {
 
 // posixRead is posixWords that, with track set, also returns the glob and brace patterns. It
 // also reports which words hold a variable the shell expands (see wordBuilder.expanded).
-func posixRead(s string, track bool) (words, patterns []string, expanded []bool) {
+// Optional commands mode preserves unquoted control operators as commandSeparator tokens.
+func posixRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track, braces: true}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			b.writeString(commandSeparator)
+			b.flush()
 		case isShellSpace(c):
 			b.flush()
 		case c == '\\':
@@ -773,11 +778,15 @@ func powerShellWords(s string) []string {
 // powerShellRead is powerShellWords that, with track set, also returns the wildcard patterns,
 // which cmdlets such as Get-Content expand themselves. PowerShell has no brace expansion. It
 // also reports which words hold a variable PowerShell expands (see wordBuilder.expanded).
-func powerShellRead(s string, track bool) (words, patterns []string, expanded []bool) {
+func powerShellRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			b.writeString(commandSeparator)
+			b.flush()
 		case isShellSpace(c):
 			b.flush()
 		case c == '`':
@@ -829,7 +838,7 @@ func cmdWords(s string) []string {
 
 // cmdRead is cmdWords that also reports which words hold a %, which cmd.exe expands as a
 // variable before it reads quotes and carets.
-func cmdRead(s string) (words []string, expanded []bool) {
+func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
 	var b wordBuilder
 	inQuotes := false
 	for i := 0; i < len(s); i++ {
@@ -843,6 +852,10 @@ func cmdRead(s string) (words []string, expanded []bool) {
 			b.started = true
 		case inQuotes:
 			b.writeByte(c)
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			b.writeString(commandSeparator)
+			b.flush()
 		case isShellSpace(c):
 			b.flush()
 		case c == '^':

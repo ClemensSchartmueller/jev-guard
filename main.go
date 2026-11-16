@@ -268,12 +268,12 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 
 // traceGateEvaluation runs anti-tampering, boundary, fastpath, semantic evaluation, and policy.
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict
-// (unless the anti-tampering limit set a floor).
+// (unless anti-tampering supplies a verdict or sets an ASK floor).
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
 	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
 	tampering := fastpath.CheckAntiTampering(call)
-	if fastpath.IsTamperingDenial(tampering) {
+	if fastpath.IsTamperingDenial(tampering) || (tampering != nil && tampering.Source == fastpath.SourceSelfInvocation) {
 		return &gateTrace{Tampering: tampering, Final: applyAuditMode(tampering, cfg.Mode)}
 	}
 	if tampering == nil {

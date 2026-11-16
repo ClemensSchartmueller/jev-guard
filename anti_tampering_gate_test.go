@@ -340,3 +340,65 @@ func TestTraceGateEvaluationEncodedNestingDepthIsFloored(t *testing.T) {
 		}
 	}
 }
+
+func TestGuardSelfInvocationGate(t *testing.T) {
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	deny := []string{
+		"ingest --session x --prompt hi", "end-turn --session x", "end_turn --session x",
+		"clear-intent --all", "clear_intent --all", "cache clear", "init",
+		"config trust", "config untrust",
+	}
+	ask := []string{"status", "eval --cmd pwd", "explain --cmd pwd", "doctor", "config show", "cache", "cache status", "", "unknown"}
+	forms := []string{
+		"jev-guard %s", "jev-guard.exe %s", "/usr/local/bin/jev-guard %s", "./bin/jev-guard %s",
+		`"C:\Tools\jev-guard.exe" %s`, "FOO=bar jev-guard %s", "FOO=bar env BAR=baz jev-guard %s",
+		"env -u FOO jev-guard %s", "command -- jev-guard %s", "command -p jev-guard %s", "exec jev-guard %s", "exec -a alias jev-guard %s",
+		"sudo -u root -- jev-guard %s", "doas jev-guard %s", "true&&jev-guard %s",
+		"false||jev-guard %s", "true;jev-guard %s", "echo x|jev-guard %s", "true\njev-guard %s",
+		"sh -c 'jev-guard %s'", `bash -lc 'jev-guard %s'`, `cmd /c "jev-guard %s"`,
+		`pwsh -Command "& jev-guard %s"`, "npx @clemensschartmueller/jev-guard %s",
+		"npx --yes @clemensschartmueller/jev-guard@1.2.3 %s", "echo $(jev-guard %s)",
+	}
+	for _, enabled := range []bool{true, false} {
+		cfg := config.DefaultConfig()
+		cfg.FastpathEnabled = &enabled
+		for _, class := range []struct {
+			args     []string
+			decision harness.Decision
+		}{{deny, harness.DecisionDeny}, {ask, harness.DecisionAsk}} {
+			for _, args := range class.args {
+				for _, form := range forms {
+					command := fmt.Sprintf(form, args)
+					trace := traceGateEvaluation(&harness.NormalizedToolCall{ToolName: "Bash", Command: command}, cfg, true)
+					if trace.Final == nil || trace.Final.Decision != class.decision || trace.Final.Source != fastpath.SourceSelfInvocation {
+						t.Errorf("enabled=%t command=%q: final=%+v; want %s", enabled, command, trace.Final, class.decision)
+					}
+					if trace.FastpathRan || trace.WouldSendToJudge {
+						t.Errorf("%q reached later stages", command)
+					}
+				}
+			}
+		}
+	}
+	for _, command := range []string{
+		"echo jev-guard", "grep jev-guard README.md", "echo jev-guard ingest", "echo sh -c 'jev-guard ingest'", "grep bash README.md", "cat /usr/bin/jev-guard",
+		"jev-guard --version", "jev-guard --help", "jev-guard version", "jev-guard help",
+		"echo npx @clemensschartmueller/jev-guard ingest", "npx @clemensschartmueller/jev-guard-other ingest",
+	} {
+		if result := fastpath.CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: command}); result != nil {
+			t.Errorf("negative control %q: %+v", command, result)
+		}
+	}
+	// A later mutating invocation must dominate an earlier read invocation.
+	result := fastpath.CheckAntiTampering(&harness.NormalizedToolCall{Command: "jev-guard status && jev-guard ingest --prompt hi"})
+	if !fastpath.IsTamperingDenial(result) {
+		t.Fatalf("mixed command: %+v", result)
+	}
+	// Literal argv from exec-style harnesses also identifies the executable.
+	for _, args := range [][]string{{"/bin/jev-guard", "ingest"}, {"env", "FOO=x", "jev-guard.exe", "clear-intent", "--all"}} {
+		result := fastpath.CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "exec", RawArgs: map[string]interface{}{"command": args}})
+		if !fastpath.IsTamperingDenial(result) {
+			t.Errorf("argv %q: %+v", args, result)
+		}
+	}
+}
