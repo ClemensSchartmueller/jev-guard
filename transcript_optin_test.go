@@ -55,7 +55,15 @@ func TestTranscriptGuardDoesNotRunWhenOff(t *testing.T) {
 	// Only 4 KiB here, since the fast path is on: main's boundary resolver is itself quadratic on this shape,
 	// which is not the guard's cost and would only slow this test down.
 	long := "echo " + strings.Repeat("a/", 2<<10) + "z"
+	// Over the guard's command-size and word limits (2 MiB, 50,000 words) in about a million words.
 	huge := "echo " + strings.Repeat("x ", (1<<20)+1024)
+	// Over the same limits in 20 times fewer words. With the fast path on, its sensitive-file
+	// check looks up every word on disk, which is not the guard's cost: about 25 s per call for
+	// huge on Windows. So huge runs through the fast path once, and wide for the other agents.
+	wide := "echo " + strings.Repeat(strings.Repeat("x", 41)+" ", 50_000+1024)
+	if len(wide) <= 2<<20 || strings.Count(wide, " ") <= 50_000 {
+		t.Fatalf("wide (%d bytes) must be over the guard's limits", len(wide))
+	}
 	for name, call := range map[string]*harness.NormalizedToolCall{
 		"commit message":     {ToolName: "Bash", Command: `git commit -m 'Document trans"cript.jsonl naming'`, Cwd: work},
 		"text rule":          {ToolName: "Bash", Command: `git commit -m 'about transcript.jsonl and .system_generated and antigravity/brain'`, Cwd: work},
@@ -65,6 +73,10 @@ func TestTranscriptGuardDoesNotRunWhenOff(t *testing.T) {
 	} {
 		for _, harnessType := range []harness.HarnessType{harness.HarnessClaudeCode, harness.HarnessCodex, harness.HarnessAntigravity} {
 			for mode, fastpathOn := range map[string]bool{"fastpath on": true, "fastpath off": false} {
+				call := call
+				if call.Command == huge && fastpathOn && harnessType != harness.HarnessClaudeCode {
+					call = &harness.NormalizedToolCall{ToolName: "Bash", Command: wide, Cwd: work}
+				}
 				t.Run(name+"/"+string(harnessType)+"/"+mode, func(t *testing.T) {
 					c := *call
 					c.Harness = harnessType
