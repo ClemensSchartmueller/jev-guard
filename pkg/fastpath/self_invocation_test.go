@@ -9,6 +9,31 @@ import (
 
 func TestSelfInvocationReviewRegressions(t *testing.T) {
 	deny := []string{
+		`echo jev-guard ingest | sh -`, `echo jev-guard ingest | bash /dev/stdin`,
+		"pwsh -c '# say \"hi\njev-guard ingest'",
+
+		"f(){ jev-guard ingest; }; f",
+		"f () { jev-guard end-turn; } ; f",
+		"f() (jev-guard ingest); f",
+		"bash -c 'f(){ jev-guard clear-intent; }; f'",
+		"x=$(f(){ jev-guard ingest; }; f)",
+		"if (true) then jev-guard ingest; fi",
+		"while (true) do jev-guard ingest; break; done",
+		"until (false) do jev-guard ingest; done",
+		"case x in (x) jev-guard ingest;; esac",
+		"(case x in x) jev-guard ingest;; esac)",
+		"# Let's reset the session\njev-guard clear-intent --all",
+		"git status # what's changed?\njev-guard ingest",
+		"cd /repo  # user's repo\njev-guard end-turn",
+		"# Check the guard's state, then ingest\njev-guard ingest",
+		"# say \"hi\njev-guard ingest",
+		"# it's\nbash -c 'jev-guard ingest'",
+		"# it's\necho $(jev-guard ingest)",
+		"# it's\ncat <<EOF | sh\njev-guard ingest\nEOF",
+		"cat <<EOF | sh\n# it's\njev-guard ingest\nEOF",
+		"cat <<EOF | (cat | sh)\njev-guard ingest\nEOF",
+		"<# say \"hi #>\njev-guard ingest",
+
 		` { sh; } <<< 'jev-guard ingest'`, `( sh ) <<< 'jev-guard ingest'`,
 		`echo jev-guard ingest | cat | sh`, `echo jev-guard ingest | tee /dev/null | sh`,
 		"cat <<EOF | tee /dev/null | sh\njev-guard ingest\nEOF",
@@ -41,6 +66,12 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 	}
 	ask := []string{"bash -" + strings.Repeat("l", 129) + "c 'jev-guard ingest'", `/path/jev-guar[[:alpha:]] ingest`, `echo ingest | xargs jev-guard`, `yarn jev-guard`, `~/.local/bin/jev-*`, `Start-Process jev-guard`}
 	negative := []string{
+		"echo a#b",
+		"echo ${#x}",
+		"echo $#",
+		"grep 'jev-guard ingest' docs/cli.md | bash scripts/count.sh",
+		"rg -l 'jev-guard ingest' | sh ./scripts/x.sh",
+
 		`echo $((1<<3))`, `printf "%d" $((2<<10))`, `(( x = 1 << 4 ))`, `git log |`,
 		`./build[2].sh --fast`, `test[1].sh`, `docs/[a-z]*.md`, "cat <<EOF", "sh <<EOF",
 		"cat <<EOF\nEOF", "sh <<EOF\nEOF", "cat <<A <<B\nA\nB",
@@ -107,7 +138,7 @@ func TestB2Performance(t *testing.T) {
 		if elapsed > 2*time.Second {
 			t.Fatal("exceeded 2 seconds")
 		}
-		if strings.HasPrefix(cmd, "echo") && (got == nil || got.Decision == harness.DecisionAllow) {
+		if (got != nil && got.Decision == harness.DecisionAllow) || (strings.HasPrefix(cmd, "echo") && got == nil) {
 			t.Fatal("must fail closed")
 		}
 	}

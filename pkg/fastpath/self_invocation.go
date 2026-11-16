@@ -120,7 +120,8 @@ func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Ti
 					unwrapped := unwrapInvocation(segment, r)
 					visit(payload, depth+1, len(unwrapped) > 0 && programName(unwrapped[0]) == "cmd")
 				}
-				if readsStdin || i == len(words) || words[i] != pipelineSeparator {
+				// Empty segments at a group opener retain the preceding pipeline input.
+				if readsStdin || i == len(words) || (words[i] != pipelineSeparator && len(segment) > 0) {
 					upstream = nil
 				}
 				if i < len(words) && words[i] == pipelineSeparator {
@@ -486,6 +487,14 @@ func readsShellStdin(w []string, r *shellReader) bool {
 		return false
 	}
 	if !hasCommandFlag(w[1:]) {
+		for _, arg := range w[1:] {
+			if arg == "-s" || arg == "-" || arg == "/dev/stdin" {
+				return true
+			}
+			if !strings.HasPrefix(arg, "-") {
+				return false
+			}
+		}
 		return true
 	}
 	for _, payload := range r.commandPayloads(w) {

@@ -445,10 +445,8 @@ func readHeredocs(s string, capture func(string, bool) string, readers ...*shell
 		case c == '#' && atWordStart:
 			end := strings.IndexByte(s[i:], '\n')
 			if end < 0 {
-				out.WriteString(s[i:])
 				return out.String()
 			}
-			out.WriteString(s[i : i+end])
 			i += end - 1
 		case strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "(("):
 			end := strings.Index(s[i:], "))")
@@ -710,20 +708,22 @@ func posixWords(s string) []string {
 // Optional commands mode preserves unquoted control operators as commandSeparator tokens.
 func posixRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track, braces: true}
-	groupDepth := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case len(commands) > 0 && commands[0] && (c == '(' || c == ')'):
-			b.flush()
-			if c == '(' {
-				groupDepth++
-			} else if groupDepth > 0 {
-				groupDepth--
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started:
+			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
+				i += end - 1
 			} else {
-				b.writeString(commandSeparator)
-				b.flush()
+				i = len(s)
 			}
+		case len(commands) > 0 && commands[0] && (strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "((")):
+			if end := strings.Index(s[i:], "))"); end >= 0 {
+				i += end + 1
+			} else {
+				i = len(s)
+			}
+
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
 			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
@@ -944,6 +944,27 @@ func powerShellRead(s string, track bool, commands ...bool) (words, patterns []s
 		switch {
 		case len(commands) > 0 && commands[0] && (c == '(' || c == ')'):
 			b.flush()
+
+		case len(commands) > 0 && commands[0] && strings.HasPrefix(s[i:], "<#"):
+			if end := strings.Index(s[i+2:], "#>"); end >= 0 {
+				i += end + 3
+			} else {
+				i = len(s)
+			}
+
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started:
+			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
+				i += end - 1
+			} else {
+				i = len(s)
+			}
+		case len(commands) > 0 && commands[0] && (strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "((")):
+			if end := strings.Index(s[i:], "))"); end >= 0 {
+				i += end + 1
+			} else {
+				i = len(s)
+			}
+
 		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
 			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
