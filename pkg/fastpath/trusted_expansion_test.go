@@ -169,3 +169,24 @@ func TestTrustedGitPathspecBackslashes(t *testing.T) {
 		}
 	}
 }
+
+// A directory whose name contains a reflog selector is still a filesystem
+// operand: masking selectors must not hide it from the two-path check, or git's
+// implicit no-index mode diffs it (and the secrets inside) under ALLOW.
+func TestTrustedSelectorNamedDirectoryIsCounted(t *testing.T) {
+	cwd := t.TempDir()
+	for _, name := range []string{"x@{1}", "@{u}", "other"} {
+		if err := os.Mkdir(filepath.Join(cwd, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "x@{1}", ".env"), []byte("S=1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, nil)
+	for _, command := range []string{"git diff x@{1} other", "git diff other x@{1}", "git diff 'x@{1}' other", "git diff @{u} other"} {
+		assertDeferred(t, filter, command, &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: command})
+	}
+	// A selector that is not also an existing directory stays a revision.
+	assertTrustedAllow(t, filter, "git diff HEAD@{1} other", &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: "git diff HEAD@{1} other"})
+}

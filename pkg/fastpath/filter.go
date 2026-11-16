@@ -600,34 +600,39 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if trustedPrefix == "git diff" {
 		// Inspect the union of shell readings, preserving filesystem case. Git can
 		// implicitly compare paths regardless of repository metadata or environment.
-		pathArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
-		pathArgs = gitReflogReference.ReplaceAllString(pathArgs, "\x00")
-		paths := 0
-		pathsOnly := false
-		for _, arg := range shellWords(pathArgs) {
-			// Mask selectors before reading so alternate shell forms cannot
-			// turn one revision into multiple filesystem operands.
-			if strings.ContainsRune(arg, 0) {
-				continue
-			}
-			if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
-				return false, nil
-			}
-			if arg == "--" {
-				pathsOnly = true
-				continue
-			}
-			if !pathsOnly && strings.HasPrefix(arg, "-") {
-				continue
-			}
-			candidate := arg
-			if !filepath.IsAbs(candidate) {
-				candidate = filepath.Join(call.Cwd, candidate)
-			}
-			if _, err := os.Stat(candidate); !os.IsNotExist(err) {
-				paths++
+		rawArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
+		existing := map[string]struct{}{}
+		// Read the operands twice: once with reflog selectors masked, so alternate
+		// shell forms cannot split one revision into several filesystem operands,
+		// and once unmasked, so a real directory whose name contains a selector
+		// (for example "x@{1}") is still counted. Extra fragments only matter if
+		// they exist on disk, which makes the second pass fail toward deferral.
+		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(rawArgs, "\x00"), rawArgs} {
+			pathsOnly := false
+			for _, arg := range shellWords(pathArgs) {
+				if strings.ContainsRune(arg, 0) {
+					continue
+				}
+				if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
+					return false, nil
+				}
+				if arg == "--" {
+					pathsOnly = true
+					continue
+				}
+				if !pathsOnly && strings.HasPrefix(arg, "-") {
+					continue
+				}
+				candidate := arg
+				if !filepath.IsAbs(candidate) {
+					candidate = filepath.Join(call.Cwd, candidate)
+				}
+				if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+					existing[filepath.Clean(candidate)] = struct{}{}
+				}
 			}
 		}
+		paths := len(existing)
 		if paths >= 2 {
 			return false, nil
 		}
