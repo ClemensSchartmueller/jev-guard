@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfigWithPaths_UntrustedProjectCannotOverrideSecuritySettings(t *testing.T) {
@@ -586,5 +587,162 @@ func TestInspectProjectConfigReportsMissingTrustRegistry(t *testing.T) {
 	}
 	if info.Trusted || info.TrustIssue != "trust registry does not exist" {
 		t.Fatalf("expected an untrusted config with a missing-registry issue, got trusted=%t issue=%q", info.Trusted, info.TrustIssue)
+	}
+}
+
+func TestInspectProjectConfig_ReportsTrustRecordForAnotherSpellingWithoutTrustingIt(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	linkParent := filepath.Join(root, "link")
+	realRepo := filepath.Join(realParent, "repo")
+	linkRepo := filepath.Join(linkParent, "repo")
+	if err := os.MkdirAll(realRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeConfig(t, filepath.Join(realRepo, ".jevguard.json"), `{"sensitive_files":[".alias-secret"]}`)
+
+	approved, err := inspectProjectConfigIsolated(t, linkRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := ProjectConfigTrust{
+		ProjectRoot: filepath.Join(root, "deleted"),
+		ConfigPath:  filepath.Join(root, "deleted", ".jevguard.json"),
+		SHA256:      approved.SHA256,
+	}
+	registryPath := filepath.Join(root, "user", "trusted-project-configs.json")
+	registryBytes, err := json.Marshal(map[string]any{
+		"version": 1,
+		"entries": []ProjectConfigTrust{gone, approved.TrustRecord},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+
+	alias, err := inspectProjectConfigWithRegistry(realRepo, registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias.Trusted {
+		t.Fatalf("a record for another spelling must not trust this path, got %+v", alias)
+	}
+	if alias.TrustAliasCheckSkipped || len(alias.TrustAliases) != 1 || alias.TrustAliases[0] != approved.TrustRecord {
+		t.Fatalf("expected the symlinked-path record as the only alias, got %+v", alias.TrustAliases)
+	}
+
+	exact, err := inspectProjectConfigWithRegistry(linkRepo, registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exact.Trusted || len(exact.TrustAliases) != 0 {
+		t.Fatalf("the exact record must not be reported as its own alias, got %+v", exact)
+	}
+
+	// A record naming a symlinked config file could never be approved, so it is not an alias.
+	symlinkRepo := filepath.Join(root, "symlink-file")
+	if err := os.MkdirAll(symlinkRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkConfig := filepath.Join(symlinkRepo, ".jevguard.json")
+	if err := os.Symlink(filepath.Join(realRepo, ".jevguard.json"), symlinkConfig); err != nil {
+		t.Skipf("file symlinks unavailable: %v", err)
+	}
+	registryBytes, err = json.Marshal(map[string]any{
+		"version": 1,
+		"entries": []ProjectConfigTrust{{ProjectRoot: symlinkRepo, ConfigPath: symlinkConfig, SHA256: approved.SHA256}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, registryPath, string(registryBytes))
+	if info, err := inspectProjectConfigWithRegistry(realRepo, registryPath); err != nil || len(info.TrustAliases) != 0 {
+		t.Fatalf("a symlinked config file record must not be reported as an alias, got info=%+v err=%v", info, err)
+	}
+}
+
+func TestInspectProjectConfig_BoundsTrustAliasScanOnUnreachableEntry(t *testing.T) {
+	clearConfigEnvironment(t)
+
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	writeConfig(t, filepath.Join(repo, ".jevguard.json"), `{"sensitive_files":[".slow-secret"]}`)
+	approved, err := inspectProjectConfigIsolated(t, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a stale network mount: lookups under unreachable/ block until the test ends.
+	unreachable := filepath.Join(root, "unreachable")
+	release := make(chan struct{})
+	slow := func(real func(string) (os.FileInfo, error)) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			if strings.HasPrefix(path, unreachable) {
+				<-release
+			}
+			return real(path)
+		}
+	}
+	origStat, origLstat, origTimeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
+	trustAliasStat, trustAliasLstat, trustAliasScanTimeout = slow(os.Stat), slow(os.Lstat), 50*time.Millisecond
+	t.Cleanup(func() {
+		trustAliasStat, trustAliasLstat, trustAliasScanTimeout = origStat, origLstat, origTimeout
+		close(release)
+	})
+
+	stale := ProjectConfigTrust{
+		ProjectRoot: filepath.Join(unreachable, "repo"),
+		ConfigPath:  filepath.Join(unreachable, "repo", ".jevguard.json"),
+		SHA256:      approved.SHA256,
+	}
+	for _, tc := range []struct {
+		name    string
+		entries []ProjectConfigTrust
+		trusted bool
+	}{
+		{name: "untrusted", entries: []ProjectConfigTrust{stale}, trusted: false},
+		{name: "trusted", entries: []ProjectConfigTrust{stale, approved.TrustRecord}, trusted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registryPath := filepath.Join(root, tc.name, "trusted-project-configs.json")
+			registryBytes, err := json.Marshal(map[string]any{"version": 1, "entries": tc.entries})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeConfig(t, registryPath, string(registryBytes))
+
+			// Inspect asynchronously so a regression fails at the watchdog instead of
+			// hanging until the blocked lookups are released in cleanup.
+			type result struct {
+				info *ProjectConfigInfo
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				info, err := inspectProjectConfigWithRegistry(repo, registryPath)
+				done <- result{info, err}
+			}()
+			var info *ProjectConfigInfo
+			select {
+			case r := <-done:
+				info, err = r.info, r.err
+			case <-time.After(5 * time.Second):
+				t.Fatal("alias scan was not bounded: inspection did not return within 5s")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Trusted != tc.trusted || info.TrustIssue != "" {
+				t.Fatalf("a timed-out alias scan must not change the trust decision, got trusted=%t issue=%q", info.Trusted, info.TrustIssue)
+			}
+			if !info.TrustAliasCheckSkipped || len(info.TrustAliases) != 0 {
+				t.Fatalf("expected a skipped alias scan with no aliases, got skipped=%t aliases=%+v", info.TrustAliasCheckSkipped, info.TrustAliases)
+			}
+		})
 	}
 }
