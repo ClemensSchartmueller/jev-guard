@@ -24,9 +24,15 @@ The same directory holds the binary, trust registry, and session data:
     ├── bin/
     │   └── jev-guard (or jev-guard.exe)  # Executable binary (install.ps1 adds this to User PATH)
     ├── sessions/
-    │   └── <session_hash>.json           # Ephemeral, atomic session intent cache
+    │   ├── <session_hash>.json           # Ephemeral, atomic session intent cache
+    │   ├── <session_hash>.json.lock      # Per-session write lock
+    │   ├── <session_hash>.json.taint.*   # Taint and abort markers (see security model)
+    │   ├── <session_hash>.json.abort.*
+    │   └── .sweep                        # Time of the last cleanup sweep
     └── trusted-project-configs.json      # Approved project config digests, if configured
 ```
+
+`end-turn` and `status` run a cleanup sweep at most once an hour. It removes files left by abandoned sessions: markers and session files older than 48 hours, and lock files idle for 7 days whose session has no file or markers left. It never waits for a lock held by an active session and never fails a hook.
 
 Run `jev-guard config show` to see the effective values and where each comes from. Secrets are never printed.
 

@@ -510,6 +510,9 @@ func (r *Runner) handleEndTurn(args []string) (Action, int) {
 	// is kept rather than risk deleting a recorded stop. EndTurn checks and
 	// clears under the session lock, so a concurrent abort is never lost.
 	aborted, err := session.EndTurn(sessionID)
+	// Remove files left by abandoned sessions. Rate-limited, non-blocking,
+	// and never fails the hook.
+	session.MaybeSweep()
 	if err != nil {
 		fmt.Fprintf(r.Stderr, "jev-guard: end-turn kept session '%s': %v\n", sessionID, err)
 		return ActionHandled, 0
@@ -541,6 +544,7 @@ func (r *Runner) handleStatus() (Action, int) {
 		fmt.Fprintf(r.Stderr, "Error reading sessions: %v\n", err)
 		return ActionHandled, 1
 	}
+	session.MaybeSweep()
 
 	fmt.Fprintln(r.Stdout, "jev-guard status:")
 	fmt.Fprintf(r.Stdout, "  Home Directory:     %s\n", homeDir)
