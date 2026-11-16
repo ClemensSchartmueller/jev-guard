@@ -1,10 +1,8 @@
 package config
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"syscall"
+	_ "unsafe" // for go:linkname
 )
 
 // trustPinningSupported reports whether this platform can pin a trust record's path without
@@ -16,58 +14,38 @@ const trustPinningSupported = true
 // the last, is a symlink, and the kernel checks this during its single path resolution.
 const darwinONoFollowAny = 0x20000000
 
-// pinRecordedConfig opens a canonical trust record's directory and config file with
-// O_NOFOLLOW_ANY, so neither path may contain a symlink at the moment it is resolved, and
-// returns the identities of both handles. The Go 1.23 syscall package has no openat on
-// macOS, so the file is resolved by its full path rather than relative to the directory
-// handle; each resolution is still link-free on its own.
+const (
+	// macOS has no O_PATH, so directories are opened for reading. A directory without read
+	// permission therefore cannot be pinned, which fails closed.
+	pinDirFlags  = syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_CLOEXEC
+	pinFileFlags = syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+)
+
+// darwinOpenat is the syscall package's unexported openat(2) wrapper, a libc trampoline in
+// the standard library. The syscall package marks it with a push go:linkname ("used by
+// internal/syscall/unix"), which is what lets the Go 1.23 linker resolve this reference
+// without cgo or golang.org/x/sys. If a later Go release withdraws it, the build fails at
+// link time rather than silently losing the directory binding.
+//
+//go:linkname darwinOpenat syscall.openat
+func darwinOpenat(fd int, path string, flags int, perm uint32) (int, error)
+
+func pinOpenat(dirfd int, name string, flags int) (int, error) {
+	return darwinOpenat(dirfd, name, flags, 0)
+}
+
+// pinRecordedConfig opens a canonical trust record's directory with O_NOFOLLOW_ANY, so no
+// component of its path may be a symlink at the moment the kernel resolves it, and then
+// opens the config file relative to that directory handle without following a link. It
+// returns the identities of both handles.
 func pinRecordedConfig(projectRoot, name string, step func(string)) (pinnedConfig, error) {
 	if err := checkPinnablePath(projectRoot, name); err != nil {
 		return pinnedConfig{}, err
 	}
-	return pinDarwinConfig(projectRoot, name, darwinONoFollowAny, step)
-}
-
-// pinInspectedConfig opens the inspected project directory, following links because the
-// inspected spelling may legitimately use them, and the config file without following a
-// final link. Without openat the file is a second lookup of the same spelling.
-func pinInspectedConfig(projectRoot, name string, step func(string)) (pinnedConfig, error) {
-	if err := checkPinnablePath(projectRoot, name); err != nil {
-		return pinnedConfig{}, err
-	}
-	return pinDarwinConfig(projectRoot, name, 0, step)
-}
-
-func pinDarwinConfig(projectRoot, name string, extra int, step func(string)) (pinnedConfig, error) {
 	step(projectRoot)
-	dirInfo, err := pinDarwinOpen(projectRoot, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|extra)
+	fd, err := syscall.Open(projectRoot, pinDirFlags|darwinONoFollowAny, 0)
 	if err != nil {
 		return pinnedConfig{}, err
 	}
-	if !dirInfo.IsDir() {
-		return pinnedConfig{}, fmt.Errorf("%s is not a directory", projectRoot)
-	}
-	configPath := filepath.Join(projectRoot, name)
-	step(configPath)
-	fileInfo, err := pinDarwinOpen(configPath, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC|extra)
-	if err != nil {
-		return pinnedConfig{}, err
-	}
-	if !fileInfo.Mode().IsRegular() {
-		return pinnedConfig{}, fmt.Errorf("%s is not a regular, non-symlink file", configPath)
-	}
-	return pinnedConfig{dir: dirInfo, file: fileInfo}, nil
-}
-
-func pinDarwinOpen(path string, flags int) (os.FileInfo, error) {
-	fd, err := syscall.Open(path, flags, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("open %s: invalid file descriptor", path)
-	}
-	return statOwnedFile(file)
+	return pinConfigInDir(fd, projectRoot, name, step)
 }

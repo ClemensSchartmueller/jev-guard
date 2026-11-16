@@ -164,19 +164,18 @@ func countTrustProposals(t *testing.T) *atomic.Int32 {
 	return &calls
 }
 
-// countPinnedLookups counts the pinned lookups that canonical records need.
+// countPinnedLookups counts the pinned lookups of registry record paths that canonical
+// records need. Opening the inspected config itself is part of reading it, not a registry
+// lookup, and is not counted.
 func countPinnedLookups(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var calls atomic.Int32
-	origRecorded, origInspected := trustPinRecorded, trustPinInspected
-	counted := func(real pinFunc) pinFunc {
-		return func(projectRoot, name string, step func(string)) (pinnedConfig, error) {
-			calls.Add(1)
-			return real(projectRoot, name, step)
-		}
+	origRecorded := trustPinRecorded
+	trustPinRecorded = func(projectRoot, name string, step func(string)) (pinnedConfig, error) {
+		calls.Add(1)
+		return origRecorded(projectRoot, name, step)
 	}
-	trustPinRecorded, trustPinInspected = counted(origRecorded), counted(origInspected)
-	t.Cleanup(func() { trustPinRecorded, trustPinInspected = origRecorded, origInspected })
+	t.Cleanup(func() { trustPinRecorded = origRecorded })
 	return &calls
 }
 

@@ -2,7 +2,10 @@
 
 package config
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
 // trustPinningSupported reports whether this platform can pin a trust record's path without
 // a separate, raceable path resolution. Here it cannot, so canonical records never apply
@@ -15,6 +18,6 @@ func pinRecordedConfig(string, string, func(string)) (pinnedConfig, error) {
 	return pinnedConfig{}, errTrustPinningUnsupported
 }
 
-func pinInspectedConfig(string, string, func(string)) (pinnedConfig, error) {
-	return pinnedConfig{}, errTrustPinningUnsupported
+func openInspectedConfig(string, string, func(string)) (*os.File, os.FileInfo, error) {
+	return nil, nil, errTrustPinningUnsupported
 }

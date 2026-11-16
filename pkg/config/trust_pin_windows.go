@@ -44,7 +44,7 @@ func pinRecordedConfig(projectRoot, name string, step func(string)) (pinnedConfi
 		return pinnedConfig{}, err
 	}
 	step(projectRoot)
-	dir, err := openPinnedHandle(projectRoot, syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, true)
+	dir, err := openPinnedHandle(projectRoot, fileReadAttributes, syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, true)
 	if err != nil {
 		return pinnedConfig{}, err
 	}
@@ -54,7 +54,7 @@ func pinRecordedConfig(projectRoot, name string, step func(string)) (pinnedConfi
 	}
 	configPath := filepath.Join(projectRoot, name)
 	step(configPath)
-	file, err := openPinnedHandle(configPath, syscall.FILE_FLAG_OPEN_REPARSE_POINT, false)
+	file, err := openPinnedHandle(configPath, fileReadAttributes, syscall.FILE_FLAG_OPEN_REPARSE_POINT, false)
 	if err != nil {
 		return pinnedConfig{}, err
 	}
@@ -65,39 +65,47 @@ func pinRecordedConfig(projectRoot, name string, step func(string)) (pinnedConfi
 	return pinnedConfig{dir: dir.info, file: file.info}, nil
 }
 
-// pinInspectedConfig opens the inspected project directory, following links because the
-// inspected spelling may legitimately use them, holds it, and opens the config file without
-// following a final reparse point. It requires the file's final path to lie directly in the
-// directory handle's final path, so both identities name the same location.
-func pinInspectedConfig(projectRoot, name string, step func(string)) (pinnedConfig, error) {
+// openInspectedConfig opens the inspected project directory, following links because the
+// inspected spelling may legitimately use them, and holds it without FILE_SHARE_DELETE. It
+// then opens the config file for reading without following a final reparse point. Windows
+// has no openat in the syscall package, so the file is opened by its full path; what binds
+// it to the directory is the final path Windows reports for each handle: the file's must
+// lie directly in the directory's, read both before and after the file is opened. The
+// returned file is the one whose bytes are hashed. The caller owns file.
+func openInspectedConfig(projectRoot, name string, step func(string)) (*os.File, os.FileInfo, error) {
 	if err := checkPinnablePath(projectRoot, name); err != nil {
-		return pinnedConfig{}, err
+		return nil, nil, err
 	}
 	step(projectRoot)
-	dir, err := openPinnedHandle(projectRoot, syscall.FILE_FLAG_BACKUP_SEMANTICS, true)
+	dir, err := openPinnedHandle(projectRoot, fileReadAttributes, syscall.FILE_FLAG_BACKUP_SEMANTICS, true)
 	if err != nil {
-		return pinnedConfig{}, err
+		return nil, nil, err
 	}
 	defer dir.file.Close()
 	configPath := filepath.Join(projectRoot, name)
 	step(configPath)
-	file, err := openPinnedHandle(configPath, syscall.FILE_FLAG_OPEN_REPARSE_POINT, false)
+	file, err := openPinnedHandle(configPath, syscall.GENERIC_READ|fileReadAttributes, syscall.FILE_FLAG_OPEN_REPARSE_POINT, false)
 	if err != nil {
-		return pinnedConfig{}, err
+		return nil, nil, err
 	}
-	defer file.file.Close()
-	if !strings.EqualFold(filepath.Dir(file.final), dir.final) {
-		return pinnedConfig{}, fmt.Errorf("%s is not inside %s", file.final, dir.final)
+	dirAfter, err := finalPathName(syscall.Handle(dir.file.Fd()))
+	if err != nil {
+		_ = file.file.Close()
+		return nil, nil, err
 	}
-	return pinnedConfig{dir: dir.info, file: file.info}, nil
+	if !strings.EqualFold(filepath.Dir(file.final), dir.final) || !strings.EqualFold(dirAfter, dir.final) {
+		_ = file.file.Close()
+		return nil, nil, fmt.Errorf("%s is not inside %s", file.final, dir.final)
+	}
+	return file.file, dir.info, nil
 }
 
-func openPinnedHandle(path string, flags uint32, wantDir bool) (pinnedHandle, error) {
+func openPinnedHandle(path string, access, flags uint32, wantDir bool) (pinnedHandle, error) {
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return pinnedHandle{}, err
 	}
-	handle, err := syscall.CreateFile(name, fileReadAttributes, pinShareMode, nil, syscall.OPEN_EXISTING, flags, 0)
+	handle, err := syscall.CreateFile(name, access, pinShareMode, nil, syscall.OPEN_EXISTING, flags, 0)
 	if err != nil {
 		return pinnedHandle{}, err
 	}

@@ -15,9 +15,8 @@ type pinnedConfig struct {
 	dir, file os.FileInfo
 }
 
-// pinFunc is the signature of pinRecordedConfig and pinInspectedConfig. step runs before
-// each open with the path about to be opened; tests use it to change the filesystem between
-// steps.
+// pinFunc is the signature of pinRecordedConfig. step runs before each open with the path
+// about to be opened; tests use it to change the filesystem between steps.
 type pinFunc func(projectRoot, name string, step func(string)) (pinnedConfig, error)
 
 // checkPinnablePath rejects record paths that a pinned walk cannot take literally: relative

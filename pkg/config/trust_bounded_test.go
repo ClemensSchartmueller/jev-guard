@@ -49,12 +49,12 @@ func blockTrustLookups(t *testing.T, timeout time.Duration, block func(string) b
 		}
 	}
 	origStat, origLstat, origTimeout := trustAliasStat, trustAliasLstat, trustAliasScanTimeout
-	origRecorded, origInspected := trustPinRecorded, trustPinInspected
+	origRecorded := trustPinRecorded
 	trustAliasStat, trustAliasLstat, trustAliasScanTimeout = slow(os.Stat), slow(os.Lstat), timeout
-	trustPinRecorded, trustPinInspected = slowPin(pinRecordedConfig), slowPin(pinInspectedConfig)
+	trustPinRecorded = slowPin(pinRecordedConfig)
 	t.Cleanup(func() {
 		trustAliasStat, trustAliasLstat, trustAliasScanTimeout = origStat, origLstat, origTimeout
-		trustPinRecorded, trustPinInspected = origRecorded, origInspected
+		trustPinRecorded = origRecorded
 		close(release)
 	})
 }
