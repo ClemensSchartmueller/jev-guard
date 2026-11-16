@@ -2,7 +2,10 @@ package fastpath
 
 import (
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"jev-guard/pkg/harness"
 )
@@ -16,10 +19,15 @@ const commandSeparator = "\x00command-boundary\x00"
 // It shares the shell reader's bounds and nested-payload recognition. It only sees
 // agent tool calls; starting the real hook process never goes through this rule.
 func checkSelfInvocation(call *harness.NormalizedToolCall) *harness.EvaluationResult {
+	return checkSelfInvocationUntil(call, time.Now().Add(250*time.Millisecond))
+}
+
+func checkSelfInvocationUntil(call *harness.NormalizedToolCall, deadline time.Time) *harness.EvaluationResult {
 	r := newShellReader()
+	r.deadline = deadline
 	var result *harness.EvaluationResult
 	record := func(words []string) {
-		decision := guardInvocationDecision(words)
+		decision := guardInvocationDecision(words, r)
 		if decision == "" || (result != nil && result.Decision == harness.DecisionDeny) {
 			return
 		}
@@ -35,37 +43,106 @@ func checkSelfInvocation(call *harness.NormalizedToolCall) *harness.EvaluationRe
 			r.exhausted = true
 			return
 		}
-		clean := stripHeredocBodies(text)
+		bodies := map[string]string{}
+		var substitutions []string
+		count := 0
+		if !r.spend(len(text), 0) {
+			return
+		}
+		clean := readHeredocs(text, func(body string, quoted bool) string {
+			if body == "" {
+				count++
+				marker := "__guard_stdin_" + strconv.Itoa(count) + "__"
+				bodies[marker] = ""
+				return marker
+			}
+			marker, value, _ := strings.Cut(body, "\x00")
+			bodies[marker] = value
+			if !quoted && r.spend(len(value), 0) {
+				substitutions = append(substitutions, commandSubstitutions(value, true)...)
+			}
+			return ""
+		}, r)
+		if !r.spend(2*len(clean), 0) {
+			return
+		}
 		p, _, _ := posixRead(clean, false, true)
 		ps, _, _ := powerShellRead(clean, false, true)
 		readings := [][]string{p, ps}
 		if windows {
+			if !r.spend(len(text), 0) {
+				return
+			}
 			cmd, _ := cmdRead(text, true)
 			readings = [][]string{cmd}
 		}
 		for _, words := range readings {
+			if len(words) > 0 && words[len(words)-1] == pipelineSeparator {
+				r.exhausted = true
+			}
 			if !r.spend(0, len(words)) {
 				return
 			}
 			start := 0
+			var upstream []string
 			for i := 0; i <= len(words); i++ {
 				if i < len(words) && words[i] != commandSeparator && words[i] != pipelineSeparator {
 					continue
 				}
-				segment := words[start:i]
+				if !r.spend(0, i-start+1) {
+					return
+				}
+				segment := make([]string, 0, i-start)
+				var stdin []string
+				for _, word := range words[start:i] {
+					if body, ok := bodies[word]; ok {
+						stdin = append(stdin, body)
+					} else {
+						segment = append(segment, word)
+					}
+				}
 				record(segment)
-				for _, payload := range append(selfInvocationPayloads(r, segment), shellInputPayloads(text, words[:start], segment)...) {
+				payloads := selfInvocationPayloads(r, segment)
+				w := unwrapInvocation(segment, r)
+				if len(w) > 0 && shellPrograms[programName(w[0])] && !hasCommandFlag(w[1:]) {
+					payloads = append(payloads, stdin...)
+					payloads = append(payloads, upstream...)
+				}
+				for _, payload := range payloads {
+					if !r.spendPayload(len(payload)) {
+						break
+					}
 					if depth >= maxShellNesting {
 						r.tooDeep = true
 						continue
 					}
-					unwrapped := unwrapInvocation(segment)
+					unwrapped := unwrapInvocation(segment, r)
 					visit(payload, depth+1, len(unwrapped) > 0 && programName(unwrapped[0]) == "cmd")
+				}
+				// Keep only the immediately preceding stage. This is linear even
+				// for pipelines containing thousands of shell stages.
+				upstream = nil
+				if i < len(words) && words[i] == pipelineSeparator {
+					upstream = append(upstream, stdin...)
+					size := 0
+					for _, word := range segment {
+						size += len(word) + 1
+					}
+					if r.spend(2*size, len(segment)) {
+						upstream = append(upstream, strings.Join(segment, " "))
+						if len(segment) > 1 {
+							upstream = append(upstream, segment[1:]...)
+							upstream = append(upstream, strings.Join(segment[1:], " "))
+						}
+					}
 				}
 				start = i + 1
 			}
 		}
-		for _, payload := range commandSubstitutions(clean) {
+		if !r.spend(len(clean), 0) {
+			return
+		}
+		for _, payload := range append(substitutions, commandSubstitutions(clean)...) {
 			if depth >= maxShellNesting {
 				r.tooDeep = true
 				continue
@@ -92,6 +169,9 @@ func checkSelfInvocation(call *harness.NormalizedToolCall) *harness.EvaluationRe
 			}
 			record(words)
 			for _, payload := range selfInvocationPayloads(r, words) {
+				if !r.spendPayload(len(payload)) {
+					break
+				}
 				visit(payload, 1, false)
 			}
 		}
@@ -109,6 +189,9 @@ func checkSelfInvocation(call *harness.NormalizedToolCall) *harness.EvaluationRe
 var wrapperValues = map[string]string{
 	"env":     "-u --unset -C --chdir -S --split-string",
 	"command": "",
+	"time":    "-o --output -f --format",
+	"call":    "",
+	"start":   "",
 	"builtin": "",
 	"exec":    "-a",
 	"sudo":    "-u -g -h -C -T -p --user --group --host --chdir",
@@ -127,8 +210,15 @@ var wrapperValues = map[string]string{
 	"xargs":   "-a -E -I -L -n -P -s --arg-file --eof --replace --max-lines --max-args --max-procs --max-chars",
 }
 
-func unwrapInvocation(words []string) []string {
+func unwrapInvocation(words []string, readers ...*shellReader) []string {
+	r := newShellReader()
+	if len(readers) > 0 {
+		r = readers[0]
+	}
 	for len(words) > 0 {
+		if !r.spend(0, 1) {
+			return nil
+		}
 		word := words[0]
 		if assignment := strings.IndexByte(word, '='); assignment > 0 && !strings.ContainsAny(word[:assignment], `/\-`) {
 			words = words[1:]
@@ -136,7 +226,19 @@ func unwrapInvocation(words []string) []string {
 		}
 		name := programName(word)
 		switch name {
-		case "{", "!", "time", "coproc", "if", "then", "elif", "else", "do", "while", "until":
+		case "function":
+			if len(words) > 2 {
+				words = words[2:]
+				continue
+			}
+			return nil
+		case ".":
+			if len(words) > 1 && programName(words[1]) == "jev-guard" {
+				words = words[1:]
+				continue
+			}
+			return words
+		case "{", "!", "coproc", "if", "then", "elif", "else", "do", "while", "until":
 			words = words[1:]
 			continue
 		case "busybox":
@@ -145,7 +247,7 @@ func unwrapInvocation(words []string) []string {
 		case "find":
 			for i, w := range words {
 				if w == "-exec" || w == "-execdir" {
-					return unwrapInvocation(words[i+1:])
+					return unwrapInvocation(words[i+1:], r)
 				}
 			}
 			return nil
@@ -158,18 +260,32 @@ func unwrapInvocation(words []string) []string {
 		for len(words) > 0 && strings.HasPrefix(words[0], "-") {
 			flag := words[0]
 			words = words[1:]
+			if name == "env" && strings.HasPrefix(flag, "-S") && len(flag) > 2 {
+				if !r.spend(len(flag), 0) {
+					return nil
+				}
+				payload, _, _ := posixRead(flag[2:], false)
+				words = append(payload, words...)
+				break
+			}
 			if name == "command" && (flag == "-v" || flag == "-V") {
 				return nil
 			}
 			key, _, attached := strings.Cut(flag, "=")
 			if strings.Contains(" "+values+" ", " "+key+" ") && !attached && len(words) > 0 {
 				if name == "env" && (key == "-S" || key == "--split-string") {
+					if !r.spend(len(words[0]), 0) {
+						return nil
+					}
 					payload, _, _ := posixRead(words[0], false)
 					words = append(payload, words[1:]...)
 					break
 				}
 				words = words[1:]
 			} else if name == "env" && key == "--split-string" && attached {
+				if !r.spend(len(flag), 0) {
+					return nil
+				}
 				payload, _, _ := posixRead(strings.TrimPrefix(flag, key+"="), false)
 				words = append(payload, words...)
 				break
@@ -182,62 +298,24 @@ func unwrapInvocation(words []string) []string {
 	return nil
 }
 
-// Shell stdin is executable only when a shell occupies command position.
-func shellInputPayloads(text string, all, segment []string) []string {
-	w := unwrapInvocation(segment)
-	if len(w) == 0 || !shellPrograms[programName(w[0])] {
-		return nil
-	}
-	for _, a := range w[1:] {
-		if strings.Contains(a, "c") && strings.HasPrefix(a, "-") {
-			return nil
+var commandFlag = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
+
+func hasCommandFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--command" || strings.HasPrefix(a, "--command=") || commandFlag.MatchString(a) {
+			return true
 		}
 	}
-	var out []string
-	// Associate stdin redirections with their receiving command, not another
-	// command in the same script.
-	if i := strings.Index(text, "<<"); i >= 0 {
-		head, _, _ := posixRead(text[:i], false, true)
-		start := 0
-		for j, a := range head {
-			if a == commandSeparator || a == pipelineSeparator {
-				start = j + 1
-			}
-		}
-		receiver := unwrapInvocation(head[start:])
-		if len(receiver) > 0 && shellPrograms[programName(receiver[0])] {
-			if strings.HasPrefix(text[i:], "<<<") {
-				args, _, _ := posixRead(text[i+3:], false)
-				out = append(out, args...)
-			} else {
-				lines := strings.Split(text[i:], "\n")
-				if len(lines) > 1 {
-					out = append(out, strings.Join(lines[1:], "\n"))
-				}
-			}
-		}
-	}
-	// Only stages joined by a pipe provide stdin. A preceding semicolon does not.
-	start, end := 0, len(all)
-	for i := 0; i < len(all); i++ {
-		if all[i] == commandSeparator {
-			start = i + 1
-		}
-	}
-	if end > start && all[end-1] == pipelineSeparator {
-		for _, a := range all[start : end-1] {
-			if a != pipelineSeparator {
-				out = append(out, a)
-			}
-		}
-	}
-	return out
+	return false
 }
 
 // Read interpreter payloads only when the interpreter occupies an executable
 // position. For example, echo sh -c 'jev-guard ingest' merely prints data.
 func selfInvocationPayloads(r *shellReader, words []string) []string {
-	words = unwrapInvocation(words)
+	if !r.spend(0, len(words)) {
+		return nil
+	}
+	words = unwrapInvocation(words, r)
 	if len(words) == 0 {
 		return nil
 	}
@@ -259,23 +337,31 @@ func selfInvocationPayloads(r *shellReader, words []string) []string {
 			}
 		}
 	}
-	if !shellPrograms[name] && name != "eval" && name != "cmd" && name != "powershell" && name != "pwsh" {
+	if !shellPrograms[name] && name != "eval" && name != "iex" && name != "invoke-expression" && name != "cmd" && name != "powershell" && name != "pwsh" {
 		return nil
+	}
+	if name == "iex" || name == "invoke-expression" {
+		return words[1:]
 	}
 	return r.commandPayloads(words)
 }
 
-func guardInvocationDecision(words []string) harness.Decision {
-	words = unwrapInvocation(words)
+func guardInvocationDecision(words []string, readers ...*shellReader) harness.Decision {
+	words = unwrapInvocation(words, readers...)
 	if len(words) > 0 {
 		name := programName(words[0])
 		switch name {
 		case "npx", "bunx", "npm", "pnpm", "yarn", "bun":
 			words = words[1:]
-			if len(words) > 0 && (words[0] == "exec" || words[0] == "x" || words[0] == "dlx") {
-				words = words[1:]
-			}
-			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+
+			for len(words) > 0 {
+				if words[0] == "exec" || words[0] == "x" || words[0] == "dlx" {
+					words = words[1:]
+					continue
+				}
+				if !strings.HasPrefix(words[0], "-") {
+					break
+				}
 				f := words[0]
 				words = words[1:]
 				if (f == "-p" || f == "--package") && len(words) > 0 {
@@ -293,10 +379,13 @@ func guardInvocationDecision(words []string) harness.Decision {
 				words = append(words[:1], words[2:]...)
 			}
 		case "node":
-			if len(words) < 2 || programName(words[1]) != "jev-guard.js" {
+			words = words[1:]
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				words = words[1:]
+			}
+			if len(words) == 0 || (programName(words[0]) != "jev-guard.js" && programName(words[0]) != "jev-guard") {
 				return ""
 			}
-			words = words[1:]
 			words[0] = "jev-guard"
 		case "start-process":
 			words = words[1:]
@@ -323,11 +412,14 @@ func guardInvocationDecision(words []string) harness.Decision {
 		patterns, _ := expandBraces(name, 64)
 		for _, pattern := range patterns {
 			for _, target := range []string{"jev-guard", "jev-guard.exe"} {
-				ok, _ := path.Match(pattern, target)
+				ok, _ := path.Match(strings.ReplaceAll(pattern, "[!", "[^"), target)
 				match = match || ok
 			}
 		}
 		if !match {
+			if strings.Contains(name, "[") && name != "[" && name != "[[" {
+				return harness.DecisionAsk
+			}
 			return ""
 		}
 		args := words[1:]

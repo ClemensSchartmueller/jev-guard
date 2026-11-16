@@ -3,6 +3,7 @@ package fastpath
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxShellNesting bounds how deep strings that a program will run are read as commands.
@@ -23,6 +24,7 @@ const (
 // newShellReader.
 type shellReader struct {
 	bytes, tokens, payloads int
+	deadline                time.Time
 	exhausted               bool
 	// tooDeep is set when a command a program will run was not read because it is nested
 	// deeper than maxShellNesting. Reading goes on, so a protected name found elsewhere is
@@ -49,6 +51,9 @@ func (r *shellReader) incomplete() string {
 
 // spend charges work to the budget and reports whether it is still within it.
 func (r *shellReader) spend(bytes, tokens int) bool {
+	if !r.deadline.IsZero() && time.Now().After(r.deadline) {
+		r.exhausted = true
+	}
 	if r.exhausted {
 		return false
 	}
@@ -232,7 +237,7 @@ func (r *shellReader) commandPayloads(words []string) []string {
 					}
 					break
 				}
-				isFlag := flag == "--command" || (len(flag) > 1 && flag[0] == '-' && flag[1] != '-' && strings.Contains(flag, "c"))
+				isFlag := flag == "--command" || commandFlag.MatchString(flag)
 				if isFlag && j+1 < len(rest) {
 					value := rest[j+1]
 					if !add(len(value), func() string { return value }) {
@@ -309,15 +314,16 @@ func interpreterName(name string) string {
 }
 
 // commandSubstitutions returns the outermost $(...) and `...` spans a POSIX shell would run,
-// in one pass. Single-quoted text is literal, so it is skipped.
-func commandSubstitutions(s string) []string {
+// in one pass. Single-quoted text is skipped except in unquoted heredoc bodies,
+// where quote characters are data and substitutions still execute.
+func commandSubstitutions(s string, heredoc ...bool) []string {
 	var spans []string
 	depth, start := 0, 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c == '\\':
 			i++
-		case c == '\'' && depth == 0:
+		case c == '\'' && depth == 0 && (len(heredoc) == 0 || !heredoc[0]):
 			end := strings.IndexByte(s[i+1:], '\'')
 			if end < 0 {
 				return spans
@@ -360,18 +366,31 @@ func commandSubstitutions(s string) []string {
 // stripHeredocBodies removes heredoc bodies the way a POSIX shell finds them. It tracks quotes
 // and comments, because a marker inside either one is not a heredoc and the lines after it
 // are commands. Unterminated bodies run to the end of the text, as in a shell.
-func stripHeredocBodies(s string) string {
+func stripHeredocBodies(s string) string { return readHeredocs(s, nil) }
+
+// readHeredocs associates each body with a marker at its redirection position.
+// A nil capture strips bodies only. Otherwise capture("", false) allocates a
+// marker, and capture(marker+"\\x00"+body, quoted) delivers its body. Markers
+// replace stdin redirections so a single command reading associates each input
+// with its receiver, including inputs on later commands and pipeline stages.
+func readHeredocs(s string, capture func(string, bool) string, readers ...*shellReader) string {
+	charge := func(n int) bool { return len(readers) == 0 || readers[0].spend(n, 1) }
 	if !strings.Contains(s, "<<") {
 		return s
 	}
 	type heredoc struct {
 		delimiter string
 		tabs      bool
+		marker    string
+		quoted    bool
 	}
 	var out strings.Builder
 	var pending []heredoc
 	atWordStart := true
 	for i := 0; i < len(s); i++ {
+		if !charge(0) {
+			return out.String()
+		}
 		c := s[i]
 		switch {
 		case c == '\\':
@@ -421,8 +440,48 @@ func stripHeredocBodies(s string) string {
 			i += end + 1
 			atWordStart = false
 		case strings.HasPrefix(s[i:], "<<<"):
-			out.WriteString("<<<")
-			i += 2
+			if capture != nil {
+				j := i + 3
+				for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+					j++
+				}
+				end := j
+				var q byte
+				for end < len(s) {
+					c := s[end]
+					if q != 0 {
+						if c == q {
+							q = 0
+						}
+						end++
+						continue
+					}
+					if c == '\'' || c == '"' {
+						q = c
+						end++
+						continue
+					}
+					if c == '\\' && end+1 < len(s) {
+						end += 2
+						continue
+					}
+					if isShellSpace(c) || strings.ContainsRune(";&|()<>", rune(c)) {
+						break
+					}
+					end++
+				}
+				marker := capture("", false)
+				if !charge(end - j) {
+					return out.String()
+				}
+				args := posixWords(s[j:end])
+				capture(marker+"\x00"+strings.Join(args, " "), true)
+				out.WriteString(" " + marker + " ")
+				i = end - 1
+			} else {
+				out.WriteString("<<<")
+				i += 2
+			}
 			atWordStart = false
 		case strings.HasPrefix(s[i:], "<<"):
 			j := i + 2
@@ -437,17 +496,34 @@ func stripHeredocBodies(s string) string {
 			for end < len(s) && !isShellSpace(s[end]) && strings.IndexByte(";&|<>()", s[end]) < 0 {
 				end++
 			}
-			if words := posixWords(s[j:end]); len(words) == 1 && words[0] != "" {
-				pending = append(pending, heredoc{delimiter: words[0], tabs: tabs})
+			if !charge(end - j) {
+				return out.String()
 			}
-			out.WriteString(s[i:end])
+			if words := posixWords(s[j:end]); len(words) == 1 && words[0] != "" {
+				marker := ""
+				if capture != nil {
+					marker = capture("", false)
+				}
+				pending = append(pending, heredoc{delimiter: words[0], tabs: tabs, marker: marker, quoted: strings.ContainsAny(s[j:end], "\\\"'")})
+			}
+			if capture != nil && len(pending) > 0 {
+				out.WriteString(" " + pending[len(pending)-1].marker + " ")
+			} else {
+				out.WriteString(s[i:end])
+			}
 			i = end - 1
 			atWordStart = false
 		case c == '\n':
 			out.WriteByte(c)
 			atWordStart = true
 			for _, doc := range pending {
+				bodyStart := i + 1
+				bodyEnd := bodyStart
 				for i+1 < len(s) {
+					if !charge(0) {
+						return out.String()
+					}
+					lineStart := i + 1
 					lineEnd := strings.IndexByte(s[i+1:], '\n')
 					line := s[i+1:]
 					next := len(s) - 1
@@ -460,8 +536,13 @@ func stripHeredocBodies(s string) string {
 						line = strings.TrimLeft(line, "\t")
 					}
 					if line == doc.delimiter {
+						bodyEnd = lineStart
 						break
 					}
+					bodyEnd = i + 1
+				}
+				if capture != nil {
+					capture(doc.marker+"\x00"+s[bodyStart:bodyEnd], doc.quoted)
 				}
 			}
 			pending = nil
@@ -469,6 +550,9 @@ func stripHeredocBodies(s string) string {
 			out.WriteByte(c)
 			atWordStart = isShellSpace(c) || strings.IndexByte(";&|(", c) >= 0
 		}
+	}
+	if len(pending) > 0 && len(readers) > 0 {
+		readers[0].exhausted = true
 	}
 	return out.String()
 }
@@ -625,7 +709,7 @@ func posixRead(s string, track bool, commands ...bool) (words, patterns []string
 			b.flush()
 			if len(b.words) > 0 {
 				last := b.words[len(b.words)-1]
-				if last != "" && strings.Trim(last, "0123456789") == "" {
+				if last != "" && (strings.Trim(last, "0123456789") == "" || (strings.HasPrefix(last, "{") && strings.HasSuffix(last, "}"))) {
 					b.words = b.words[:len(b.words)-1]
 				}
 			}

@@ -2,11 +2,26 @@ package fastpath
 
 import (
 	"jev-guard/pkg/harness"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSelfInvocationReviewRegressions(t *testing.T) {
 	deny := []string{
+		"cat <<EOF >/dev/null\n$(jev-guard ingest)\nEOF",
+		"cat <<EOF\n'$(jev-guard ingest)'\nEOF",
+		"cat <<EOF >/dev/null\n`jev-guard ingest`\nEOF",
+		"git commit -F - <<EOF\n`jev-guard ingest`\nEOF",
+		"cat <<EOF | sh\njev-guard ingest\nEOF",
+		"cat <<EOF; jev\\-guard ingest\nx\nEOF",
+		"echo \"<<\"; bash <<EOF\njev-guard ingest\nEOF",
+		"cat <<A\nx\nA\nbash <<B\njev-guard ingest\nB",
+		`bash --norc <<< 'jev-guard ingest'`, `echo 'jev-guard ingest' | bash --norc`, `echo 'jev-guard ingest' | fish --no-config`,
+		`env -S'jev-guard ingest'`, `env -S"jev-guard ingest"`, `echo jev-guard ingest | sh`, `jev-guar[!x] ingest`,
+		`function f { jev-guard ingest; }; f`, `{fd}>/dev/null jev-guard ingest`, `exec {fd}>/dev/null jev-guard ingest`, `/usr/bin/time -v jev-guard ingest`,
+		`npm --yes exec @clemensschartmueller/jev-guard -- ingest`, `pnpm --package=@clemensschartmueller/jev-guard dlx jev-guard ingest`, `node --no-warnings bin/jev-guard.js ingest`, `node node_modules/.bin/jev-guard ingest`,
+		`iex 'jev-guard ingest'`, `Invoke-Expression "jev-guard ingest"`, `start jev-guard ingest`, `cmd /c call jev-guard ingest`, `. jev-guard ingest`,
 		`{ jev-guard ingest; }`, `if true; then jev-guard ingest; fi`, `for i in 1; do jev-guard ingest; done`, `while jev-guard ingest; do break; done`, `! jev-guard ingest`, `time jev-guard ingest`, `coproc jev-guard ingest`, `case x in x) jev-guard ingest;; esac`, `until jev-guard ingest; do break; done`, `cmd /c "echo ok & jev-guard ingest"`,
 		`timeout 5 jev-guard ingest`, `nice jev-guard ingest`, `nice -n 5 jev-guard ingest`, `ionice -c 3 jev-guard ingest`, `stdbuf -o0 jev-guard ingest`, `setsid jev-guard ingest`, `chrt 1 jev-guard ingest`, `taskset 1 jev-guard ingest`, `watch -n 1 jev-guard ingest`, `strace -o log jev-guard ingest`, `ltrace jev-guard ingest`, `builtin command jev-guard ingest`, `busybox sh -c 'jev-guard ingest'`, `xargs jev-guard ingest`, `find . -exec jev-guard ingest \;`, `find . -execdir jev-guard ingest \;`, `parallel jev-guard ::: ingest`, `script -c 'jev-guard ingest' /dev/null`, `env -S 'jev-guard ingest'`, `env --split-string='jev-guard ingest'`,
 		`npx -p @clemensschartmueller/jev-guard jev-guard ingest`, `npx --package=@clemensschartmueller/jev-guard jev-guard ingest`, `npx -q @clemensschartmueller/jev-guard ingest`, `npx --yes -q @clemensschartmueller/jev-guard ingest`, `npx -c 'jev-guard ingest'`, `npx --call 'jev-guard ingest'`, `npx --call='jev-guard ingest'`, `npm exec @clemensschartmueller/jev-guard -- ingest`, `npm x @clemensschartmueller/jev-guard -- ingest`, `pnpm dlx @clemensschartmueller/jev-guard ingest`, `pnpm exec jev-guard ingest`, `yarn dlx @clemensschartmueller/jev-guard ingest`, `bunx @clemensschartmueller/jev-guard ingest`, `bun x @clemensschartmueller/jev-guard ingest`, `npx jev-guard ingest`, `npx @ClemensSchartmueller/jev-guard ingest`,
@@ -15,8 +30,11 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 		`echo 'jev-guard ingest' | sh`, `printf '%s' 'jev-guard ingest' | bash -s`, `sh <<< 'jev-guard ingest'`, `bash <<< "jev-guard ingest"`, "sh <<'EOF'\njev-guard ingest\nEOF", "bash -s <<EOF\njev-guard ingest\nEOF",
 		`jev-gu?rd ingest`, `jev-guar[d] ingest`, `jev-{guard,x} ingest`,
 	}
-	ask := []string{`echo ingest | xargs jev-guard`, `yarn jev-guard`, `~/.local/bin/jev-*`, `Start-Process jev-guard`}
+	ask := []string{`/path/jev-guar[[:alpha:]] ingest`, `echo ingest | xargs jev-guard`, `yarn jev-guard`, `~/.local/bin/jev-*`, `Start-Process jev-guard`}
 	negative := []string{
+		"cat <<EOF\nEOF", "sh <<EOF\nEOF", "cat <<A <<B\nA\nB",
+		"git commit -F - <<'EOF'\n`jev-guard ingest`\n$(jev-guard ingest)\nEOF",
+		`sed -i 's/jev-guard ingest/updated/g' docs/cli.md`, `. other-file jev-guard ingest`,
 		`echo 'run: (jev-guard clear-intent --all)'`, `git commit -m 'block x && jev-guard ingest'`, `grep -E 'a|jev-guard status' docs/cli.md`,
 		"cat > notes.md <<'EOF'\njev-guard ingest --session x\nEOF", "git commit -F - <<'EOF'\ntext\njev-guard clear-intent --all is now denied\nEOF", "gh pr create --body \"$(cat <<'EOF'\ntext\njev-guard ingest --prompt x\nEOF\n)\"",
 		`command -v jev-guard`, `command -V jev-guard`, `ls -l $(command -v jev-guard)`, `which jev-guard`, `type jev-guard`, `echo 'jev-guard ingest'; sh`, "cat <<EOF\njev-guard ingest\nEOF\nsh",
@@ -37,5 +55,27 @@ func TestSelfInvocationReviewRegressions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestSelfInvocationPerformance(t *testing.T) {
+	for _, cmd := range []string{strings.Repeat("sh;", 4000) + "<<x", strings.Repeat("sh;", 20000) + "<<x", strings.Repeat("sh|", 2000), strings.Repeat("sh|", 8000), strings.Repeat("sh;", (1<<20)/3) + "<<x"} {
+		start := time.Now()
+		got := checkSelfInvocation(&harness.NormalizedToolCall{Command: cmd})
+		elapsed := time.Since(start)
+		t.Logf("%d bytes: %s", len(cmd), elapsed)
+		if elapsed > 2*time.Second {
+			t.Fatalf("analysis exceeded 2s: %s", elapsed)
+		}
+		if got == nil || got.Decision == harness.DecisionAllow {
+			t.Fatalf("must fail closed, got %+v", got)
+		}
+	}
+}
+
+func TestSelfInvocationDeadline(t *testing.T) {
+	got := checkSelfInvocationUntil(&harness.NormalizedToolCall{Command: "echo safe"}, time.Now().Add(-time.Second))
+	if got == nil || got.Decision != harness.DecisionAsk || got.Source != SourceAntiTamperingLimit {
+		t.Fatalf("deadline must fail closed: %+v", got)
 	}
 }
