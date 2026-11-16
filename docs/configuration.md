@@ -28,11 +28,11 @@ The same directory holds the binary, trust registry, and session data:
     │   ├── <session_hash>.json.lock      # Per-session write lock
     │   ├── <session_hash>.json.taint.*   # Taint and abort markers (see security model)
     │   ├── <session_hash>.json.abort.*
-    │   └── .sweep                        # Time of the last cleanup sweep
+    │   └── .sweep                        # Cleanup sweep coordination: last run time and resume position
     └── trusted-project-configs.json      # Approved project config digests, if configured
 ```
 
-`end-turn` and `status` run a cleanup sweep at most once an hour. It removes files left by abandoned sessions: markers and session files older than 48 hours, and lock files idle for 7 days whose session has no file or markers left. It never waits for a lock held by an active session and never fails a hook.
+`end-turn` and `status` run a cleanup sweep at most once an hour. It removes files left by abandoned sessions: markers and session files older than 48 hours, and lock files idle for 7 days whose session has no file or markers left. It never waits for a lock held by an active session and never fails a hook. Each run is bounded (at most 1024 directory entries, 128 sessions, and about 150 ms) and resumes where the previous run stopped, so a large backlog is cleared over several runs. Only one sweep runs at a time; `.sweep` is never deleted.
 
 Run `jev-guard config show` to see the effective values and where each comes from. Secrets are never printed.
 

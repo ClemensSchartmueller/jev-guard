@@ -20,6 +20,12 @@ var (
 	// afterLockHook runs after the OS lock is taken and before the path is
 	// verified. Tests use it to unlink the lock file at that point.
 	afterLockHook func(path string)
+
+	// openLockFile opens a lock file and statLockPath stats its path for the
+	// verification. Tests replace them to simulate open and verification
+	// failures.
+	openLockFile = os.OpenFile
+	statLockPath = os.Stat
 )
 
 // sessionLockPath is the lock file guarding a session's read-modify-write.
@@ -67,8 +73,11 @@ type heldLock struct {
 }
 
 // acquireLock takes the lock file at path and verifies that the path still
-// refers to it. With wait false it returns nil, nil when another holder has
-// the lock, instead of polling until lockTimeout. With touch set it refreshes
+// refers to it. With wait false it makes a single attempt and returns nil, nil
+// instead of polling until lockTimeout whenever that attempt fails in a way
+// that a waiting caller would retry: another holder has the lock, opening the
+// file failed transiently (a Windows file pending deletion), or the path no
+// longer names the locked file. With touch set it refreshes
 // a stale modification time, which records the lock file as in use; the sweep
 // passes false so that its own visits do not keep a file alive.
 func acquireLock(path string, wait, touch bool) (*heldLock, error) {
@@ -77,7 +86,7 @@ func acquireLock(path string, wait, touch bool) (*heldLock, error) {
 	}
 	deadline := time.Now().Add(lockTimeout)
 	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+		f, err := openLockFile(path, os.O_CREATE|os.O_RDWR, 0600)
 		if err == nil {
 			locked, lockErr := tryLockFile(f)
 			if locked {
@@ -91,6 +100,9 @@ func acquireLock(path string, wait, touch bool) (*heldLock, error) {
 					return nil, verifyErr
 				}
 				// The file was unlinked by the sweep: retry on the new file.
+				if !wait {
+					return nil, nil
+				}
 			} else {
 				_ = f.Close()
 				if lockErr != nil {
@@ -102,6 +114,8 @@ func acquireLock(path string, wait, touch bool) (*heldLock, error) {
 			}
 		} else if !retryable(err) {
 			return nil, fmt.Errorf("failed to open session lock %s: %w", path, err)
+		} else if !wait {
+			return nil, nil
 		}
 		if !time.Now().Before(deadline) {
 			return nil, fmt.Errorf("%w after %s waiting for session lock %s", ErrLockTimeout, lockTimeout, path)
@@ -121,7 +135,7 @@ func verifyLock(path string, f *os.File, touch bool) (*heldLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to check session lock %s: %w", path, err)
 	}
-	pathInfo, err := os.Stat(path)
+	pathInfo, err := statLockPath(path)
 	if err != nil {
 		// Windows reports a file that is pending deletion as access denied.
 		if os.IsNotExist(err) || retryable(err) {
