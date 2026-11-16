@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -590,6 +591,9 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if argsStr == "" {
 		return true, nil
 	}
+	if commandArgsMayExpand(argsStr, runtime.GOOS) {
+		return false, nil
+	}
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
@@ -648,6 +652,21 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	}
 
 	return true, nil
+}
+
+// commandArgsMayExpand rejects spellings whose literal sensitive-file and boundary
+// checks cannot establish what files will be read. Quoted wildcards also defer:
+// programs such as Git interpret pathspec globs even when the shell leaves them literal.
+// Keep backslashes intact with sensitiveCommandArguments; on Windows they are path
+// separators, while on other platforms they may hide characters through shell escaping.
+func commandArgsMayExpand(args, goos string) bool {
+	for _, arg := range sensitiveCommandArguments(args) {
+		if strings.ContainsAny(arg, "*?[]{}") || strings.HasPrefix(arg, "~") ||
+			(goos != "windows" && strings.Contains(arg, `\`)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isPotentialPath(arg string) bool {
