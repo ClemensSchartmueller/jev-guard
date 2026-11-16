@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -156,7 +155,7 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error
 		targetRaw = extractFilePathFromURI(targetRaw)
 	}
 	target := strings.ToLower(normalizePathSeparators(targetRaw))
-	cmd := strings.ToLower(normalizePathSeparators(call.Command))
+	cmd := strings.ToLower(normalizePathSeparators(strings.Join(shellWords(call.Command), " ")))
 	baseName := strings.ToLower(path.Base(target))
 	cmdTokens := strings.Fields(cmd)
 
@@ -236,7 +235,7 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, er
 	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
 		candidates = append(candidates, t)
 	}
-	for i, arg := range sensitiveCommandArguments(command) {
+	for i, arg := range shellWords(command) {
 		if i == 0 {
 			continue
 		}
@@ -591,7 +590,16 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if argsStr == "" {
 		return true, nil
 	}
-	if commandArgsMayExpand(argsStr, runtime.GOOS) {
+	// --no-index compares directories recursively, including sensitive descendants
+	// absent from the command text. Defer even file operands: their type can change.
+	if trustedPrefix == "git diff" {
+		for _, arg := range shellWords(argsStr) {
+			if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
+				return false, nil
+			}
+		}
+	}
+	if !nameOnlyTrustedCommand(trustedPrefix) && commandArgsMayExpand(argsStr) {
 		return false, nil
 	}
 
@@ -600,7 +608,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 		return false, nil
 	}
 
-	tokens := strings.Fields(argsStr)
+	tokens := shellWords(argsStr)
 	for i := 0; i < len(tokens); i++ {
 		token := tokens[i]
 		cleanArg := strings.Trim(token, `"'`)
@@ -654,15 +662,26 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	return true, nil
 }
 
-// commandArgsMayExpand rejects spellings whose literal sensitive-file and boundary
-// checks cannot establish what files will be read. Quoted wildcards also defer:
-// programs such as Git interpret pathspec globs even when the shell leaves them literal.
-// Keep backslashes intact with sensitiveCommandArguments; on Windows they are path
-// separators, while on other platforms they may hide characters through shell escaping.
-func commandArgsMayExpand(args, goos string) bool {
-	for _, arg := range sensitiveCommandArguments(args) {
-		if strings.ContainsAny(arg, "*?[]{}") || strings.HasPrefix(arg, "~") ||
-			(goos != "windows" && strings.Contains(arg, `\`)) {
+// nameOnlyTrustedCommand lists built-in commands that cannot print file contents.
+// Their arguments still pass through the flag and workspace boundary checks.
+func nameOnlyTrustedCommand(command string) bool {
+	switch command {
+	case "ls", "dir", "pwd", "echo", "whoami", "which", "where.exe", "node -v", "go version", "python --version":
+		return true
+	}
+	return false
+}
+
+// commandArgsMayExpand uses the shared shell reader for unquoted expansions.
+// Quoted wildcards also defer because Git interprets literal pathspec globs.
+func commandArgsMayExpand(args string) bool {
+	reader := newShellReader()
+	words, patterns := reader.read(args, false)
+	if reader.incomplete() != "" || len(patterns) > 0 {
+		return true
+	}
+	for _, word := range words {
+		if strings.ContainsAny(word, "*?[]") {
 			return true
 		}
 	}

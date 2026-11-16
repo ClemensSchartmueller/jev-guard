@@ -135,6 +135,8 @@ Safe local read tools and trusted shell inspection commands are allowed immediat
 
 A trusted command is still not trusted if any argument starts with `~`, contains `:` (other than a Windows drive letter), uses `-o` or `--output`, or names a path outside the workspace.
 
+Shell glob and brace patterns also defer, as do quoted wildcards (`*?[]`) that Git can interpret as pathspecs. Name-only built-ins such as `ls`, `dir`, `echo`, and `which` are exempt from glob deferral, but still undergo workspace boundary checks. Escaped arguments are checked under POSIX, PowerShell, and cmd.exe escape rules regardless of the host OS; a sensitive decoded name stops the fast path. All `git diff --no-index` calls defer because directory comparisons can recursively print sensitive descendants, and operand types can change. Deferred commands incur the judge's latency and cost.
+
 These always go to TypeSafe AI for semantic evaluation instead:
 
 - Chained commands (`;`, `&&`, `&`, `|`, `>`, `<`, `` ` ``, or newlines).
