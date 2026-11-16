@@ -433,9 +433,9 @@ func readWindow(dir string, start int, deadline time.Time) (window []windowEntry
 	pos, ended, cut := 0, false, false
 	for len(window) < sweepMaxEntries && !cut {
 		n := sweepReadChunk
-		if pos < start {
+		if pos <= start && len(window) == 0 {
 			if start+1-pos < n {
-				n = start + 1 - pos // stop at the cursor entry and inspect it first
+				n = start + 1 - pos // stop at the cursor entry, even at 0, and inspect it first
 			}
 		} else if sweepMaxEntries-len(window) < n {
 			n = sweepMaxEntries - len(window) // never read past the window

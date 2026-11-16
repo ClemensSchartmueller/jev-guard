@@ -693,6 +693,36 @@ func TestSweep_CursorEntryInspectedBeforeReadingFurther(t *testing.T) {
 	}
 }
 
+// The cursor entry is inspected before further names are read even at cursor
+// 0 and with the default chunk size: a full first chunk would exhaust the
+// listing deadline before entry 0 is inspected, and every run from cursor 0
+// would then inspect nothing and stay at 0.
+func TestSweep_CursorZeroInspectedBeforeReadingFullChunk(t *testing.T) {
+	setupTestJevguardDir(t)
+	var fresh []string
+	for _, id := range []string{"s0", "s1", "s2", "s3", "s5"} {
+		p := sessionLockPath(id)
+		writeAged(t, p, nil, hourAgo)
+		fresh = append(fresh, p)
+	}
+	abandoned := sessionLockPath("s4")
+	writeAged(t, abandoned, nil, ancient)
+	sortedListing(t)
+	reset, _ := listingClock(t, 6)
+
+	next := 0
+	for run := 1; exists(abandoned); run++ {
+		if run > 6 {
+			t.Fatalf("abandoned lock file at listing position 4 left after 6 runs (cursor %d)", next)
+		}
+		reset()
+		_, next = sweepFrom(next)
+	}
+	if n := countExisting(fresh); n != len(fresh) {
+		t.Fatalf("%d recently used lock files swept", len(fresh)-n)
+	}
+}
+
 // A run that falls back from an unreachable cursor still processes the names
 // it read at the start of the listing when time allows (here the name budget,
 // not the deadline, stops the skip).
