@@ -2,7 +2,9 @@ package fastpath
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"jev-guard/pkg/harness"
@@ -83,12 +85,12 @@ func TestTrustedNameOnlyGlobs(t *testing.T) {
 }
 
 func TestCommandArgsMayExpand(t *testing.T) {
-	for _, args := range []string{`.en?`, `{a,b}`, `'*.go'`, `"[ab]"`} {
+	for _, args := range []string{`.en?`, `{a,b}`, `'*.go'`, `"[ab]"`, `sub\main.go`, `.e\nv`} {
 		if !commandArgsMayExpand(args) {
 			t.Errorf("expected expansion for %q", args)
 		}
 	}
-	for _, args := range []string{`main.go`, `sub\main.go`, `.e^nv`, `.e\nv`} {
+	for _, args := range []string{`main.go`, `.e^nv`} {
 		if commandArgsMayExpand(args) {
 			t.Errorf("unexpected expansion for %q", args)
 		}
@@ -110,61 +112,60 @@ func TestTrustedCaretQuoteNames(t *testing.T) {
 }
 
 func TestTrustedImplicitNoIndex(t *testing.T) {
-	t.Setenv("GIT_DIR", "")
-	t.Setenv("GIT_WORK_TREE", "")
-	cwd := t.TempDir()
-	filter := NewFilter(&mockBoundaryChecker{contained: true}, nil)
-	for _, name := range []string{"sub", "other"} {
-		if err := os.Mkdir(filepath.Join(cwd, name), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, name := range []string{"sub/.env", "other/x"} {
-		if err := os.WriteFile(filepath.Join(cwd, name), []byte("fixture"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, command := range []string{"git diff sub other", "git diff other sub", "git diff . other"} {
-		assertDeferred(t, filter, command, &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: command})
-	}
-	if err := os.Mkdir(filepath.Join(cwd, ".git"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, command := range []string{"git diff HEAD~1", "git diff HEAD@{1}", "git log stash@{0}", "git diff @{upstream}"} {
-		assertTrustedAllow(t, filter, command, &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: command})
+	for _, setup := range []string{"no repository", "empty .git", "GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "real repository", "different owner"} {
+		t.Run(setup, func(t *testing.T) {
+			for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_TEST_ASSUME_DIFFERENT_OWNER"} {
+				t.Setenv(key, "")
+			}
+			cwd := t.TempDir()
+			for _, name := range []string{"sub", "other", "Upper", "with space", "upstream", "u", "push"} {
+				if err := os.Mkdir(filepath.Join(cwd, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(cwd, "file"), []byte("fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch setup {
+			case "empty .git":
+				if err := os.Mkdir(filepath.Join(cwd, ".git"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "GIT_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES":
+				t.Setenv(setup, cwd)
+			case "real repository", "different owner":
+				cmd := exec.Command("git", "init", cwd)
+				for _, entry := range os.Environ() {
+					if !strings.HasPrefix(entry, "GIT_") {
+						cmd.Env = append(cmd.Env, entry)
+					}
+				}
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git init: %s: %v", out, err)
+				}
+				if setup == "different owner" {
+					t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+				}
+			}
+			filter := NewFilter(&mockBoundaryChecker{contained: true}, nil)
+			for _, command := range []string{"git diff sub other", "git diff other sub", "git diff . other", "git diff Upper file", "git diff file/child other", `git diff "with space" file`, "git diff -- sub other", `git diff s^ub other`} {
+				assertDeferred(t, filter, command, &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: command})
+			}
+			for _, command := range []string{"git diff HEAD~1", "git diff main...HEAD", "git diff --stat", "git diff HEAD@{1}", "git log stash@{0}", "git diff @{upstream}", "git diff @{-1}", "git diff @{u}", "git diff main@{push}", "git diff @{upstream} other", "git diff @{u} other"} {
+				assertTrustedAllow(t, filter, command, &harness.NormalizedToolCall{ToolName: "Bash", Cwd: cwd, Command: command})
+			}
+		})
 	}
 }
 
-func TestInsideGitWorkTree(t *testing.T) {
-	t.Setenv("GIT_DIR", "")
-	t.Setenv("GIT_WORK_TREE", "")
-	cwd := t.TempDir()
-	if insideGitWorkTree(cwd) {
-		t.Fatal("temporary directory is not a repository")
-	}
-	gitDir := t.TempDir()
-	t.Setenv("GIT_DIR", gitDir)
-	if !insideGitWorkTree(cwd) {
-		t.Fatal("GIT_DIR should be honored")
-	}
-	t.Setenv("GIT_WORK_TREE", filepath.Join(cwd, "missing"))
-	if insideGitWorkTree(cwd) {
-		t.Fatal("lookup error must fail closed even with GIT_DIR")
-	}
-	t.Setenv("GIT_DIR", "")
-	t.Setenv("GIT_WORK_TREE", cwd)
-	if !insideGitWorkTree(cwd) {
-		t.Fatal("GIT_WORK_TREE should be honored")
-	}
-	t.Setenv("GIT_WORK_TREE", "")
-	if err := os.WriteFile(filepath.Join(cwd, ".git"), []byte("gitdir: "+gitDir), 0600); err != nil {
-		t.Fatal(err)
-	}
-	child := filepath.Join(cwd, "sub")
-	if err := os.Mkdir(child, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if !insideGitWorkTree(child) {
-		t.Fatal("parent worktree .git file should be recognized")
+func TestTrustedGitPathspecBackslashes(t *testing.T) {
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, nil)
+	for _, command := range []string{`git diff -- '.e\nv'`, `git diff -- ".e\nv"`, `git diff -- .e\\nv`, `git diff -- .e\\"n"v`, `git log -p -- 'sub/.e\nv'`, `git diff -- 'id_\rsa'`} {
+		for _, tool := range []string{"Bash", "PowerShell"} {
+			res := filter.Evaluate(&harness.NormalizedToolCall{ToolName: tool, Command: command})
+			if res != nil && res.Decision == harness.DecisionAllow {
+				t.Errorf("%s %q: unsafe ALLOW: %+v", tool, command, res)
+			}
+		}
 	}
 }

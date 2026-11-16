@@ -598,9 +598,18 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	// --no-index compares directories recursively, including sensitive descendants
 	// absent from the command text. Defer even file operands: their type can change.
 	if trustedPrefix == "git diff" {
-		operands := 0
+		// Inspect the union of shell readings, preserving filesystem case. Git can
+		// implicitly compare paths regardless of repository metadata or environment.
+		pathArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
+		pathArgs = gitReflogReference.ReplaceAllString(pathArgs, "\x00")
+		paths := 0
 		pathsOnly := false
-		for _, arg := range shellWords(argsStr) {
+		for _, arg := range shellWords(pathArgs) {
+			// Mask selectors before reading so alternate shell forms cannot
+			// turn one revision into multiple filesystem operands.
+			if strings.ContainsRune(arg, 0) {
+				continue
+			}
 			if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
 				return false, nil
 			}
@@ -608,11 +617,18 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 				pathsOnly = true
 				continue
 			}
-			if pathsOnly || !strings.HasPrefix(arg, "-") {
-				operands++
+			if !pathsOnly && strings.HasPrefix(arg, "-") {
+				continue
+			}
+			candidate := arg
+			if !filepath.IsAbs(candidate) {
+				candidate = filepath.Join(call.Cwd, candidate)
+			}
+			if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+				paths++
 			}
 		}
-		if operands >= 2 && !insideGitWorkTree(call.Cwd) {
+		if paths >= 2 {
 			return false, nil
 		}
 	}
@@ -690,7 +706,8 @@ func nameOnlyTrustedCommand(command string) bool {
 }
 
 // commandArgsMayExpand uses the shared shell reader for unquoted expansions.
-// Quoted wildcards also defer because Git interprets literal pathspec globs.
+// Quoted wildcards and decoded backslashes also defer: Git interprets pathspec
+// globs and backslash escapes itself. This conservatively includes Windows paths.
 func commandArgsMayExpand(args string) bool {
 	reader := newShellReader()
 	words, patterns := reader.read(args, false)
@@ -698,7 +715,7 @@ func commandArgsMayExpand(args string) bool {
 		return true
 	}
 	for _, word := range words {
-		if strings.ContainsAny(word, "*?[]") {
+		if strings.ContainsAny(word, "*?[]\\") {
 			return true
 		}
 	}
@@ -784,7 +801,7 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 }
 
 // Git reflog selectors are literal arguments, rather than shell brace syntax.
-var gitReflogReference = regexp.MustCompile(`@\{(?:[0-9]+|upstream)\}`)
+var gitReflogReference = regexp.MustCompile(`@\{(?:-?[0-9]+|u|upstream|push)\}`)
 
 func containsChainingOperators(cmd string) bool {
 	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
@@ -832,50 +849,4 @@ func extractFilePathFromURI(uriStr string) string {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
-// insideGitWorkTree recognizes normal repositories and linked worktrees without
-// invoking Git. Lookup failures conservatively leave directory diffs untrusted.
-func insideGitWorkTree(cwd string) bool {
-	if cwd == "" {
-		var err error
-		cwd, err = os.Getwd()
-		if err != nil {
-			return false
-		}
-	}
-	dir, err := filepath.Abs(cwd)
-	if err != nil {
-		return false
-	}
-	explicit := false
-	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE"} {
-		if value := os.Getenv(key); value != "" {
-			if !filepath.IsAbs(value) {
-				value = filepath.Join(dir, value)
-			}
-			info, err := os.Stat(value)
-			if err != nil || !info.IsDir() {
-				return false
-			}
-			explicit = true
-		}
-	}
-	if explicit {
-		return true
-	}
-	for {
-		_, err := os.Stat(filepath.Join(dir, ".git"))
-		if err == nil {
-			return true
-		}
-		if !os.IsNotExist(err) {
-			return false
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		dir = parent
-	}
 }
