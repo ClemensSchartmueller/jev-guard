@@ -3,10 +3,12 @@ package evaluator
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -66,11 +68,28 @@ func NewClient(apiKey, baseURL, model string, timeout time.Duration) *Client {
 		BaseURL: baseURL,
 		Model:   model,
 		HTTPClient: &http.Client{
-			Timeout: timeout,
+			Transport: NewTransport(),
+			Timeout:   timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
+	}
+}
+
+// NewTransport constructs the direct, system-trusted transport shared by
+// evaluations and doctor. HTTP/2 is disabled because GODEBUG=http2debug logs
+// authorization headers. Each caller owns its transport and may customize it.
+func NewTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 nil,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig:       &tls.Config{RootCAs: clonedTrustedRoots(), MinVersion: tls.VersionTLS12},
 	}
 }
 
