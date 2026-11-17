@@ -26,7 +26,8 @@ const SourceAntiTamperingLimit = "anti_tampering_limit"
 // CLI invocations return ASK with source fastpath_self_invocation. This invariant
 // runs before every other check, independent of fastpath_enabled or user intent. It returns ASK (source
 // anti_tampering_limit) when a command is too large to read word by word and its
-// text names no protected file. Returns nil when the call is clean.
+// text names no protected file. Changes to harness hook configuration get ASK
+// (source fastpath_hook_config). Returns nil when the call is clean.
 func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
 	if call == nil {
 		return nil
@@ -46,7 +47,14 @@ func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationRes
 	} else if limit != "" {
 		overLimit = limit
 	} else {
-		return checkSelfInvocation(call)
+		self := checkSelfInvocation(call)
+		if IsTamperingDenial(self) {
+			return self
+		}
+		if hook := checkHookConfigChanges(call); hook != nil {
+			return hook
+		}
+		return self
 	}
 
 	if overLimit != "" {

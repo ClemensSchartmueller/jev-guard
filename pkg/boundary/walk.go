@@ -608,3 +608,9 @@ func SetWorkBudgetForTesting(n int64) (restore func()) {
 		workBudget = old
 	}
 }
+
+// ChargeWork charges bounded analysis to the active evaluation's shared work budget.
+func ChargeWork(n int) error {
+	_, err := withEvaluation(func(e *evaluation) (string, error) { return "", charge(&e.remaining, n) })
+	return err
+}

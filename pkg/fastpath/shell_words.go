@@ -1077,3 +1077,37 @@ func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
 	b.flush()
 	return b.words, b.expanded
 }
+
+// readHeredocBodies adapts hook analysis to the shared marker-based reader.
+func readHeredocBodies(s string, body func(string, bool, string)) string {
+	type doc struct {
+		marker, text string
+		quoted       bool
+	}
+	var docs []doc
+	clean := readHeredocs(s, func(value string, quoted bool) string {
+		if value == "" {
+			marker := "__hook_stdin_" + strconv.Itoa(len(docs)) + "__"
+			docs = append(docs, doc{marker: marker})
+			return marker
+		}
+		marker, text, _ := strings.Cut(value, "\x00")
+		for i := range docs {
+			if docs[i].marker == marker {
+				docs[i].text, docs[i].quoted = text, quoted
+			}
+		}
+		return ""
+	})
+	for _, d := range docs {
+		for _, segment := range strings.Split(clean, "\n") {
+			if strings.Contains(segment, d.marker) {
+				body(d.text, d.quoted, strings.ReplaceAll(segment, d.marker, ""))
+			}
+		}
+	}
+	for _, d := range docs {
+		clean = strings.ReplaceAll(clean, d.marker, " ")
+	}
+	return clean
+}

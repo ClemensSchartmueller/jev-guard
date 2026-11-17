@@ -162,7 +162,7 @@ func applySessionContext(call *harness.NormalizedToolCall, cfg *config.Config, s
 
 // gateHold returns a verdict that stops the call before the gate runs. Anti-tampering
 // comes first: its DENY is stronger than any session hold and must not be downgraded
-// to a hold the user could approve. Its ASK for a command too large to check is not a
+// to a hold the user could approve. Its ASK for limits, read-only self-invocation, or hook-config changes is not a
 // hold: traceGateEvaluation applies it as a floor.
 func gateHold(call *harness.NormalizedToolCall, cfg *config.Config, stderr io.Writer) *harness.EvaluationResult {
 	if tampering := fastpath.CheckAntiTampering(call); fastpath.IsTamperingDenial(tampering) {
@@ -219,8 +219,8 @@ func readStandardInput() ([]byte, error) {
 // gateTrace records the intermediate results of the gate pipeline so that both the
 // hook path and `jev-guard eval --explain` share a single implementation.
 type gateTrace struct {
-	Tampering        *harness.EvaluationResult // an anti-tampering DENY, which decided the call
-	TamperingLimit   *harness.EvaluationResult // anti-tampering's ASK floor (limits or read-only self-invocation)
+	Tampering        *harness.EvaluationResult // an anti-tampering DENY that decided the call
+	TamperingLimit   *harness.EvaluationResult // anti-tampering's ASK floor for limits, read-only self-invocation, or hook-config changes
 	FastpathRan      bool
 	Fastpath         *harness.EvaluationResult
 	BoundaryRan      bool
@@ -279,11 +279,11 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 	if tampering == nil {
 		return traceGateStages(call, cfg, offline, cfg.Mode)
 	}
-	// An anti-tampering ASK is a floor, not a verdict:
+	// Non-denial anti-tampering results are floors, including limits and hook-config changes:
 	// the later stages still run, so a DENY from them stands, and nothing weaker than ASK does.
 	trace := traceGateStages(call, cfg, offline, "")
 	trace.TamperingLimit = tampering
-	if trace.Final == nil || decisionRank(trace.Final.Decision) < decisionRank(tampering.Decision) {
+	if trace.Final == nil || (decisionRank(trace.Final.Decision) < decisionRank(tampering.Decision) || trace.Final.Decision == tampering.Decision && tampering.Source == fastpath.SourceHookConfig) {
 		floor := *tampering
 		if trace.Final != nil {
 			floor.TaintNote = trace.Final.TaintNote

@@ -341,6 +341,48 @@ func TestTraceGateEvaluationEncodedNestingDepthIsFloored(t *testing.T) {
 	}
 }
 
+func TestHookConfigGateRequiresApproval(t *testing.T) {
+	ws := t.TempDir()
+	for _, enabled := range []bool{true, false} {
+		cfg := config.DefaultConfig()
+		cfg.FastpathEnabled = &enabled
+		for _, call := range []*harness.NormalizedToolCall{
+			{ToolName: "Write", TargetPath: ".claude/settings.json", Cwd: ws, UserIntent: "change my hooks"},
+			{ToolName: "apply_patch", Cwd: ws, RawArgs: map[string]interface{}{"input": "*** Begin Patch\n*** Delete File: .codex/hooks.json\n*** End Patch"}},
+			{ToolName: "Bash", Command: "echo {} > .agents/hooks.json", Cwd: ws},
+		} {
+			trace := traceGateEvaluation(call, cfg, true)
+			if trace.Final == nil || trace.Final.Decision != harness.DecisionAsk || trace.Final.Source != fastpath.SourceHookConfig || trace.FastpathRan != enabled {
+				t.Fatalf("enabled=%t call=%+v: trace=%+v", enabled, call, trace)
+			}
+		}
+	}
+}
+
+func TestHookConfigJudgeDenyOutranksFloor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.95},
+			"destructive_potential":{"type":"score","score":0.5,"confidence":0.95},
+			"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.95},
+			"intent_alignment":{"type":"choice","choice":"not_requested","confidence":0.95}
+		}}`)
+	}))
+	defer server.Close()
+	t.Setenv("JEV_GUARD_HOME", t.TempDir())
+	cfg := withFastpath(config.DefaultConfig(), false)
+	cfg.APIKey, cfg.BaseURL = "test-key", server.URL
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "rm -rf ~; echo x > .claude/settings.json", Cwd: t.TempDir(), UserIntent: "delete the build folder"}
+	trace := traceGateEvaluation(call, cfg, false)
+	if trace.TamperingLimit == nil || !trace.SemanticRan {
+		t.Fatalf("trace=%+v; want the hook-config ASK floor and the TypeSafe stage", trace)
+	}
+	if trace.Final == nil || trace.Final.Decision != harness.DecisionDeny {
+		t.Fatalf("final=%+v; want the policy DENY to outrank the hook-config ASK floor", trace.Final)
+	}
+}
+
 func TestGuardSelfInvocationGate(t *testing.T) {
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
 	deny := []string{
@@ -415,5 +457,20 @@ func TestSelfInvocationAskFloorPreservesJudgeDeny(t *testing.T) {
 	trace := traceGateEvaluation(&harness.NormalizedToolCall{ToolName: "Bash", Command: "jev-guard status; rm -rf /", Cwd: t.TempDir()}, cfg, false)
 	if !trace.SemanticRan || trace.Final == nil || trace.Final.Decision != harness.DecisionDeny {
 		t.Fatalf("trace=%+v final=%+v", trace, trace.Final)
+	}
+}
+
+func TestSelfInvocationHookConfigPriority(t *testing.T) {
+	for _, tc := range []struct {
+		command, source string
+		decision        harness.Decision
+	}{
+		{"jev-guard init; echo x > .claude/settings.json", fastpath.SourceSelfInvocation, harness.DecisionDeny},
+		{"jev-guard status; echo x > .claude/settings.json", fastpath.SourceHookConfig, harness.DecisionAsk},
+	} {
+		r := fastpath.CheckAntiTampering(&harness.NormalizedToolCall{ToolName: "Bash", Command: tc.command, Cwd: t.TempDir()})
+		if r == nil || r.Source != tc.source || r.Decision != tc.decision {
+			t.Errorf("%s: %+v", tc.command, r)
+		}
 	}
 }
