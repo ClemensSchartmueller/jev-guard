@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 
 	"jev-guard/pkg/boundary"
@@ -21,8 +22,9 @@ import (
 const SourceAntiTamperingLimit = "anti_tampering_limit"
 
 // CheckAntiTampering denies any access to jev-guard's own configuration, log, or
-// session state. It is a hard invariant: it runs before every other check and does
-// not depend on fastpath_enabled or user intent. It returns ASK (source
+// session state, including state-changing invocations of its CLI. Read/evaluation
+// CLI invocations return ASK with source fastpath_self_invocation. This invariant
+// runs before every other check, independent of fastpath_enabled or user intent. It returns ASK (source
 // anti_tampering_limit) when a command is too large to read word by word and its
 // text names no protected file. Returns nil when the call is clean.
 func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationResult {
@@ -44,7 +46,7 @@ func CheckAntiTampering(call *harness.NormalizedToolCall) *harness.EvaluationRes
 	} else if limit != "" {
 		overLimit = limit
 	} else {
-		return nil
+		return checkSelfInvocation(call)
 	}
 
 	if overLimit != "" {
@@ -89,6 +91,7 @@ const maxTamperingPathLookups = 8192
 // out still counts.
 func commandWordsMentionJevguard(call *harness.NormalizedToolCall) (deny bool, limit string) {
 	c := &commandCheck{reader: newShellReader(), dirs: callWorkingDirs(call), resolved: map[string]bool{}}
+	c.reader.deadline = time.Now().Add(250 * time.Millisecond)
 	if home, err := os.UserHomeDir(); err == nil {
 		c.home = home
 	}
@@ -180,11 +183,17 @@ func (c *commandCheck) exceed(limit string) {
 
 func (c *commandCheck) wordsTargetJevguard(words, patterns []string) bool {
 	for _, word := range words {
+		if !c.reader.spend(len(word), 1) {
+			return false
+		}
 		if mentionsJevguard(word) || c.wordReachesJevguard(word) {
 			return true
 		}
 	}
 	for _, pattern := range patterns {
+		if !c.reader.spend(len(pattern), 1) {
+			return false
+		}
 		if c.shellPatternTargetsJevguard(pattern) {
 			return true
 		}
