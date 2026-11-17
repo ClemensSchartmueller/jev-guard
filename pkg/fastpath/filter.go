@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"jev-guard/pkg/boundary"
@@ -155,7 +156,7 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error
 		targetRaw = extractFilePathFromURI(targetRaw)
 	}
 	target := strings.ToLower(normalizePathSeparators(targetRaw))
-	cmd := strings.ToLower(normalizePathSeparators(call.Command))
+	cmd := strings.ToLower(normalizePathSeparators(strings.Join(shellWords(call.Command), " ")))
 	baseName := strings.ToLower(path.Base(target))
 	cmdTokens := strings.Fields(cmd)
 
@@ -235,7 +236,7 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, er
 	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
 		candidates = append(candidates, t)
 	}
-	for i, arg := range sensitiveCommandArguments(command) {
+	for i, arg := range shellWords(command) {
 		if i == 0 {
 			continue
 		}
@@ -563,7 +564,11 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 		return false, nil
 	}
 
-	if containsChainingOperators(trimmedCmd) {
+	chainText := trimmedCmd
+	if strings.HasPrefix(trimmedCmd, "git diff ") || strings.HasPrefix(trimmedCmd, "git log ") {
+		chainText = gitReflogReference.ReplaceAllString(chainText, "reflog")
+	}
+	if containsChainingOperators(chainText) {
 		return false, nil
 	}
 
@@ -590,13 +595,58 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if argsStr == "" {
 		return true, nil
 	}
+	// --no-index compares directories recursively, including sensitive descendants
+	// absent from the command text. Defer even file operands: their type can change.
+	if trustedPrefix == "git diff" {
+		// Inspect the union of shell readings, preserving filesystem case. Git can
+		// implicitly compare paths regardless of repository metadata or environment.
+		rawArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
+		existing := map[string]struct{}{}
+		// Read the operands twice: once with reflog selectors masked, so alternate
+		// shell forms cannot split one revision into several filesystem operands,
+		// and once unmasked, so a real directory whose name contains a selector
+		// (for example "x@{1}") is still counted. Extra fragments only matter if
+		// they exist on disk, which makes the second pass fail toward deferral.
+		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(rawArgs, "\x00"), rawArgs} {
+			pathsOnly := false
+			for _, arg := range shellWords(pathArgs) {
+				if strings.ContainsRune(arg, 0) {
+					continue
+				}
+				if arg == "--no-index" || strings.HasPrefix(arg, "--no-index=") {
+					return false, nil
+				}
+				if arg == "--" {
+					pathsOnly = true
+					continue
+				}
+				if !pathsOnly && strings.HasPrefix(arg, "-") {
+					continue
+				}
+				candidate := arg
+				if !filepath.IsAbs(candidate) {
+					candidate = filepath.Join(call.Cwd, candidate)
+				}
+				if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+					existing[filepath.Clean(candidate)] = struct{}{}
+				}
+			}
+		}
+		paths := len(existing)
+		if paths >= 2 {
+			return false, nil
+		}
+	}
+	if !nameOnlyTrustedCommand(trustedPrefix) && commandArgsMayExpand(argsStr) {
+		return false, nil
+	}
 
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
 		return false, nil
 	}
 
-	tokens := strings.Fields(argsStr)
+	tokens := shellWords(argsStr)
 	for i := 0; i < len(tokens); i++ {
 		token := tokens[i]
 		cleanArg := strings.Trim(token, `"'`)
@@ -648,6 +698,33 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	}
 
 	return true, nil
+}
+
+// nameOnlyTrustedCommand lists built-in commands that cannot print file contents.
+// Their arguments still pass through the flag and workspace boundary checks.
+func nameOnlyTrustedCommand(command string) bool {
+	switch command {
+	case "ls", "dir", "pwd", "echo", "whoami", "which", "where.exe", "node -v", "go version", "python --version":
+		return true
+	}
+	return false
+}
+
+// commandArgsMayExpand uses the shared shell reader for unquoted expansions.
+// Quoted wildcards and decoded backslashes also defer: Git interprets pathspec
+// globs and backslash escapes itself. This conservatively includes Windows paths.
+func commandArgsMayExpand(args string) bool {
+	reader := newShellReader()
+	words, patterns := reader.read(args, false)
+	if reader.incomplete() != "" || len(patterns) > 0 {
+		return true
+	}
+	for _, word := range words {
+		if strings.ContainsAny(word, "*?[]\\") {
+			return true
+		}
+	}
+	return false
 }
 
 func isPotentialPath(arg string) bool {
@@ -727,6 +804,9 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 		return harness.HasSingleTargetArg(call)
 	}
 }
+
+// Git reflog selectors are literal arguments, rather than shell brace syntax.
+var gitReflogReference = regexp.MustCompile(`@\{(?:-?[0-9]+|u|upstream|push)\}`)
 
 func containsChainingOperators(cmd string) bool {
 	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
