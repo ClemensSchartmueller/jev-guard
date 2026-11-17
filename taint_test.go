@@ -226,7 +226,7 @@ func TestTraceGateEvaluation_TaintEscalatesFastpathAllow(t *testing.T) {
 	ws := t.TempDir()
 	cfg := taintConfig(config.TaintModeEnforce)
 	cfg.TrustedCommands = append(cfg.TrustedCommands, "touch")
-	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "touch .claude/settings.json", Cwd: ws,
+	call := &harness.NormalizedToolCall{ToolName: "Bash", Command: "touch .claude/agent-metadata.json", Cwd: ws,
 		Taint: &session.TaintSource{ToolName: "WebFetch", At: time.Now()}}
 	trace := traceGateEvaluation(call, cfg, true)
 	if trace.Fastpath == nil || trace.Fastpath.Decision != harness.DecisionAllow {
@@ -353,7 +353,7 @@ func TestTraceGateEvaluation_TaintResolvesPaths(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(ws, ".claude"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ws, ".claude", "settings.json"), []byte("{}"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(ws, ".claude", "agent-metadata.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(".claude", filepath.Join(ws, "alias")); err != nil {
@@ -363,8 +363,8 @@ func TestTraceGateEvaluation_TaintResolvesPaths(t *testing.T) {
 	cfg.TrustedCommands = append(cfg.TrustedCommands, "touch")
 	taint := &session.TaintSource{ToolName: "WebFetch", At: time.Now()}
 	for _, tc := range []struct{ name, cmd, cwd string }{
-		{"symlinked directory", "touch alias/settings.json", ws},
-		{"relative path inside .claude", "touch settings.json", filepath.Join(ws, ".claude")},
+		{"symlinked directory", "touch alias/agent-metadata.json", ws},
+		{"relative path inside .claude", "touch agent-metadata.json", filepath.Join(ws, ".claude")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call := &harness.NormalizedToolCall{ToolName: "Bash", Command: tc.cmd, Cwd: tc.cwd, Taint: taint}
@@ -375,7 +375,7 @@ func TestTraceGateEvaluation_TaintResolvesPaths(t *testing.T) {
 		})
 	}
 	t.Run("write tool through symlink", func(t *testing.T) {
-		call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(ws, "alias", "settings.json"), Cwd: ws}
+		call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: filepath.Join(ws, "alias", "agent-metadata.json"), Cwd: ws}
 		if !touchesExecutionSensitivePath(call) {
 			t.Fatal("write through alias -> .claude not detected")
 		}
