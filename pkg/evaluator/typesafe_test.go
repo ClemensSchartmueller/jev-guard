@@ -341,7 +341,7 @@ func TestClient_HTTP2DebugDoesNotLeakKey(t *testing.T) {
 	proto := make(chan string, 1)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proto <- r.Proto
-		w.Write([]byte(`{"answers":{}}`))
+		w.Write([]byte(`{"answers":{"is_workspace_contained":{"type":"noul","noul":0.95},"destructive_potential":{"type":"score","score":0,"confidence":0.95},"violation_category":{"type":"choice","choice":"none","confidence":0.95}}}`))
 	}))
 	server.EnableHTTP2 = true
 	server.StartTLS()
