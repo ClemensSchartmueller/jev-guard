@@ -278,10 +278,13 @@ func hookCommandTargetsMode(command string, dirs []string, reader *shellReader, 
 			}
 		}
 
-		add := func(word string) {
+		var add func(word string)
+		add = func(word string) {
 			word = normalizePathSeparators(word)
+			// "--opt=path" names path, but a file name may hold "=" too, and so may a bracket
+			// expression ([[=x=]]), so the whole word is checked as well.
 			if k := strings.IndexByte(word, '='); k >= 0 {
-				word = word[k+1:]
+				add(word[k+1:])
 			}
 			for _, dir := range current {
 				if dir == hookUnknownDir {
