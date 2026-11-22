@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"jev-guard/pkg/hookconfig"
 )
 
 var initAgents = []string{"claude", "codex", "antigravity"}
@@ -134,7 +136,7 @@ func selectInitAgents(requested, scope, cwd, home string) []string {
 		}
 		dir := filepath.Dir(path)
 		if scope == "project" {
-			dir = filepath.Join(root, map[string]string{"claude": ".claude", "codex": ".codex", "antigravity": ".agents"}[agent])
+			dir = filepath.Dir(hookconfig.SettingsPath(agent, "project", root, home))
 		}
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			detected = append(detected, agent)
@@ -147,24 +149,7 @@ func selectInitAgents(requested, scope, cwd, home string) []string {
 }
 
 func initSettingsPath(agent, scope, cwd, home string) string {
-	if scope == "user" {
-		switch agent {
-		case "claude":
-			return filepath.Join(home, ".claude", "settings.json")
-		case "codex":
-			return filepath.Join(home, ".codex", "hooks.json")
-		default:
-			return filepath.Join(home, ".gemini", "config", "hooks.json")
-		}
-	}
-	switch agent {
-	case "claude":
-		return filepath.Join(cwd, ".claude", "settings.json")
-	case "codex":
-		return filepath.Join(cwd, ".codex", "hooks.json")
-	default:
-		return filepath.Join(cwd, ".agents", "hooks.json")
-	}
+	return hookconfig.SettingsPath(agent, scope, cwd, home)
 }
 
 func containsAgent(agents []string, name string) bool {

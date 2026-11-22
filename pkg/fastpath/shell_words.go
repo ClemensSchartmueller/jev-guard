@@ -3,6 +3,7 @@ package fastpath
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxShellNesting bounds how deep strings that a program will run are read as commands.
@@ -23,6 +24,7 @@ const (
 // newShellReader.
 type shellReader struct {
 	bytes, tokens, payloads int
+	deadline                time.Time
 	exhausted               bool
 	// tooDeep is set when a command a program will run was not read because it is nested
 	// deeper than maxShellNesting. Reading goes on, so a protected name found elsewhere is
@@ -49,6 +51,9 @@ func (r *shellReader) incomplete() string {
 
 // spend charges work to the budget and reports whether it is still within it.
 func (r *shellReader) spend(bytes, tokens int) bool {
+	if !r.deadline.IsZero() && time.Now().After(r.deadline) {
+		r.exhausted = true
+	}
 	if r.exhausted {
 		return false
 	}
@@ -192,6 +197,24 @@ var interpreterFlags = map[string][]string{
 // spent, the payloads found so far are returned.
 func (r *shellReader) commandPayloads(words []string) []string {
 	var payloads []string
+	// Index the next shell command flag once, rather than searching every suffix.
+	next := make([]int, len(words)+1)
+	argument := make([]int, len(words)+1)
+	argument[len(words)] = len(words)
+	next[len(words)] = len(words)
+	for i := len(words) - 1; i >= 0; i-- {
+		if !r.spend(len(words[i]), 1) {
+			return payloads
+		}
+		argument[i] = argument[i+1]
+		if !strings.HasPrefix(words[i], "-") {
+			argument[i] = i
+		}
+		next[i] = next[i+1]
+		if words[i] == "--command" || strings.HasPrefix(words[i], "--command=") || shortCommandFlag(words[i]) || oversizedShortFlag(words[i]) {
+			next[i] = i
+		}
+	}
 	// suffix[i] is the length of strings.Join(words[i:], " "), so sizes are known before joining.
 	var suffix []int
 	joinedSize := func(i int) int {
@@ -222,27 +245,29 @@ func (r *shellReader) commandPayloads(words []string) []string {
 				return payloads
 			}
 		case shellPrograms[name]:
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
-			for j, flag := range rest {
-				if value, ok := strings.CutPrefix(flag, "--command="); ok {
-					if !add(len(value), func() string { return value }) {
-						return payloads
-					}
-					break
+			j := next[i+1]
+			if j < len(words) {
+				if oversizedShortFlag(words[j]) {
+					r.exhausted = true
+					return payloads
 				}
-				isFlag := flag == "--command" || (len(flag) > 1 && flag[0] == '-' && flag[1] != '-' && strings.Contains(flag, "c"))
-				if isFlag && j+1 < len(rest) {
-					value := rest[j+1]
-					if !add(len(value), func() string { return value }) {
-						return payloads
+				value, attached := strings.CutPrefix(words[j], "--command=")
+				if !attached {
+					j = argument[j+1]
+					if j == len(words) {
+						continue
 					}
-					break
+					value = words[j]
+				}
+				if !add(len(value), func() string { return value }) {
+					return payloads
 				}
 			}
 		case name == "cmd":
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
 			for j, flag := range rest {
@@ -256,7 +281,7 @@ func (r *shellReader) commandPayloads(words []string) []string {
 				}
 			}
 		case name == "powershell" || name == "pwsh":
-			if !r.spend(0, len(rest)) {
+			if !r.spend(joinedSize(i+1), 2*len(rest)) {
 				return payloads
 			}
 			// PowerShell runs its arguments as a command, with or without -Command.
@@ -277,7 +302,7 @@ func (r *shellReader) commandPayloads(words []string) []string {
 			if len(flags) == 0 {
 				continue
 			}
-			if !r.spend(0, len(flags)*len(rest)) {
+			if !r.spend(len(flags)*joinedSize(i+1), len(flags)*len(rest)) {
 				return payloads
 			}
 			for _, known := range flags {
@@ -309,15 +334,16 @@ func interpreterName(name string) string {
 }
 
 // commandSubstitutions returns the outermost $(...) and `...` spans a POSIX shell would run,
-// in one pass. Single-quoted text is literal, so it is skipped.
-func commandSubstitutions(s string) []string {
+// in one pass. Single-quoted text is skipped except in unquoted heredoc bodies,
+// where quote characters are data and substitutions still execute.
+func commandSubstitutions(s string, heredoc ...bool) []string {
 	var spans []string
 	depth, start := 0, 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
 		case c == '\\':
 			i++
-		case c == '\'' && depth == 0:
+		case c == '\'' && depth == 0 && (len(heredoc) == 0 || !heredoc[0]):
 			end := strings.IndexByte(s[i+1:], '\'')
 			if end < 0 {
 				return spans
@@ -360,18 +386,31 @@ func commandSubstitutions(s string) []string {
 // stripHeredocBodies removes heredoc bodies the way a POSIX shell finds them. It tracks quotes
 // and comments, because a marker inside either one is not a heredoc and the lines after it
 // are commands. Unterminated bodies run to the end of the text, as in a shell.
-func stripHeredocBodies(s string) string {
+func stripHeredocBodies(s string) string { return readHeredocs(s, nil) }
+
+// readHeredocs associates each body with a marker at its redirection position.
+// A nil capture strips bodies only. Otherwise capture("", false) allocates a
+// marker, and capture(marker+"\\x00"+body, quoted) delivers its body. Markers
+// replace stdin redirections so a single command reading associates each input
+// with its receiver, including inputs on later commands and pipeline stages.
+func readHeredocs(s string, capture func(string, bool) string, readers ...*shellReader) string {
+	charge := func(n int) bool { return len(readers) == 0 || readers[0].spend(n, 1) }
 	if !strings.Contains(s, "<<") {
 		return s
 	}
 	type heredoc struct {
 		delimiter string
 		tabs      bool
+		marker    string
+		quoted    bool
 	}
 	var out strings.Builder
 	var pending []heredoc
 	atWordStart := true
 	for i := 0; i < len(s); i++ {
+		if !charge(0) {
+			return out.String()
+		}
 		c := s[i]
 		switch {
 		case c == '\\':
@@ -406,12 +445,10 @@ func stripHeredocBodies(s string) string {
 		case c == '#' && atWordStart:
 			end := strings.IndexByte(s[i:], '\n')
 			if end < 0 {
-				out.WriteString(s[i:])
 				return out.String()
 			}
-			out.WriteString(s[i : i+end])
 			i += end - 1
-		case strings.HasPrefix(s[i:], "$(("):
+		case strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "(("):
 			end := strings.Index(s[i:], "))")
 			if end < 0 {
 				out.WriteString(s[i:])
@@ -421,8 +458,48 @@ func stripHeredocBodies(s string) string {
 			i += end + 1
 			atWordStart = false
 		case strings.HasPrefix(s[i:], "<<<"):
-			out.WriteString("<<<")
-			i += 2
+			if capture != nil {
+				j := i + 3
+				for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+					j++
+				}
+				end := j
+				var q byte
+				for end < len(s) {
+					c := s[end]
+					if q != 0 {
+						if c == q {
+							q = 0
+						}
+						end++
+						continue
+					}
+					if c == '\'' || c == '"' {
+						q = c
+						end++
+						continue
+					}
+					if c == '\\' && end+1 < len(s) {
+						end += 2
+						continue
+					}
+					if isShellSpace(c) || strings.ContainsRune(";&|()<>", rune(c)) {
+						break
+					}
+					end++
+				}
+				marker := capture("", false)
+				if !charge(end - j) {
+					return out.String()
+				}
+				args := posixWords(s[j:end])
+				capture(marker+"\x00"+strings.Join(args, " "), true)
+				out.WriteString(" " + marker + " ")
+				i = end - 1
+			} else {
+				out.WriteString("<<<")
+				i += 2
+			}
 			atWordStart = false
 		case strings.HasPrefix(s[i:], "<<"):
 			j := i + 2
@@ -437,17 +514,34 @@ func stripHeredocBodies(s string) string {
 			for end < len(s) && !isShellSpace(s[end]) && strings.IndexByte(";&|<>()", s[end]) < 0 {
 				end++
 			}
-			if words := posixWords(s[j:end]); len(words) == 1 && words[0] != "" {
-				pending = append(pending, heredoc{delimiter: words[0], tabs: tabs})
+			if !charge(end - j) {
+				return out.String()
 			}
-			out.WriteString(s[i:end])
+			if words := posixWords(s[j:end]); len(words) == 1 && words[0] != "" {
+				marker := ""
+				if capture != nil {
+					marker = capture("", false)
+				}
+				pending = append(pending, heredoc{delimiter: words[0], tabs: tabs, marker: marker, quoted: strings.ContainsAny(s[j:end], "\\\"'")})
+			}
+			if capture != nil && len(pending) > 0 {
+				out.WriteString(" " + pending[len(pending)-1].marker + " ")
+			} else {
+				out.WriteString(s[i:end])
+			}
 			i = end - 1
 			atWordStart = false
 		case c == '\n':
 			out.WriteByte(c)
 			atWordStart = true
 			for _, doc := range pending {
+				bodyStart := i + 1
+				bodyEnd := bodyStart
 				for i+1 < len(s) {
+					if !charge(0) {
+						return out.String()
+					}
+					lineStart := i + 1
 					lineEnd := strings.IndexByte(s[i+1:], '\n')
 					line := s[i+1:]
 					next := len(s) - 1
@@ -460,8 +554,13 @@ func stripHeredocBodies(s string) string {
 						line = strings.TrimLeft(line, "\t")
 					}
 					if line == doc.delimiter {
+						bodyEnd = lineStart
 						break
 					}
+					bodyEnd = i + 1
+				}
+				if capture != nil {
+					capture(doc.marker+"\x00"+s[bodyStart:bodyEnd], doc.quoted)
 				}
 			}
 			pending = nil
@@ -597,6 +696,17 @@ func (b *wordBuilder) flush() {
 	b.glob = false
 }
 
+// commentMayStart reports whether a '#' at i can begin a comment: only at the start of
+// input or after whitespace or an operator that ends a word. After ')' (the end of $(...),
+// $((...)), <(...) or an array) the shell keeps '#' in the word, so it is not a comment
+// there; reading it as a word only over-scans, which fails safe.
+func commentMayStart(s string, i int) bool {
+	if i == 0 {
+		return true
+	}
+	return strings.IndexByte(" \t\r\n;&|(<>", s[i-1]) >= 0
+}
+
 // posixWords splits like sh and bash: backslash escapes, single and double quotes, adjacent
 // segments, line continuations, and the $'...' and $"..." forms.
 func posixWords(s string) []string {
@@ -606,11 +716,76 @@ func posixWords(s string) []string {
 
 // posixRead is posixWords that, with track set, also returns the glob and brace patterns. It
 // also reports which words hold a variable the shell expands (see wordBuilder.expanded).
-func posixRead(s string, track bool) (words, patterns []string, expanded []bool) {
+// Optional commands mode preserves unquoted control operators as commandSeparator tokens.
+func posixRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track, braces: true}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started && commentMayStart(s, i):
+			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
+				i += end - 1
+			} else {
+				i = len(s)
+			}
+		case len(commands) > 0 && commands[0] && (strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "((")):
+			if end := strings.Index(s[i:], "))"); end >= 0 {
+				i += end + 1
+			} else {
+				i = len(s)
+			}
+
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
+			} else {
+				b.writeString(commandSeparator)
+			}
+			b.flush()
+		case len(commands) > 0 && commands[0] && (c == '<' || c == '>'):
+			// Redirections are syntax, never command arguments. Drop an adjacent fd.
+			b.flush()
+			if len(b.words) > 0 {
+				last := b.words[len(b.words)-1]
+				if last != "" && (strings.Trim(last, "0123456789") == "" || (strings.HasPrefix(last, "{") && strings.HasSuffix(last, "}"))) {
+					b.words = b.words[:len(b.words)-1]
+				}
+			}
+			j := i + 1
+			for j < len(s) && strings.ContainsRune("<>&|", rune(s[j])) {
+				j++
+			}
+			for j < len(s) && isShellSpace(s[j]) && s[j] != '\n' {
+				j++
+			}
+			var quote byte
+			for j < len(s) {
+				if quote != 0 {
+					if s[j] == quote {
+						quote = 0
+					}
+					j++
+					continue
+				}
+				if s[j] == '\'' || s[j] == '"' {
+					quote = s[j]
+					j++
+					continue
+				}
+				if s[j] == '\\' && j+1 < len(s) {
+					j += 2
+					continue
+				}
+				if isShellSpace(s[j]) || strings.ContainsRune(";&|()<>", rune(s[j])) {
+					break
+				}
+				j++
+			}
+			i = j - 1
 		case isShellSpace(c):
 			b.flush()
 		case c == '\\':
@@ -773,11 +948,45 @@ func powerShellWords(s string) []string {
 // powerShellRead is powerShellWords that, with track set, also returns the wildcard patterns,
 // which cmdlets such as Get-Content expand themselves. PowerShell has no brace expansion. It
 // also reports which words hold a variable PowerShell expands (see wordBuilder.expanded).
-func powerShellRead(s string, track bool) (words, patterns []string, expanded []bool) {
+func powerShellRead(s string, track bool, commands ...bool) (words, patterns []string, expanded []bool) {
 	b := wordBuilder{track: track}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case len(commands) > 0 && commands[0] && (c == '(' || c == ')'):
+			b.flush()
+
+		case len(commands) > 0 && commands[0] && strings.HasPrefix(s[i:], "<#"):
+			if end := strings.Index(s[i+2:], "#>"); end >= 0 {
+				i += end + 3
+			} else {
+				i = len(s)
+			}
+
+		case len(commands) > 0 && commands[0] && c == '#' && !b.started && commentMayStart(s, i):
+			if end := strings.IndexByte(s[i:], '\n'); end >= 0 {
+				i += end - 1
+			} else {
+				i = len(s)
+			}
+		case len(commands) > 0 && commands[0] && (strings.HasPrefix(s[i:], "$((") || strings.HasPrefix(s[i:], "((")):
+			if end := strings.Index(s[i:], "))"); end >= 0 {
+				i += end + 1
+			} else {
+				i = len(s)
+			}
+
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
+			} else {
+				b.writeString(commandSeparator)
+			}
+			b.flush()
 		case isShellSpace(c):
 			b.flush()
 		case c == '`':
@@ -829,7 +1038,7 @@ func cmdWords(s string) []string {
 
 // cmdRead is cmdWords that also reports which words hold a %, which cmd.exe expands as a
 // variable before it reads quotes and carets.
-func cmdRead(s string) (words []string, expanded []bool) {
+func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
 	var b wordBuilder
 	inQuotes := false
 	for i := 0; i < len(s); i++ {
@@ -843,6 +1052,17 @@ func cmdRead(s string) (words []string, expanded []bool) {
 			b.started = true
 		case inQuotes:
 			b.writeByte(c)
+		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			b.flush()
+			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
+				b.writeString(pipelineSeparator)
+				if i+1 < len(s) && s[i+1] == '&' {
+					i++
+				}
+			} else {
+				b.writeString(commandSeparator)
+			}
+			b.flush()
 		case isShellSpace(c):
 			b.flush()
 		case c == '^':
@@ -856,4 +1076,38 @@ func cmdRead(s string) (words []string, expanded []bool) {
 	}
 	b.flush()
 	return b.words, b.expanded
+}
+
+// readHeredocBodies adapts hook analysis to the shared marker-based reader.
+func readHeredocBodies(s string, body func(string, bool, string)) string {
+	type doc struct {
+		marker, text string
+		quoted       bool
+	}
+	var docs []doc
+	clean := readHeredocs(s, func(value string, quoted bool) string {
+		if value == "" {
+			marker := "__hook_stdin_" + strconv.Itoa(len(docs)) + "__"
+			docs = append(docs, doc{marker: marker})
+			return marker
+		}
+		marker, text, _ := strings.Cut(value, "\x00")
+		for i := range docs {
+			if docs[i].marker == marker {
+				docs[i].text, docs[i].quoted = text, quoted
+			}
+		}
+		return ""
+	})
+	for _, d := range docs {
+		for _, segment := range strings.Split(clean, "\n") {
+			if strings.Contains(segment, d.marker) {
+				body(d.text, d.quoted, strings.ReplaceAll(segment, d.marker, ""))
+			}
+		}
+	}
+	for _, d := range docs {
+		clean = strings.ReplaceAll(clean, d.marker, " ")
+	}
+	return clean
 }
