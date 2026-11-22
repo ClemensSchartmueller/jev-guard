@@ -232,7 +232,14 @@ func (p *Policy) checkViolationCategory(j *evaluator.JevJudgments, isExplicitlyR
 			Source:     "policy_jev_violation",
 			Confidence: j.ViolationConfidence,
 		}
-	default:
+	case "", "none":
 		return nil
+	default:
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     "Unrecognised violation category requires confirmation",
+			Source:     "policy_jev_violation",
+			Confidence: j.ViolationConfidence,
+		}
 	}
 }
