@@ -37,6 +37,14 @@ func TestLocalTargetPaths(t *testing.T) {
 		{"file:///x%zz", nil, false},
 		{"file://", nil, false},
 		{" file:///x", nil, false},
+		{"file:/etc/passwd", nil, false},
+		{"FILE:../outside/x", nil, false},
+		{"file:///a:foo", nil, false},
+		{"file:///c:", nil, false},
+		{"file://localhost/C:x", nil, false},
+		{"file:///ws/readme.md%20", nil, false},
+		{"file:///ws/readme.md%c2%a0", nil, false},
+		{"file:///ws/%20readme.md", []string{"/ws/ readme.md", "/ws/%20readme.md"}, true},
 	} {
 		got, ok := LocalTargetPaths(tc.target)
 		if ok != tc.ok || !reflect.DeepEqual(got, tc.want) {

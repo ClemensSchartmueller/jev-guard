@@ -18,9 +18,12 @@ const unverifiableTargetReason = "Target path cannot be verified: it does not na
 // literal name. Other URLs are returned unchanged.
 //
 // ok is false when the target cannot be tied to the path the tool opens: leading or trailing
-// whitespace (Unicode included, on any target, since " file:///x" is a relative name), or a file URI that does not parse, names a host other than
-// "localhost", or carries user info, a port, a query, a fragment, a NUL or an empty path.
-// Callers must not allow or verify such a target locally.
+// whitespace (Unicode included, on any target, since " file:///x" is a relative name), a
+// "file:" URI without "//", or a file URI that does not parse, names a host other than
+// "localhost", carries user info, a port, a query, a fragment or a NUL, decodes to an empty
+// path or one with surrounding whitespace, or names a drive without a separator ("C:x" is
+// relative to that drive's working directory). Callers must not allow or verify such a
+// target locally.
 func LocalTargetPaths(target string) ([]string, bool) {
 	if target != strings.TrimSpace(target) {
 		return nil, false
@@ -29,6 +32,10 @@ func LocalTargetPaths(target string) ([]string, bool) {
 		return []string{target}, true
 	}
 	if !isFileURI(target) {
+		// "file:/x" is a file URI to RFC 8089 parsers but a relative name to the resolver.
+		if strings.HasPrefix(strings.ToLower(target), "file:") {
+			return nil, false
+		}
 		return []string{target}, true
 	}
 	decoded, literal, ok := parseFileURI(target)
@@ -52,18 +59,25 @@ func parseFileURI(raw string) (decoded, literal string, ok bool) {
 	if host := u.Host; host != "" && !strings.EqualFold(host, "localhost") {
 		return "", "", false // a remote host, a port, or a drive letter in the host position
 	}
-	decoded, literal = dropDriveSlash(u.Path), dropDriveSlash(u.EscapedPath())
-	if decoded == "" || strings.ContainsRune(decoded, 0) || strings.ContainsRune(literal, 0) {
+	decoded, okDecoded := dropDriveSlash(u.Path)
+	literal, okLiteral := dropDriveSlash(u.EscapedPath())
+	if !okDecoded || !okLiteral || decoded == "" || decoded != strings.TrimSpace(decoded) ||
+		strings.ContainsRune(decoded, 0) || strings.ContainsRune(literal, 0) {
 		return "", "", false
 	}
 	return decoded, literal, true
 }
 
-func dropDriveSlash(p string) string {
+// dropDriveSlash turns "/C:/x" into "C:/x". ok is false for a drive with no separator after it
+// ("/C:" or "/C:x"), which names a drive-relative path, not an absolute one.
+func dropDriveSlash(p string) (string, bool) {
 	if len(p) >= 3 && p[0] == '/' && isDriveLetter(p[1]) && p[2] == ':' {
-		return p[1:]
+		if len(p) == 3 || (p[3] != '/' && p[3] != '\\') {
+			return "", false
+		}
+		return p[1:], true
 	}
-	return p
+	return p, true
 }
 
 // hasUnverifiableTarget reports whether the call names a target that LocalTargetPaths rejects.

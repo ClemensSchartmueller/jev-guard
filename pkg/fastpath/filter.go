@@ -253,8 +253,8 @@ func targetInPatternDir(cleanPattern, target string) bool {
 // same as the original adds nothing and is skipped.
 func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, error) {
 	var candidates []string
-	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
-		candidates = append(candidates, t)
+	if target != "" && !isCustomURI(target) {
+		candidates = append(candidates, target) // as given: a trimmed name may be a different file
 	}
 	for i, arg := range shellWords(command) {
 		if i == 0 {
@@ -265,7 +265,7 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, er
 			values = append(values, arg[idx+1:])
 		}
 		for _, v := range values {
-			if v = strings.TrimSpace(v); v == "" || isCustomURI(v) {
+			if v == "" || isCustomURI(v) {
 				continue
 			}
 			if _, err := os.Lstat(joinCwd(v, cwd)); err == nil {

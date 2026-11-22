@@ -68,7 +68,7 @@ func TestReadTargetIsCheckedAsGiven(t *testing.T) {
 		t.Skip("whitespace-suffixed and backslash names are POSIX file names")
 	}
 	ws, key, plain := literalTargetTree(t)
-	names := []string{"readme.md\u0085", "readme.md ", " readme.md", "readme.md ", `d\readme.md`}
+	names := []string{"readme.md\u0085", "readme.md\u00a0", " readme.md", "readme.md ", `d\readme.md`}
 	for i, dest := range []string{key, plain} {
 		dir := filepath.Join(ws, []string{"to-key", "to-plain"}[i])
 		if err := os.MkdirAll(filepath.Join(dir, "d"), 0o700); err != nil {
@@ -165,6 +165,58 @@ func TestReadResourceFileURIIsParsed(t *testing.T) {
 			}
 			if trace.Contained != tc.contained {
 				t.Fatalf("%s: contained = %v, want %v", tc.uri, trace.Contained, tc.contained)
+			}
+		})
+	}
+}
+
+// Percent-encoded surrounding whitespace in a file URI names a different entry, as literal
+// whitespace does, and is not checked as the trimmed name.
+func TestReadResourceEncodedWhitespaceIsUnverifiable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("whitespace-suffixed names are POSIX file names")
+	}
+	ws, _, _ := literalTargetTree(t)
+	if err := os.WriteFile(filepath.Join(ws, ".env"), []byte("DUMMY=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(ws, ".env"), filepath.Join(ws, "readme.md ")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, uri := range []string{fileURI(ws) + "/readme.md%20", fileURI(ws) + "/readme.md%c2%a0"} {
+		call := &harness.NormalizedToolCall{
+			Harness: harness.HarnessAntigravity, ToolName: "read_resource", TargetPath: uri,
+			Cwd: ws, WorkspaceRoots: []string{ws}, RawArgs: map[string]interface{}{"Uri": uri},
+		}
+		trace := traceGateEvaluation(call, config.DefaultConfig(), true)
+		if trace.Final == nil || trace.Final.Decision != harness.DecisionAsk || trace.Contained {
+			t.Fatalf("%s: final = %+v, contained = %v; want ASK, not contained", uri, trace.Final, trace.Contained)
+		}
+	}
+}
+
+// Targets that are not a single absolute or workspace path as given are never contained.
+func TestUnverifiableTargetsAreNotContained(t *testing.T) {
+	ws, _, _ := literalTargetTree(t)
+	for _, tc := range []struct {
+		name, tool, key, target string
+	}{
+		{"whitespace-only write target", "Write", "file_path", " "},
+		{"NBSP-only write target", "Write", "file_path", " "},
+		{"file URI without slashes", "read_resource", "Uri", "file:/etc/passwd"},
+		{"drive-relative file URI", "read_resource", "Uri", "file:///a:foo"},
+		{"web fetch with leading space", "WebFetch", "url", " https://example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, trace := gateDecisionForPayload(t, map[string]interface{}{
+				"hook_event_name": "PreToolUse", "session_id": "s1", "cwd": ws,
+				"tool_name": tc.tool, "tool_input": map[string]interface{}{tc.key: tc.target},
+			})
+			if trace.Contained {
+				t.Fatalf("target %q reported contained", tc.target)
+			}
+			if trace.Final == nil || trace.Final.Decision == harness.DecisionAllow {
+				t.Fatalf("target %q: final = %+v, want not ALLOW", tc.target, trace.Final)
 			}
 		})
 	}

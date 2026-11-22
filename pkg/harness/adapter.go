@@ -174,8 +174,9 @@ func extractCwd(args map[string]interface{}) string {
 
 	for _, key := range CwdArgKeys {
 		if val, exists := args[key]; exists {
+			// Kept as given, like the target: a trimmed directory may be a different one.
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
-				return strings.TrimSpace(strVal)
+				return strVal
 			}
 		}
 	}
@@ -252,8 +253,9 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	for _, key := range PathArgKeys {
 		if val, exists := args[key]; exists {
 			// The raw value is kept: the tool opens the name as given, so a trimmed form
-			// would be checked in place of the file actually read.
-			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
+			// would be checked in place of the file actually read. A whitespace-only value
+			// is a name too (and unverifiable), not a missing target.
+			if strVal, ok := val.(string); ok && strVal != "" {
 				target = strVal
 				break
 			}

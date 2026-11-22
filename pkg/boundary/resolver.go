@@ -58,7 +58,7 @@ func NewResolver(declaredRoots []string, cwd string) (*Resolver, error) {
 
 // IsPathContained checks if targetPath falls within any recognized workspace root.
 func (r *Resolver) IsPathContained(targetPath string, cwd string) (bool, error) {
-	if strings.TrimSpace(targetPath) == "" {
+	if targetPath == "" {
 		return true, nil // No target specified to violate boundaries
 	}
 
