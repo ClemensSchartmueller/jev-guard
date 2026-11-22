@@ -67,8 +67,10 @@ func TestTraceGateEvaluationKeepsBroadFileFilters(t *testing.T) {
 		call := &harness.NormalizedToolCall{ToolName: "Grep", TargetPath: ws, Cwd: ws, WorkspaceRoots: []string{ws},
 			RawArgs: map[string]interface{}{"pattern": "api_key", "path": ws, "glob": glob}}
 		trace := traceGateEvaluation(call, cfg, true)
-		if trace.Tampering != nil || trace.Final == nil || trace.Final.Decision != harness.DecisionAllow {
-			t.Errorf("glob %q: tampering=%+v final=%+v; want fast-path ALLOW", glob, trace.Tampering, trace.Final)
+		// Anti-tampering lets broad filters through. They can still match a sensitive file,
+		// so the fast path gives no ALLOW and the judge decides.
+		if trace.Tampering != nil || trace.Final != nil || !trace.WouldSendToJudge {
+			t.Errorf("glob %q: tampering=%+v final=%+v judge=%t; want no anti-tampering verdict and the judge", glob, trace.Tampering, trace.Final, trace.WouldSendToJudge)
 		}
 	}
 }
