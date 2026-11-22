@@ -46,6 +46,10 @@ You can add patterns through `sensitive_files` in your [configuration](configura
 
 Read tools (`Read`, `view_file`, `read_file`, `Glob`, `Grep`, `LS`, and similar) whose target cannot be verified unambiguously from their arguments are asked about (`ASK`, reason "Read target cannot be verified from tool arguments", source `fastpath_boundary`). This covers a missing target, a URL, or more than one path argument. For example, a `Glob` or `Grep` call without a `path` argument gets `ASK`, which Claude Code turns into a block.
 
+A tool's path argument is checked exactly as given, because that is the name the tool opens. It is never trimmed, and a backslash is a path separator only on Windows; on Linux and macOS `d\readme.md` is one file name, not `d/readme.md`. A target with leading or trailing whitespace (Unicode whitespace such as U+0085 and U+00A0 included) is unverifiable, for any tool: it gets `ASK` (reason "Target path cannot be verified…", source `fastpath_boundary`), is never contained, and never receives the local path proof.
+
+A `file://` URI is parsed as a URI. The authority must be empty or `localhost` (any case); the path is percent-decoded, and a Windows drive path (`file:///C:/x`) loses its leading slash. Both the decoded path and, when it differs, the escaped spelling are checked for sensitive names and containment, since a consumer that does not decode would open the literal name. A URI that does not parse, names another host, or carries a port, user info, a query, a fragment, a NUL, or an empty path is unverifiable and asked about in the same way, also with `fastpath_enabled` false.
+
 ### Workspace boundary enforcement
 
 Path traversals and directory escapes (`../../`) are resolved locally for write and read operations. This prevents access to, or exfiltration of, files outside the workspace, such as `/etc/shadow` or `C:\Windows\system.ini`. Path case is preserved on Linux and matched case-insensitively on Windows. If a path cannot be resolved, the check fails closed.

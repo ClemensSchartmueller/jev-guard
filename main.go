@@ -374,11 +374,19 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.B
 	if checker == nil {
 		return false
 	}
-	contained, err := checker.IsPathContained(call.TargetPath, call.Cwd)
-	if err != nil {
+	// Check every path the tool may open, as the fast path does: a file URI is decoded, and a
+	// target that cannot be tied to one local path is never contained.
+	targets, ok := fastpath.LocalTargetPaths(call.TargetPath)
+	if !ok {
 		return false
 	}
-	return contained
+	for _, target := range targets {
+		contained, err := checker.IsPathContained(target, call.Cwd)
+		if err != nil || !contained {
+			return false
+		}
+	}
+	return true
 }
 
 // singleTargetFileTools maps each allowlisted file tool to its canonical path

@@ -214,7 +214,7 @@ func HasSingleTargetArg(call *NormalizedToolCall, allowedKeys ...string) bool {
 		}
 		selected = key
 		str, ok := value.(string)
-		if !ok || strings.TrimSpace(str) != call.TargetPath {
+		if !ok || str != call.TargetPath {
 			return false
 		}
 	}
@@ -251,8 +251,10 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	var target string
 	for _, key := range PathArgKeys {
 		if val, exists := args[key]; exists {
+			// The raw value is kept: the tool opens the name as given, so a trimmed form
+			// would be checked in place of the file actually read.
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
-				target = strings.TrimSpace(strVal)
+				target = strVal
 				break
 			}
 		}

@@ -99,7 +99,7 @@ func isAbsPath(p string) bool {
 }
 
 func isSlashRoot(p string) bool {
-	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\")
+	return strings.HasPrefix(p, "/") || runtime.GOOS == "windows" && strings.HasPrefix(p, "\\")
 }
 
 func isWindowsDriveAbs(p string) bool {
@@ -115,9 +115,13 @@ func normalizeSeparators(p string) string {
 }
 
 // joinPaths joins rel to base without cleaning: the walk applies ".." where the OS does, after
-// the symlink before it is followed.
+// the symlink before it is followed. Backslashes are rewritten only on Windows, where they are
+// separators; elsewhere they are part of a file name, and "d\\x" names one entry, not d/x.
 func joinPaths(base, rel string) string {
-	return JoinPath(normalizeSeparators(base), normalizeSeparators(rel))
+	if runtime.GOOS == "windows" {
+		return JoinPath(normalizeSeparators(base), normalizeSeparators(rel))
+	}
+	return JoinPath(base, rel)
 }
 
 // CanonicalizePath canonicalizes a path, evaluating symlinks and cleaning separators.
@@ -218,12 +222,14 @@ func isSubPath(parent, child string) bool {
 }
 
 func isSubPathForOS(parent, child, goos string) bool {
-	normParent := normalizeSeparators(filepath.Clean(parent))
-	normChild := normalizeSeparators(filepath.Clean(child))
+	normParent := filepath.Clean(parent)
+	normChild := filepath.Clean(child)
 
+	// A backslash is a separator only on Windows. Elsewhere it is a name character, and
+	// rewriting it would place "/ws\\x" (an entry beside /ws) inside "/ws".
 	if goos == "windows" {
-		normParent = strings.ToLower(normParent)
-		normChild = strings.ToLower(normChild)
+		normParent = strings.ToLower(normalizeSeparators(normParent))
+		normChild = strings.ToLower(normalizeSeparators(normChild))
 	}
 
 	if normParent == normChild {
