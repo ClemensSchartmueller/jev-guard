@@ -3,6 +3,7 @@ package fastpath
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -20,7 +21,8 @@ import (
 //   - a filter that names a sensitive pattern (".env*", "*.pem") is a sensitive access;
 //   - a filter that leaves the searched directory (absolute, "..", "~") is boundary-checked;
 //   - any other filter that could still match a sensitive file name ("*", ".en?", "*.json")
-//     gets no fast-path verdict, so the judge decides.
+//     gets no fast-path verdict, so the judge decides. So does a content search over a
+//     directory with no file filter at all.
 //
 // Exclusion filters (Excludes, LS ignore) only narrow a search and are not checked. Content
 // patterns (Grep pattern, grep_search Query) select lines, not files, and are not checked.
@@ -64,7 +66,13 @@ func searchFilters(call *harness.NormalizedToolCall) []searchFilter {
 			out = append(out, searchFilter{key: key, group: group})
 			continue
 		}
+		if kind == "glob" {
+			values = splitGlobList(values)
+		}
 		for _, value := range values {
+			if kind == "glob" && strings.HasPrefix(value, "!") {
+				continue // a negated glob excludes files; it selects none
+			}
 			switch kind {
 			case "extension":
 				value = "*." + strings.TrimPrefix(value, ".")
@@ -193,6 +201,10 @@ func containsSegment(p, segment string) bool {
 // A non-nil error wraps boundary.ErrResolutionLimit.
 func (f *Filter) checkSearchFilters(call *harness.NormalizedToolCall) (reason string, broad bool, err error) {
 	filters := searchFilters(call)
+	if !hasNameFilter(filters) && searchesDirectoryContents(call) {
+		// Without a file filter a content search reads every file under the directory.
+		return "", true, nil
+	}
 	if len(filters) == 0 {
 		return "", false, nil
 	}
@@ -327,4 +339,74 @@ func (f *Filter) sensitiveSampleNames() (samples, dirSamples []string) {
 		samples = append(samples, base, "a"+base, base+".a", "a"+base+".a")
 	}
 	return samples, dirSamples
+}
+
+// hasNameFilter reports whether a file-name filter (not only find_by_name's Extensions) is present.
+func hasNameFilter(filters []searchFilter) bool {
+	for _, filter := range filters {
+		if filter.group == "name" {
+			return true
+		}
+	}
+	return false
+}
+
+// searchesDirectoryContents reports whether a content search tool (Grep, grep_search) may read
+// more than the one file its path names: the path is a directory, or cannot be shown to be a
+// regular file. A single named file is covered by the sensitive check on the target.
+func searchesDirectoryContents(call *harness.NormalizedToolCall) bool {
+	switch strings.ToLower(strings.TrimSpace(call.ToolName)) {
+	case "grep", "grep_search":
+	default:
+		return false
+	}
+	targets, ok := LocalTargetPaths(call.TargetPath)
+	if !ok || len(targets) == 0 {
+		return true
+	}
+	for _, target := range targets {
+		info, err := os.Stat(boundary.JoinPath(call.Cwd, target))
+		if err != nil || !info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// splitGlobList returns each value together with the globs it may hold as a list: tools
+// accept several globs in one argument, separated by whitespace or by commas outside braces
+// ("*.go .env", "*.go,*.md"). The whole value is kept too, so nothing is checked less.
+func splitGlobList(values []string) []string {
+	var out []string
+	for _, value := range values {
+		out = append(out, value)
+		depth, start := 0, 0
+		var parts []string
+		for i := 0; i <= len(value); i++ {
+			if i < len(value) {
+				switch c := value[i]; {
+				case c == '{':
+					depth++
+					continue
+				case c == '}':
+					if depth > 0 {
+						depth--
+					}
+					continue
+				case c == ',' && depth > 0:
+					continue
+				case c != ',' && c != ' ' && c != '\t' && c != '\n' && c != '\r':
+					continue
+				}
+			}
+			if i > start {
+				parts = append(parts, value[start:i])
+			}
+			start = i + 1
+		}
+		if len(parts) > 1 {
+			out = append(out, parts...)
+		}
+	}
+	return out
 }

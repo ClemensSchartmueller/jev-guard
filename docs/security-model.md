@@ -60,7 +60,11 @@ Search and list tools pick files with filter arguments as well as with their dir
 
 Exclusion filters (`Excludes`, `LS`'s `ignore`) only narrow a search and are not checked. Content patterns (`Grep`'s `pattern`, `grep_search`'s `Query`) select lines, not files, and are not checked either.
 
-Known limits: a search with no file filter at all (a `Grep` over a directory with only a content `pattern`) is checked on its directory alone and keeps the fast-path `ALLOW`, even though the directory may hold a sensitive file. Whether that file is searched depends on the tool (ripgrep skips hidden and git-ignored files by default). A ripgrep type redefined in the user's ripgrep configuration is read with its built-in globs.
+A content search (`Grep`, `grep_search`) over a directory with no file filter reads every file below it, so it also goes to the judge. A filter list made only of exclusions counts as no filter. Searching one named file keeps the fast path, since that file is the checked target. Listing tools (`LS`, `list_dir`, and `Glob` or `find_by_name` with a narrow filter) return names, not contents, and keep the fast path.
+
+Several globs in one value (`*.go *.md`, `*.go,!*_test.go`) are checked one by one as well as whole. A glob starting with `!` is an exclusion and selects no file.
+
+Known limit: a ripgrep type redefined in the user's ripgrep configuration is read with its built-in globs.
 
 ### Workspace boundary enforcement
 
