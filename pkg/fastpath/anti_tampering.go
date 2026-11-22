@@ -356,7 +356,8 @@ func (c *commandCheck) isSecurityPath(path string) bool {
 
 // shellPatternTargetsJevguard checks a glob or brace pattern from a command (see
 // shellReader.read) and each part of it between shell operators, with Bash's {a..z} sequences
-// and [!...] classes rewritten. Each part is denied when:
+// rewritten. Bracket expressions are read as Bash reads them (see globMatch). Each part is
+// denied when:
 //   - it singles out a protected file name (patternCheck); or
 //   - one of its brace alternatives without wildcards is a path into the security directory
 //     (pathReachesJevguard); or
@@ -368,7 +369,7 @@ func (c *commandCheck) isSecurityPath(path string) bool {
 // pattern too large to expand is reported as over the limit rather than denied, since a
 // command word need not be a filter.
 func (c *commandCheck) shellPatternTargetsJevguard(pattern string) bool {
-	expanded := strings.ReplaceAll(expandBraceSequences(expandPatternVariables(pattern)), "[!", "[^")
+	expanded := expandBraceSequences(expandPatternVariables(pattern))
 	parts := append([]string{expanded}, strings.FieldsFunc(expanded, func(r rune) bool { return strings.ContainsRune(";|&<>()`=:", r) })...)
 	for _, part := range parts {
 		targets, ok := patternCheck(part)
@@ -588,12 +589,13 @@ func componentsSingleOut(pattern, dir []string) bool {
 }
 
 func componentMatches(pattern, name string) bool {
-	matched, err := path.Match(pattern, name)
-	return err == nil && matched
+	matched, _ := globMatch(pattern, name)
+	return matched
 }
 
 // componentSinglesOut reports whether a pattern component that matches name is specific to it:
-// it is not a wildcard, or it does not match name with every letter and digit replaced.
+// it is not a wildcard, or it does not match name with every letter and digit replaced, or it
+// holds a bracket expression the check cannot read exactly (see globMatch).
 func componentSinglesOut(pattern, name string) bool {
 	if !hasGlobMeta(pattern) {
 		return true
@@ -607,7 +609,8 @@ func componentSinglesOut(pattern, name string) bool {
 			}
 		}
 	}
-	return !componentMatches(pattern, string(control))
+	matched, exact := globMatch(pattern, string(control))
+	return !exact || !matched
 }
 
 // braceSequence matches Bash's {x..y} and {x..y..step} sequence expressions.
@@ -775,11 +778,12 @@ func segmentSinglesOutProtected(segment string) bool {
 		return false
 	}
 	for _, name := range protectedFileNames {
-		if matched, err := path.Match(segment, name); err != nil || !matched {
+		if matched, _ := globMatch(segment, name); !matched {
 			continue
 		}
+		// A segment the check cannot read exactly singles the name out (see globMatch).
 		control := strings.Replace(name, "jevguard", "qqqqqqqq", 1)
-		if matched, err := path.Match(segment, control); err == nil && !matched {
+		if matched, exact := globMatch(segment, control); !exact || !matched {
 			return true
 		}
 	}

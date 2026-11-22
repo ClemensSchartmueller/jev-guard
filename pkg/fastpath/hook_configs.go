@@ -308,8 +308,9 @@ func hookGlob(pattern, name string, windows bool) bool {
 		if !windows && strings.HasPrefix(n[i], ".") && !strings.HasPrefix(p[i], ".") {
 			return false
 		}
-		match, _ := path.Match(p[i], n[i])
-		if !match {
+		// Bracket expressions are read as Bash and ripgrep read them; one the check cannot read
+		// exactly is matched as any one character (see globMatch).
+		if match, _ := globMatch(p[i], n[i]); !match {
 			return false
 		}
 	}
@@ -317,7 +318,7 @@ func hookGlob(pattern, name string, windows bool) bool {
 }
 
 func hookConfigPatternMode(pattern string, names []string, directories, windows bool) (bool, error) {
-	alternatives, ok := expandBraces(strings.ToLower(strings.ReplaceAll(expandBraceSequences(expandPatternVariables(pattern)), "[!", "[^")), maxPatternExpansions)
+	alternatives, ok := expandBraces(strings.ToLower(expandBraceSequences(expandPatternVariables(pattern))), maxPatternExpansions)
 	if !ok {
 		return false, boundary.ErrWorkBudgetExhausted
 	}
@@ -395,7 +396,7 @@ func sameHookConfigPath(a, b string) bool {
 // With an unknown cwd only relative targets use basename fallback. Absolute
 // targets continue through the exact path policy above.
 func hookUnknownTarget(target string, directories, windows bool) (bool, error) {
-	patterns, ok := expandBraces(strings.ToLower(strings.ReplaceAll(expandBraceSequences(expandPatternVariables(target)), "[!", "[^")), maxPatternExpansions)
+	patterns, ok := expandBraces(strings.ToLower(expandBraceSequences(expandPatternVariables(target))), maxPatternExpansions)
 	if !ok {
 		return false, boundary.ErrWorkBudgetExhausted
 	}
