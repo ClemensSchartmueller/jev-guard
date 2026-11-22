@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"jev-guard/pkg/harness"
@@ -63,7 +64,12 @@ func TestTrustedAntigravityReadResourceRequiresSingleURI(t *testing.T) {
 	if err := os.WriteFile(inside, []byte("read me"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	uri := "file://" + inside
+	// A file URI's path starts with "/", so a Windows drive path is written file:///C:/....
+	uriPath := filepath.ToSlash(inside)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := "file://" + uriPath
 	for _, tc := range []struct {
 		name  string
 		args  map[string]interface{}

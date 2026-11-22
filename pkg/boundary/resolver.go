@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -222,14 +223,17 @@ func isSubPath(parent, child string) bool {
 }
 
 func isSubPathForOS(parent, child, goos string) bool {
-	normParent := filepath.Clean(parent)
-	normChild := filepath.Clean(child)
-
 	// A backslash is a separator only on Windows. Elsewhere it is a name character, and
-	// rewriting it would place "/ws\\x" (an entry beside /ws) inside "/ws".
+	// rewriting it would place "/ws\\x" (an entry beside /ws) inside "/ws". Off Windows the
+	// paths are cleaned with slash semantics, so the comparison for another OS does not
+	// depend on the host's separator.
+	var normParent, normChild string
 	if goos == "windows" {
-		normParent = strings.ToLower(normalizeSeparators(normParent))
-		normChild = strings.ToLower(normalizeSeparators(normChild))
+		normParent = strings.ToLower(normalizeSeparators(filepath.Clean(parent)))
+		normChild = strings.ToLower(normalizeSeparators(filepath.Clean(child)))
+	} else {
+		normParent = path.Clean(parent)
+		normChild = path.Clean(child)
 	}
 
 	if normParent == normChild {
