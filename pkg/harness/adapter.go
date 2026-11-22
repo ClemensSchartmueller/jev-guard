@@ -174,8 +174,9 @@ func extractCwd(args map[string]interface{}) string {
 
 	for _, key := range CwdArgKeys {
 		if val, exists := args[key]; exists {
+			// Kept as given, like the target: a trimmed directory may be a different one.
 			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
-				return strings.TrimSpace(strVal)
+				return strVal
 			}
 		}
 	}
@@ -214,7 +215,7 @@ func HasSingleTargetArg(call *NormalizedToolCall, allowedKeys ...string) bool {
 		}
 		selected = key
 		str, ok := value.(string)
-		if !ok || strings.TrimSpace(str) != call.TargetPath {
+		if !ok || str != call.TargetPath {
 			return false
 		}
 	}
@@ -251,8 +252,11 @@ func extractCommandAndTarget(args map[string]interface{}) (string, string) {
 	var target string
 	for _, key := range PathArgKeys {
 		if val, exists := args[key]; exists {
-			if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
-				target = strings.TrimSpace(strVal)
+			// The raw value is kept: the tool opens the name as given, so a trimmed form
+			// would be checked in place of the file actually read. A whitespace-only value
+			// is a name too (and unverifiable), not a missing target.
+			if strVal, ok := val.(string); ok && strVal != "" {
+				target = strVal
 				break
 			}
 		}

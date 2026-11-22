@@ -124,3 +124,14 @@ func TestIsSubPathForOS(t *testing.T) {
 		t.Errorf("sibling directory app-secrets should not be considered inside app")
 	}
 }
+
+// A backslash is a separator only on Windows. Elsewhere "/ws\x" is an entry beside /ws, not
+// inside it.
+func TestIsSubPathBackslashIsNameCharacterOffWindows(t *testing.T) {
+	if isSubPathForOS("/home/u/ws", `/home/u/ws\secret`, "linux") {
+		t.Fatal(`"/home/u/ws\secret" counted as inside "/home/u/ws" on linux`)
+	}
+	if !isSubPathForOS(`C:\ws`, `c:\ws\x`, "windows") {
+		t.Fatal(`"c:\ws\x" not inside "C:\ws" on windows`)
+	}
+}

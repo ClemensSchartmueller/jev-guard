@@ -62,6 +62,15 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
+	if hasUnverifiableTarget(call) {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     unverifiableTargetReason,
+			Source:     "fastpath_boundary",
+			Confidence: 1.0,
+		}
+	}
+
 	if isSafeReadTool(call) && !hasUnambiguousReadTarget(call) {
 		return &harness.EvaluationResult{
 			Decision:   harness.DecisionAsk,
@@ -151,10 +160,21 @@ func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error
 		return reason, nil
 	}
 
-	targetRaw := call.TargetPath
-	if isFileURI(targetRaw) {
-		targetRaw = extractFilePathFromURI(targetRaw)
+	targets, ok := LocalTargetPaths(call.TargetPath)
+	if !ok {
+		return unverifiableTargetReason, nil
 	}
+	for _, targetRaw := range targets {
+		if reason, err := f.checkSensitiveTarget(call, targetRaw); reason != "" || err != nil {
+			return reason, err
+		}
+	}
+	return "", nil
+}
+
+// checkSensitiveTarget applies the sensitive patterns to one local spelling of the target
+// (see LocalTargetPaths) and to the command's arguments.
+func (f *Filter) checkSensitiveTarget(call *harness.NormalizedToolCall, targetRaw string) (string, error) {
 	target := strings.ToLower(normalizePathSeparators(targetRaw))
 	cmd := strings.ToLower(normalizePathSeparators(strings.Join(shellWords(call.Command), " ")))
 	baseName := strings.ToLower(path.Base(target))
@@ -233,8 +253,8 @@ func targetInPatternDir(cleanPattern, target string) bool {
 // same as the original adds nothing and is skipped.
 func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, error) {
 	var candidates []string
-	if t := strings.TrimSpace(target); t != "" && !isCustomURI(t) {
-		candidates = append(candidates, t)
+	if target != "" && !isCustomURI(target) {
+		candidates = append(candidates, target) // as given: a trimmed name may be a different file
 	}
 	for i, arg := range shellWords(command) {
 		if i == 0 {
@@ -245,7 +265,7 @@ func (f *Filter) checkResolvedSensitive(target, command, cwd string) (string, er
 			values = append(values, arg[idx+1:])
 		}
 		for _, v := range values {
-			if v = strings.TrimSpace(v); v == "" || isCustomURI(v) {
+			if v == "" || isCustomURI(v) {
 				continue
 			}
 			if _, err := os.Lstat(joinCwd(v, cwd)); err == nil {
@@ -504,15 +524,22 @@ func normalizePathSeparators(value string) string {
 // checkBoundaryEscape returns why the target escapes the workspace, or an error wrapping
 // boundary.ErrResolutionLimit when it could not be resolved within the limits.
 func (f *Filter) checkBoundaryEscape(call *harness.NormalizedToolCall) (string, error) {
-	target := strings.TrimSpace(call.TargetPath)
-	if target == "" || isURL(target) {
+	if call.TargetPath == "" || isURL(call.TargetPath) {
 		return "", nil
 	}
-
-	if isFileURI(target) {
-		target = extractFilePathFromURI(target)
+	targets, ok := LocalTargetPaths(call.TargetPath)
+	if !ok {
+		return unverifiableTargetReason, nil
 	}
+	for _, target := range targets {
+		if reason, err := f.checkBoundaryEscapeTarget(call, target); reason != "" || err != nil {
+			return reason, err
+		}
+	}
+	return "", nil
+}
 
+func (f *Filter) checkBoundaryEscapeTarget(call *harness.NormalizedToolCall, target string) (string, error) {
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
 		return fmt.Sprintf("Workspace boundaries cannot be resolved for target: %s", target), nil
@@ -859,7 +886,13 @@ func isCustomURI(p string) bool {
 	return strings.Contains(lower, "://")
 }
 
+// extractFilePathFromURI returns the local path of a file URI: the percent-decoded path when
+// the URI parses (see parseFileURI), else a lexical best effort for the guards that match more,
+// not less. The sensitive and boundary checks use LocalTargetPaths, which rejects such URIs.
 func extractFilePathFromURI(uriStr string) string {
+	if decoded, _, ok := parseFileURI(uriStr); ok {
+		return decoded
+	}
 	lower := strings.ToLower(uriStr)
 	if strings.HasPrefix(lower, "file:///") {
 		trimmed := uriStr[len("file:///"):]

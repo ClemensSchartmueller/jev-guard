@@ -355,12 +355,17 @@ func traceGateStages(call *harness.NormalizedToolCall, cfg *config.Config, offli
 
 // isNetworkURL reports whether target has a URL scheme other than file://.
 func isNetworkURL(target string) bool {
-	lower := strings.ToLower(strings.TrimSpace(target))
+	// Surrounding whitespace makes the target unverifiable (fastpath.LocalTargetPaths), never a
+	// URL that skips the boundary check.
+	if target != strings.TrimSpace(target) {
+		return false
+	}
+	lower := strings.ToLower(target)
 	return strings.Contains(lower, "://") && !strings.HasPrefix(lower, "file://")
 }
 
 func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.BoundaryChecker) bool {
-	if strings.TrimSpace(call.TargetPath) == "" {
+	if call.TargetPath == "" {
 		return true
 	}
 	// A fetch tool's target is a network URL, not a local path, so there is nothing to
@@ -374,11 +379,19 @@ func checkWorkspaceBoundary(call *harness.NormalizedToolCall, checker fastpath.B
 	if checker == nil {
 		return false
 	}
-	contained, err := checker.IsPathContained(call.TargetPath, call.Cwd)
-	if err != nil {
+	// Check every path the tool may open, as the fast path does: a file URI is decoded, and a
+	// target that cannot be tied to one local path is never contained.
+	targets, ok := fastpath.LocalTargetPaths(call.TargetPath)
+	if !ok {
 		return false
 	}
-	return contained
+	for _, target := range targets {
+		contained, err := checker.IsPathContained(target, call.Cwd)
+		if err != nil || !contained {
+			return false
+		}
+	}
+	return true
 }
 
 // singleTargetFileTools maps each allowlisted file tool to its canonical path
