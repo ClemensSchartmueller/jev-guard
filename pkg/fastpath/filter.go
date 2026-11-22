@@ -627,7 +627,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 				if !filepath.IsAbs(candidate) {
 					candidate = filepath.Join(call.Cwd, candidate)
 				}
-				if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+				if gitOperandMayExist(candidate) {
 					existing[filepath.Clean(candidate)] = struct{}{}
 				}
 			}
@@ -698,6 +698,30 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	}
 
 	return true, nil
+}
+
+// gitOperandMayExist reports whether a git diff operand names something other
+// than a plainly missing path. Errors other than not-exist count, so the check
+// fails toward deferral. A missing path below an existing non-directory also
+// counts on every platform: Unix reports ENOTDIR there, while Win32 reports a
+// missing path that Git for Windows maps back to ENOTDIR.
+func gitOperandMayExist(candidate string) bool {
+	_, err := os.Stat(candidate)
+	if !os.IsNotExist(err) {
+		return true
+	}
+	for dir := filepath.Dir(candidate); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err == nil {
+			return !info.IsDir()
+		}
+		if !os.IsNotExist(err) {
+			return true
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return false
+		}
+	}
 }
 
 // nameOnlyTrustedCommand lists built-in commands that cannot print file contents.
