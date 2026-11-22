@@ -36,6 +36,8 @@ The same directory holds the binary, trust registry, and session data:
 
 Run `jev-guard config show` to see the effective values and where each comes from. Secrets are never printed.
 
+The TypeSafe client connects directly: proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`) are ignored, and no proxy setting is supported. TLS requires version 1.2 or later. On Linux, Android and BSD, trust roots come from fixed system certificate bundle and directory paths (the Go platform defaults), ignoring `SSL_CERT_FILE` and `SSL_CERT_DIR`. On macOS, iOS and Windows, the native platform verifier supplies trust roots. Corporate CAs must be installed in the system trust store; process-local CA overrides are not supported. Other platforms use an empty trust pool and fail TLS verification. Behind a mandatory proxy, evaluations fail safe to `ASK`. `doctor` checks the same direct network path. HTTP/2 is disabled so `GODEBUG=http2debug` cannot log API credentials.
+
 ## Example config
 
 ```json

@@ -21,7 +21,7 @@ func TestGatePathProofResolvedSensitivePaths(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(ws, dir), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(ws, dir, "settings.json"), []byte("{}"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(ws, dir, "agent-metadata.json"), []byte("{}"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -43,12 +43,12 @@ func TestGatePathProofResolvedSensitivePaths(t *testing.T) {
 		name, cwd, target string
 		want              harness.Decision
 	}{
-		{"symlink directory", ws, "agent-alias/settings.json", harness.DecisionAsk},
+		{"symlink directory", ws, "agent-alias/agent-metadata.json", harness.DecisionAsk},
 		{"new file through symlink", ws, "agent-alias/new.json", harness.DecisionAsk},
 		{"dangling final symlink", ws, "dangling-alias", harness.DecisionAsk},
 		{"ordinary missing file", ws, "src/new/file.go", harness.DecisionAllow},
-		{"cwd inside configuration", filepath.Join(ws, ".claude"), "settings.json", harness.DecisionAsk},
-		{"ordinary symlink", ws, "source-alias/settings.json", harness.DecisionAllow},
+		{"cwd inside configuration", filepath.Join(ws, ".claude"), "agent-metadata.json", harness.DecisionAsk},
+		{"ordinary symlink", ws, "source-alias/agent-metadata.json", harness.DecisionAllow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			call := &harness.NormalizedToolCall{ToolName: "Write", TargetPath: tc.target, Cwd: tc.cwd, WorkspaceRoots: []string{ws}, RawArgs: map[string]interface{}{"file_path": tc.target}}
