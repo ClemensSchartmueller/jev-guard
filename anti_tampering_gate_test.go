@@ -366,7 +366,7 @@ func TestHookConfigJudgeDenyOutranksFloor(t *testing.T) {
 			"is_workspace_contained":{"type":"noul","noul":0.95},
 			"destructive_potential":{"type":"score","score":0.5,"confidence":0.95},
 			"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.95},
-			"intent_alignment":{"type":"choice","choice":"not_requested","confidence":0.95}
+			"intent_alignment":{"type":"choice","choice":"unprompted_or_contrary","confidence":0.95}
 		}}`)
 	}))
 	defer server.Close()
@@ -448,7 +448,7 @@ func TestGuardSelfInvocationGate(t *testing.T) {
 func TestSelfInvocationAskFloorPreservesJudgeDeny(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"answers":{"is_workspace_contained":{"type":"noul","noul":0.95},"destructive_potential":{"type":"score","score":0.99,"confidence":0.99},"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.99},"intent_alignment":{"type":"choice","choice":"not_requested","confidence":0.99}}}`)
+		fmt.Fprint(w, `{"answers":{"is_workspace_contained":{"type":"noul","noul":0.95},"destructive_potential":{"type":"score","score":0.99,"confidence":0.99},"violation_category":{"type":"choice","choice":"catastrophic_deletion","confidence":0.99},"intent_alignment":{"type":"choice","choice":"unprompted_or_contrary","confidence":0.99}}}`)
 	}))
 	defer server.Close()
 	t.Setenv("JEV_GUARD_HOME", t.TempDir())
