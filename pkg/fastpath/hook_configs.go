@@ -308,7 +308,8 @@ func hookGlob(pattern, name string, windows bool) bool {
 		if !windows && strings.HasPrefix(n[i], ".") && !strings.HasPrefix(p[i], ".") {
 			return false
 		}
-		// A segment the check cannot read exactly counts as a match (see globMatch).
+		// Bracket expressions are read as Bash and ripgrep read them; one the check cannot read
+		// exactly is matched as any one character (see globMatch).
 		if match, _ := globMatch(p[i], n[i]); !match {
 			return false
 		}

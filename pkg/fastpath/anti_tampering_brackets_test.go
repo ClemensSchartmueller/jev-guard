@@ -76,12 +76,18 @@ func TestCheckAntiTampering_BracketClassFileFilters(t *testing.T) {
 		{"Grep ! negation with ]", grep(".jev[!]x]uard.json"), true},
 		{"Grep ^ negation", grep(".jev[^x]uard.json"), true},
 		{"Grep unknown class", grep(".jev[[:nosuchclass:]]uard.json"), true},
+		{"Grep backslash in class (ripgrep literal)", grep(`.jev[f-h\]uard.json`), true},
+		{"Grep backslash in class with ]", grep(`.jev[fg\]uard.json`), true},
+		{"Grep backslash in negated class", grep(`.jev[!x\]uard.json`), true},
+		{"Grep backslash after POSIX class", grep(`.jev[[:alpha:]\]uard.json`), true},
+		{"Grep Windows separator", grep(`**\.jev[]fg]uard.json`), true},
 		{"Glob ] first", glob(".jev[]fg]uard.json"), true},
 		{"Glob POSIX class", glob("**/.jev[[:alpha:]]uard.json"), true},
 		{"Grep unrelated class", grep("src/[a-c]*.go"), false},
 		{"Grep unrelated POSIX class", grep("[[:upper:]]*.json"), false},
 		{"Glob unrelated ] first", glob("src/[]ab]*.go"), false},
 		{"Glob unrelated unknown class", glob("src/[[:nosuchclass:]].go"), false},
+		{"Grep unrelated backslash in class", grep(`src/[a\]*.go`), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := CheckAntiTampering(tc.call)
@@ -155,11 +161,15 @@ func TestGlobMatch(t *testing.T) {
 		{"a[b", "a[b", true, true},
 		{"a[]", "a[]", true, true},
 		{`a\`, `a\`, true, true},
-		{`[\]]`, "]", true, true},
+		{`[\]]`, "]", true, false}, // Bash: a class holding "]"; ripgrep: a class holding "\", then "]"
 		{"[[:nosuchclass:]]", "g", true, false},
 		{"[[.nosuchname.]]", "g", true, false},
 		{"x[[:nosuchclass:]]", "g", false, false},
 		{"src/[a-c]*.go", "src/b.go", true, true},
+		{`[f-h\]`, "g", true, false}, // ripgrep: a class with "\"; Bash: an unclosed "["
+		{`[f-h\]`, `\`, true, false},
+		{`[f-h\]`, "[f-h]", true, false},
+		{`[f-h\]`, "x", false, false},
 	} {
 		matched, exact := globMatch(tc.pattern, tc.name)
 		if matched != tc.matched || exact != tc.exact {
@@ -185,6 +195,7 @@ func TestHookConfigBracketClasses(t *testing.T) {
 		"rm .claude/settin[[=g=]]s.json",
 		"rm ~/.codex/hook[[.s.]].json",
 		"rm .cod[[:alpha:]]x/hooks.json",
+		`rm .claude/settin[f-h\]s.json`,
 		"cp x --target-file=.claude/settings.json",
 	} {
 		assertHookConfigAsk(t, &harness.NormalizedToolCall{ToolName: "Bash", Command: command, Cwd: ws})

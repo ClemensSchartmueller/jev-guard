@@ -17,8 +17,24 @@ import (
 // any one character, a superset of what the shell would match, and callers treat an inexact
 // match as singling out the name it matches, so it fails closed. A pattern path.Match still
 // rejects is reported as matching, inexactly.
+//
+// Inside a bracket expression Bash reads a backslash as an escape and ripgrep as a literal
+// ([f-h\] is a class in ripgrep and an unclosed "[" in Bash). A pattern the two read
+// differently is matched both ways, a match either way counts, and it is inexact.
 func globMatch(pattern, name string) (matched, exact bool) {
-	translated, exact := translateGlob(pattern)
+	escaped, escapedExact := translateGlob(pattern, false)
+	matched, exact = matchTranslated(escaped, escapedExact, name)
+	if strings.Contains(pattern, "[") && strings.Contains(pattern, `\`) {
+		literal, literalExact := translateGlob(pattern, true)
+		if literal != escaped {
+			literalMatched, _ := matchTranslated(literal, literalExact, name)
+			return matched || literalMatched, false
+		}
+	}
+	return matched, exact
+}
+
+func matchTranslated(translated string, exact bool, name string) (matched, isExact bool) {
 	matched, err := path.Match(translated, name)
 	if err != nil {
 		return true, false
@@ -28,8 +44,9 @@ func globMatch(pattern, name string) (matched, exact bool) {
 
 // translateGlob rewrites a Bash or ripgrep glob into path.Match syntax. Outside brackets the
 // grammars agree, except that a trailing backslash is a literal and a "[" without a closing
-// "]" is a literal in Bash (ripgrep rejects the pattern, so it opens nothing).
-func translateGlob(pattern string) (string, bool) {
+// "]" is a literal in Bash (ripgrep rejects the pattern, so it opens nothing). literalBackslash
+// reads a backslash inside a bracket expression as ripgrep does, as a member.
+func translateGlob(pattern string, literalBackslash bool) (string, bool) {
 	if !strings.ContainsAny(pattern, `[\`) {
 		return pattern, true
 	}
@@ -45,7 +62,7 @@ func translateGlob(pattern string) (string, bool) {
 			out.WriteString(pattern[i : i+2])
 			i++
 		case '[':
-			class, end, classExact, ok := translateClass(pattern, i)
+			class, end, classExact, ok := translateClass(pattern, i, literalBackslash)
 			if !ok {
 				out.WriteString(`\[`)
 				continue
@@ -66,13 +83,11 @@ func translateGlob(pattern string) (string, bool) {
 // runeRange is an inclusive range of characters in a bracket expression.
 type runeRange struct{ lo, hi rune }
 
-const maxRune = utf8.MaxRune
-
 // posixClasses lists the characters of each POSIX class. Patterns and names are compared
 // lower-cased, so the case classes take both cases. Classes a locale may extend to letters
 // and symbols outside ASCII take every non-ASCII character.
 var posixClasses = func() map[string][]runeRange {
-	nonASCII := runeRange{0x80, maxRune}
+	nonASCII := runeRange{0x80, utf8.MaxRune}
 	letters := []runeRange{{'a', 'z'}, {'A', 'Z'}, nonASCII}
 	return map[string][]runeRange{
 		"alpha":  letters,
@@ -98,7 +113,7 @@ var posixClasses = func() map[string][]runeRange {
 //
 // As in Bash and ripgrep, "!" or "^" right after "[" negates the class, and a "]" right after
 // that (or after "[") is a member.
-func translateClass(pattern string, start int) (class string, end int, exact, ok bool) {
+func translateClass(pattern string, start int, literalBackslash bool) (class string, end int, exact, ok bool) {
 	i := start + 1
 	negate := i < len(pattern) && (pattern[i] == '!' || pattern[i] == '^')
 	if negate {
@@ -110,6 +125,7 @@ func translateClass(pattern string, start int) (class string, end int, exact, ok
 		if pattern[i] == ']' && !first {
 			return writeClass(members, negate), i, exact, true
 		}
+		var lo rune
 		if name, delim, next, found := bracketName(pattern, i); found {
 			i = next
 			if delim == ':' {
@@ -124,14 +140,12 @@ func translateClass(pattern string, start int) (class string, end int, exact, ok
 				exact = false
 				continue
 			}
-			var hi rune
-			hi, i, exact = readRangeEnd(pattern, i, r, exact)
-			members = append(members, runeRange{r, hi})
-			continue
+			lo = r
+		} else {
+			lo, i = readClassChar(pattern, i, literalBackslash)
 		}
-		lo, next := readClassChar(pattern, i)
 		var hi rune
-		hi, i, exact = readRangeEnd(pattern, next, lo, exact)
+		hi, i, exact = readRangeEnd(pattern, i, lo, exact, literalBackslash)
 		members = append(members, runeRange{lo, hi})
 	}
 	return "", 0, false, false
@@ -150,9 +164,10 @@ func bracketName(pattern string, i int) (name string, delim byte, next int, foun
 	return pattern[i+2 : i+2+close], delim, i + 2 + close + 2, true
 }
 
-// readClassChar reads one member character at pattern[i], with a backslash escaping it.
-func readClassChar(pattern string, i int) (rune, int) {
-	if pattern[i] == '\\' && i+1 < len(pattern) {
+// readClassChar reads one member character at pattern[i], with a backslash escaping it unless
+// literalBackslash is set.
+func readClassChar(pattern string, i int, literalBackslash bool) (rune, int) {
+	if !literalBackslash && pattern[i] == '\\' && i+1 < len(pattern) {
 		i++
 	}
 	r, size := utf8.DecodeRuneInString(pattern[i:])
@@ -162,14 +177,14 @@ func readClassChar(pattern string, i int) (rune, int) {
 // readRangeEnd reads "-x" after a member at pattern[i], giving the range's upper end. A "-"
 // before the closing "]" is a member. An upper end written as a bracketed name is not read
 // exactly.
-func readRangeEnd(pattern string, i int, lo rune, exact bool) (rune, int, bool) {
+func readRangeEnd(pattern string, i int, lo rune, exact, literalBackslash bool) (rune, int, bool) {
 	if i+1 >= len(pattern) || pattern[i] != '-' || pattern[i+1] == ']' {
 		return lo, i, exact
 	}
 	if _, _, next, found := bracketName(pattern, i+1); found {
 		return lo, next, false
 	}
-	hi, next := readClassChar(pattern, i+1)
+	hi, next := readClassChar(pattern, i+1, literalBackslash)
 	return hi, next, exact
 }
 
