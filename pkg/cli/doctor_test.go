@@ -384,3 +384,15 @@ func TestShellQuoteArgKeepsSuggestedPathOneArgument(t *testing.T) {
 		}
 	}
 }
+
+// The doctor probe must not honour proxy settings from the environment, or it
+// would report a network path that real evaluations never use.
+func TestDoctorDefaultClientIgnoresEnvironmentProxy(t *testing.T) {
+	transport, ok := defaultDoctorClient().Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("expected *http.Transport, got %T", defaultDoctorClient().Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("doctor transport must not use a proxy from the environment")
+	}
+}
