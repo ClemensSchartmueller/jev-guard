@@ -675,7 +675,7 @@ func (b *wordBuilder) writeRaw(c byte) {
 	}
 	if b.track {
 		b.pattern.WriteByte(c)
-		if c == '*' || c == '?' || c == '[' || (b.braces && c == '{') {
+		if c == '*' || c == '?' || c == '[' {
 			b.glob = true
 		}
 	}
@@ -689,11 +689,37 @@ func (b *wordBuilder) flush() {
 		b.started = false
 	}
 	b.expands = false
-	if b.glob {
+	if b.glob || (b.braces && hasBraceExpansion(b.pattern.String())) {
 		b.patterns = append(b.patterns, b.pattern.String())
 	}
 	b.pattern.Reset()
 	b.glob = false
+}
+
+// hasBraceExpansion ignores literal braces and scans nested groups in linear time.
+func hasBraceExpansion(pattern string) bool {
+	var commas []bool
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			i++
+		case '{':
+			commas = append(commas, false)
+		case ',':
+			if len(commas) > 0 {
+				commas[len(commas)-1] = true
+			}
+		case '}':
+			if len(commas) > 0 {
+				last := len(commas) - 1
+				if commas[last] {
+					return true
+				}
+				commas = commas[:last]
+			}
+		}
+	}
+	return braceSequence.MatchString(pattern)
 }
 
 // commentMayStart reports whether a '#' at i can begin a comment: only at the start of
@@ -1030,29 +1056,77 @@ func powerShellRead(s string, track bool, commands ...bool) (words, patterns []s
 	return b.words, b.patterns, b.expanded
 }
 
-// cmdWords splits like cmd.exe: a caret escapes outside double quotes, and a backslash is ordinary.
+// cmdWords reads cmd.exe escaping followed by Windows program argument splitting.
 func cmdWords(s string) []string {
 	words, _ := cmdRead(s)
 	return words
 }
 
-// cmdRead is cmdWords that also reports which words hold a %, which cmd.exe expands as a
-// variable before it reads quotes and carets.
+// cmdRead first removes cmd.exe carets outside quotes, then reads the command
+// line as the target program's Windows argv parser does. An escaped quote still
+// reaches that parser as syntax, rather than as a literal filename character.
+// It also reports which words hold a %, which cmd.exe expands as a variable
+// before it reads quotes and carets. With commands set, unquoted ; & | ( ) and
+// newline split the line into commands unless a caret escaped them.
 func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
+	var line strings.Builder
+	var escaped []bool
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '^' && !quoted && i+1 < len(s) {
+			i++
+			line.WriteByte(s[i])
+			escaped = append(escaped, true)
+			continue
+		}
+		if c == '"' {
+			quoted = !quoted
+		}
+		line.WriteByte(c)
+		escaped = append(escaped, false)
+	}
+	s = line.String()
 	var b wordBuilder
-	inQuotes := false
+	quoted = false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '%' {
 			b.expands = true
 		}
+		if c == '\\' {
+			start := i
+			for i < len(s) && s[i] == '\\' {
+				i++
+			}
+			count := i - start
+			if i < len(s) && s[i] == '"' {
+				for n := 0; n < count/2; n++ {
+					b.writeByte('\\')
+				}
+				if count%2 != 0 {
+					b.writeByte('"')
+					continue
+				}
+				c = '"'
+			} else {
+				for n := 0; n < count; n++ {
+					b.writeByte('\\')
+				}
+				i--
+				continue
+			}
+		}
 		switch {
 		case c == '"':
-			inQuotes = !inQuotes
 			b.started = true
-		case inQuotes:
-			b.writeByte(c)
-		case len(commands) > 0 && commands[0] && strings.ContainsRune(";&|()\n", rune(c)):
+			if quoted && i+1 < len(s) && s[i+1] == '"' {
+				b.writeByte('"')
+				i++
+			} else {
+				quoted = !quoted
+			}
+		case len(commands) > 0 && commands[0] && !quoted && !escaped[i] && strings.ContainsRune(";&|()\n", rune(c)):
 			b.flush()
 			if c == '|' && (i+1 == len(s) || s[i+1] != '|') && (i == 0 || s[i-1] != '|') {
 				b.writeString(pipelineSeparator)
@@ -1063,13 +1137,8 @@ func cmdRead(s string, commands ...bool) (words []string, expanded []bool) {
 				b.writeString(commandSeparator)
 			}
 			b.flush()
-		case isShellSpace(c):
+		case isShellSpace(c) && !quoted:
 			b.flush()
-		case c == '^':
-			i++
-			if i < len(s) {
-				b.writeByte(s[i])
-			}
 		default:
 			b.writeByte(c)
 		}
