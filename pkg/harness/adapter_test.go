@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -644,5 +645,27 @@ func TestParsePayload_AntigravityTranscriptPath(t *testing.T) {
 	}
 	if got.TranscriptPath != "/h/t.jsonl" || got.ModelName != "m1" {
 		t.Errorf("got transcriptPath=%q modelName=%q", got.TranscriptPath, got.ModelName)
+	}
+}
+
+func TestHoldOnFormatError(t *testing.T) {
+	encodeErr := errors.New("encoding failed")
+	for _, protocol := range []HarnessType{HarnessClaudeCode, HarnessCodex, HarnessAntigravity, HarnessUnknown} {
+		t.Run(string(protocol), func(t *testing.T) {
+			code, output, err := holdOnFormatError(protocol, 1, nil, encodeErr)
+			if !errors.Is(err, encodeErr) {
+				t.Fatalf("error = %v, want %v", err, encodeErr)
+			}
+			if protocol != HarnessAntigravity {
+				if code != 2 || len(output) == 0 {
+					t.Fatalf("exit = %d, output = %q, want blocking error", code, output)
+				}
+				return
+			}
+			var verdict AntigravityDecisionOutput
+			if err := json.Unmarshal(output, &verdict); code != 0 || err != nil || verdict.Decision != "force_ask" {
+				t.Fatalf("exit = %d, output = %q, error = %v, want force_ask", code, output, err)
+			}
+		})
 	}
 }

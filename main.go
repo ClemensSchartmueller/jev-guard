@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"jev-guard/pkg/boundary"
 	"jev-guard/pkg/cli"
@@ -21,83 +24,185 @@ import (
 )
 
 func main() {
-	initErr := config.EnsureUserConfig()
-	if initErr != nil {
-		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", initErr)
-		// The gate decides after reading stdin: a PostToolUse event must still exit 0.
-		if len(os.Args) > 1 {
-			os.Exit(2)
+	args := os.Args[1:]
+	if len(args) == 1 && args[0] == cli.AntigravityHookFlag {
+		os.Exit(executeGate(harness.HarnessAntigravity))
+	}
+	isTerminal := cli.DefaultIsTerminal()
+	if len(args) > 0 || isTerminal {
+		if err := config.EnsureUserConfig(); err != nil {
+			fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
+			if len(args) > 0 {
+				os.Exit(2)
+			}
 		}
 	}
-	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
+	runner := cli.NewRunner(os.Stdout, os.Stderr, func() bool { return isTerminal })
 	runner.Eval = runEval
 	runner.Explain = runExplain
-	action, exitCode := runner.EvaluateArgs(os.Args[1:])
-	if action == cli.ActionHandled {
-		os.Exit(exitCode)
+	action, exitCode := runner.EvaluateArgs(args)
+	if action == cli.ActionExecuteGate {
+		exitCode = executeGate(harness.HarnessUnknown)
 	}
-
-	exitCode = runGate(initErr)
 	os.Exit(exitCode)
 }
+
+const (
+	gateDeadline = 10 * time.Second
+	maxHookInput = 8 << 20
+)
 
 // gateLoadConfig is a seam so tests can inject configuration; the user config path is
 // deliberately not overridable through the environment.
 var gateLoadConfig = config.LoadConfigForCall
 
-// runGate orchestrates ingestion, local fast-path, semantic evaluation, and response delivery.
-// initErr is a user config initialization failure, which holds PreToolUse calls.
-func runGate(initErr error) int {
-	inputBytes, err := readStandardInput()
-	if err != nil {
-		return handleFatalError(nil, "Failed to read standard input", err)
-	}
+// hookReply is delivered only by the gate supervisor. The worker may
+// still be unwinding when the supervisor returns a deadline hold.
+type hookReply struct {
+	exitCode   int
+	output     []byte
+	diagnostic string
+}
 
-	// A PostToolUse payload reports a tool that already ran; it must never be
-	// gated or answered as a pending PreToolUse call. It is dispatched from
-	// its envelope, before the tool arguments are parsed.
-	if post := parsePostToolUseEnvelope(inputBytes); post != nil {
-		cfg := gateLoadConfig(post)
-		for _, diagnostic := range cfg.Diagnostics {
-			fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+type hookStreams struct {
+	input          io.Reader
+	output, stderr io.Writer
+}
+
+func executeGate(expectedHarness harness.HarnessType) int {
+	ctx, cancel := context.WithTimeout(context.Background(), gateDeadline)
+	defer cancel()
+	return runGate(ctx, expectedHarness, config.EnsureUserConfig, hookStreams{os.Stdin, os.Stdout, os.Stderr})
+}
+
+const postToolUseProtocol harness.HarnessType = "post_tool_use"
+
+func runGate(ctx context.Context, expectedHarness harness.HarnessType, initialize func() error, streams hookStreams) (code int) {
+	var protocol atomic.Value
+	protocol.Store(expectedHarness)
+	failure := func(reason string) hookReply {
+		current := protocol.Load().(harness.HarnessType)
+		if current == postToolUseProtocol {
+			return hookReply{diagnostic: reason}
 		}
-		return runPostToolUse(post, cfg, os.Stdout, os.Stderr)
-	}
-	if initErr != nil {
-		return 2
+		return formatHookReply(&harness.NormalizedToolCall{Harness: current}, harness.EvaluationResult{
+			Decision: harness.DecisionAsk,
+			Reason:   reason,
+			Source:   "fatal_error",
+		})
 	}
 
-	call, err := harness.ParsePayload(inputBytes)
+	defer func() {
+		if recover() != nil {
+			code = deliverHookReply(streams, failure(hookInternalError))
+		}
+	}()
+	reply := awaitHookReply(ctx, failure, func() hookReply {
+		return evaluateHookInput(ctx, streams, initialize, &protocol, failure)
+	})
+	return deliverHookReply(streams, reply)
+}
+
+func evaluateHookInput(ctx context.Context, streams hookStreams, initialize func() error, protocol *atomic.Value, failure func(string) hookReply) hookReply {
+	input, err := readStandardInput(streams.input)
 	if err != nil {
-		return handleFatalError(nil, "Failed to parse tool call payload", err)
+		return failure("Failed to read standard input: " + err.Error())
 	}
 
+	// Dispatch PostToolUse from its envelope before parsing tool arguments.
+	// The explicit Antigravity entry point handles PreToolUse only.
+	expected := protocol.Load().(harness.HarnessType)
+	if expected == harness.HarnessUnknown {
+		if post := parsePostToolUseEnvelope(input); post != nil {
+			protocol.Store(postToolUseProtocol)
+			if err := initialize(); err != nil {
+				fmt.Fprintf(streams.stderr, "jev-guard: cannot initialize user config: %v\n", err)
+			}
+			var output bytes.Buffer
+			code := runPostToolUse(post, loadHookConfig(post, streams.stderr), &output, streams.stderr)
+			return hookReply{exitCode: code, output: output.Bytes()}
+		}
+	}
+
+	call, err := harness.ParsePayload(input)
+	if err != nil {
+		return failure("Failed to parse tool call payload: " + err.Error())
+	}
+	if expected != harness.HarnessUnknown && call.Harness != expected {
+		return failure("Unexpected hook payload format")
+	}
+	protocol.Store(call.Harness)
+	if err := initialize(); err != nil {
+		return failure("Cannot initialize user config: " + err.Error())
+	}
+	return evaluateHook(ctx, call, streams.stderr)
+}
+
+func deliverHookReply(streams hookStreams, reply hookReply) int {
+	if reply.exitCode == 2 {
+		fmt.Fprintln(streams.stderr, string(reply.output))
+	} else if len(reply.output) > 0 {
+		if _, err := streams.output.Write(reply.output); err != nil {
+			fmt.Fprintf(streams.stderr, "jev-guard: cannot write hook response: %v\n", err)
+			return 2
+		}
+	}
+	if reply.diagnostic != "" {
+		fmt.Fprintln(streams.stderr, "jev-guard:", reply.diagnostic)
+	}
+	return reply.exitCode
+}
+
+const hookInternalError = "jev-guard hook encountered an internal error"
+
+func awaitHookReply(ctx context.Context, failure func(string) hookReply, work func() hookReply) hookReply {
+	done := make(chan hookReply, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- failure(hookInternalError)
+			}
+		}()
+		done <- work()
+	}()
+	select {
+	case reply := <-done:
+		if ctx.Err() == nil {
+			return reply
+		}
+	case <-ctx.Done():
+	}
+	return failure("jev-guard hook exceeded its evaluation deadline")
+}
+
+func loadHookConfig(call *harness.NormalizedToolCall, stderr io.Writer) *config.Config {
 	cfg := gateLoadConfig(call)
 	for _, diagnostic := range cfg.Diagnostics {
-		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+		fmt.Fprintf(stderr, "jev-guard: %s\n", diagnostic)
 	}
+	return cfg
+}
 
-	// One path resolution budget for every check of this call (see boundary.BeginEvaluation).
+func evaluateHook(ctx context.Context, call *harness.NormalizedToolCall, stderr io.Writer) hookReply {
+	cfg := loadHookConfig(call, stderr)
 	defer boundary.BeginEvaluation()()
 
-	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
+	if hold := gateHold(call, cfg, stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
+			fmt.Fprintf(stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 		}
-		return outputHarnessVerdict(call, *applyAuditMode(hold, cfg.Mode))
+		return formatHookReply(call, *applyAuditMode(hold, cfg.Mode))
 	}
 
-	trace := traceGateEvaluation(call, cfg, false)
+	trace := traceGateEvaluationWithContext(ctx, call, cfg, false)
 	result := trace.Final
 	if result.TaintNote != "" {
-		fmt.Fprintf(os.Stderr, "jev-guard: taint %s\n", result.TaintNote)
+		fmt.Fprintf(stderr, "jev-guard: taint %s\n", result.TaintNote)
 	}
-
 	if auditErr := cfg.LogAuditWithModel(call, result, trace.JudgedModel()); auditErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
+		fmt.Fprintf(stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 	}
-
-	return outputHarnessVerdict(call, *result)
+	return formatHookReply(call, *result)
 }
 
 // Session hold sources reported when context awareness stops a tool call
@@ -212,8 +317,15 @@ func applyTranscriptIntent(call *harness.NormalizedToolCall, cfg *config.Config,
 	return false
 }
 
-func readStandardInput() ([]byte, error) {
-	return io.ReadAll(os.Stdin)
+func readStandardInput(input io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(input, maxHookInput+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxHookInput {
+		return nil, fmt.Errorf("hook payload exceeds %d bytes", maxHookInput)
+	}
+	return data, nil
 }
 
 // gateTrace records the intermediate results of the gate pipeline so that both the
@@ -270,6 +382,10 @@ func (c *cachedBoundaryChecker) IsPathContained(target, cwd string) (bool, error
 // When offline is true the TypeSafe call is skipped and Final is nil if fastpath had no verdict
 // (unless anti-tampering supplies a verdict or sets an ASK floor).
 func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
+	return traceGateEvaluationWithContext(context.Background(), call, cfg, offline)
+}
+
+func traceGateEvaluationWithContext(ctx context.Context, call *harness.NormalizedToolCall, cfg *config.Config, offline bool) *gateTrace {
 	defer boundary.BeginEvaluation()() // joins the scope of runGate or eval when there is one
 	// Anti-tampering is a hard invariant, independent of fastpath_enabled and intent.
 	tampering := fastpath.CheckAntiTampering(call)
@@ -277,11 +393,11 @@ func traceGateEvaluation(call *harness.NormalizedToolCall, cfg *config.Config, o
 		return &gateTrace{Tampering: tampering, Final: applyAuditMode(tampering, cfg.Mode)}
 	}
 	if tampering == nil {
-		return traceGateStages(call, cfg, offline, cfg.Mode)
+		return traceGateStages(ctx, call, cfg, offline, cfg.Mode)
 	}
 	// Non-denial anti-tampering results are floors, including limits and hook-config changes:
 	// the later stages still run, so a DENY from them stands, and nothing weaker than ASK does.
-	trace := traceGateStages(call, cfg, offline, "")
+	trace := traceGateStages(ctx, call, cfg, offline, "")
 	trace.TamperingLimit = tampering
 	if trace.Final == nil || (decisionRank(trace.Final.Decision) < decisionRank(tampering.Decision) || trace.Final.Decision == tampering.Decision && tampering.Source == fastpath.SourceHookConfig) {
 		floor := *tampering
@@ -309,7 +425,7 @@ func decisionRank(d harness.Decision) int {
 
 // traceGateStages runs the stages after anti-tampering. mode is the audit mode applied to
 // the final verdict.
-func traceGateStages(call *harness.NormalizedToolCall, cfg *config.Config, offline bool, mode string) *gateTrace {
+func traceGateStages(ctx context.Context, call *harness.NormalizedToolCall, cfg *config.Config, offline bool, mode string) *gateTrace {
 	trace := &gateTrace{}
 	resolver, _ := boundary.NewResolver(call.WorkspaceRoots, call.Cwd)
 	var checker fastpath.BoundaryChecker
@@ -341,7 +457,7 @@ func traceGateStages(call *harness.NormalizedToolCall, cfg *config.Config, offli
 	}
 
 	trace.SemanticRan = true
-	trace.Judgments, trace.EvalErr = performSemanticEvaluation(call, cfg)
+	trace.Judgments, trace.EvalErr = performSemanticEvaluation(ctx, call, cfg)
 
 	pol := policy.NewDefaultPolicy()
 	resolved := pol.ResolveWithEvidence(trace.Judgments, policy.BoundaryEvidence{
@@ -472,9 +588,9 @@ func pathProofResolvable(target, cwd string) bool {
 	}
 }
 
-func performSemanticEvaluation(call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {
+func performSemanticEvaluation(ctx context.Context, call *harness.NormalizedToolCall, cfg *config.Config) (*evaluator.JevJudgments, error) {
 	client := evaluator.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Model, cfg.Timeout)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
 	return client.Evaluate(ctx, call)
@@ -498,29 +614,16 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 	return result
 }
 
-func outputHarnessVerdict(call *harness.NormalizedToolCall, result harness.EvaluationResult) int {
+func formatHookReply(call *harness.NormalizedToolCall, result harness.EvaluationResult) hookReply {
 	exitCode, output, err := harness.FormatResponseForCall(call, result)
+	if exitCode == 0 {
+		output = append(output, '\n')
+	}
+	reply := hookReply{exitCode: exitCode, output: output}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error formatting harness response: %v\n", err)
-		return 1
+		reply.diagnostic = err.Error()
 	}
-
-	if exitCode == 2 {
-		fmt.Fprintf(os.Stderr, "%s\n", string(output))
-		return exitCode
-	}
-
-	fmt.Println(string(output))
-	return exitCode
-}
-
-func handleFatalError(call *harness.NormalizedToolCall, msg string, err error) int {
-	res := harness.EvaluationResult{
-		Decision: harness.DecisionAsk,
-		Reason:   fmt.Sprintf("%s: %v", msg, err),
-		Source:   "fatal_error",
-	}
-	return outputHarnessVerdict(call, res)
+	return reply
 }
 
 func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {

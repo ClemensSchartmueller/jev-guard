@@ -82,6 +82,8 @@ The variable must be set in the environment you start your agent from. To make i
 On Windows, use `%USERPROFILE%\.jevguard\bin\jev-guard.exe doctor`. Fix anything marked `[FAIL]`, and make sure the `API key` line is not a warning: without a key, every call the local fast path cannot decide is held for confirmation. Then start your agent as usual.
 
 > [!TIP]
+Run `jev-guard init` after upgrading to apply the current hook commands and timeouts. See [Manual hook setup](docs/hooks.md) if you maintain the hooks yourself.
+
 > **Using Codex?** Run `/hooks` inside Codex to review and trust the new hooks (`PreToolUse`, `UserPromptSubmit`, and `Stop`). Do it again whenever `init` adds or changes a hook; Codex does not run hooks you have not trusted.
 >
 > **Want a specific agent or user-wide hooks?** Append flags after the package name: `--agent claude|codex|antigravity|all` and `--scope user`.

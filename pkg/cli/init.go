@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,11 @@ import (
 
 	"jev-guard/pkg/hookconfig"
 )
+
+// AntigravityHookFlag selects the response protocol even if stdin cannot be parsed.
+const AntigravityHookFlag = "--antigravity-hook"
+
+const preToolUseTimeoutSeconds = 20
 
 var initAgents = []string{"claude", "codex", "antigravity"}
 
@@ -221,12 +227,12 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 	}
 	if agent == "claude" || agent == "codex" {
-		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false)
+		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false, nil)
 		if err != nil {
 			return false, err
 		}
 		changed = changed || c
-		c, err = ensureHook(section, "Stop", "", command+" end-turn", false)
+		c, err = ensureHook(section, "Stop", "", command+" end-turn", false, nil)
 		if err != nil {
 			return false, err
 		}
@@ -234,7 +240,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 	}
 	if agent == "claude" {
 		// PostToolUse taints the session after untrusted output (web, MCP) enters it.
-		c, err := ensureHook(section, "PostToolUse", claudePostToolUseMatcher, command, false)
+		c, err := ensureHook(section, "PostToolUse", claudePostToolUseMatcher, command, false, nil)
 		if err != nil {
 			return false, err
 		}
@@ -249,12 +255,29 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 		changed = changed || c
 	}
-	matcher := map[string]string{
-		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
-		"codex":       "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
-		"antigravity": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
+	preToolUse := map[string]struct {
+		matcher, commandSuffix, onFailure string
+	}{
+		"claude": {
+			matcher:   "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
+			onFailure: "block",
+		},
+		"codex": {
+			matcher: "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
+		},
+		"antigravity": {
+			matcher:       "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
+			commandSuffix: " " + AntigravityHookFlag,
+		},
 	}[agent]
-	c, err := ensureHook(section, "PreToolUse", matcher, command, false)
+	c, err := ensureHook(section, "PreToolUse", preToolUse.matcher, command+preToolUse.commandSuffix, false, func(hook map[string]interface{}) bool {
+		changed := setPreToolUseTimeout(hook)
+		if preToolUse.onFailure != "" && hook["onFailure"] != preToolUse.onFailure {
+			hook["onFailure"] = preToolUse.onFailure
+			changed = true
+		}
+		return changed
+	})
 	if err != nil {
 		return false, err
 	}
@@ -309,7 +332,7 @@ func childObject(root map[string]interface{}, key string) (map[string]interface{
 	return child, nil
 }
 
-func ensureHook(section map[string]interface{}, event, matcher, command string, direct bool) (bool, error) {
+func ensureHook(section map[string]interface{}, event, matcher, command string, direct bool, configure func(map[string]interface{}) bool) (bool, error) {
 	var entries []interface{}
 	if value, ok := section[event]; ok {
 		var ok bool
@@ -343,9 +366,10 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 				continue
 			}
 			if old, ok := obj["command"].(string); ok && managedHookCommand(old, command) {
+				optionsChanged := configure != nil && configure(obj)
 				currentMatcher, _ := item["matcher"].(string)
 				if old == command && currentMatcher == matcher {
-					return false, nil
+					return optionsChanged, nil
 				}
 				if len(hooks) == 1 {
 					obj["command"] = command
@@ -358,26 +382,37 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 				}
 				// Keep the shared matcher's behavior for unrelated handlers.
 				item["hooks"] = append(hooks[:index:index], hooks[index+1:]...)
-				section[event] = append(entries, newHookEntry(matcher, command))
+				obj["command"] = command
+				section[event] = append(entries, newHookEntry(matcher, obj))
 				return true, nil
 			}
 		}
 	}
-	var entry interface{}
-	if direct {
-		entry = map[string]interface{}{"type": "command", "command": command}
-	} else {
-		entry = newHookEntry(matcher, command)
+	hook := map[string]interface{}{"type": "command", "command": command}
+	if configure != nil {
+		configure(hook)
 	}
-	section[event] = append(entries, entry)
+	if direct {
+		section[event] = append(entries, hook)
+	} else {
+		section[event] = append(entries, newHookEntry(matcher, hook))
+	}
 	return true, nil
 }
 
 // newHookEntry builds a command hook group; an empty matcher is omitted (events such as Stop take none).
-func newHookEntry(matcher, command string) map[string]interface{} {
-	entry := map[string]interface{}{"hooks": []interface{}{map[string]interface{}{"type": "command", "command": command}}}
+func newHookEntry(matcher string, hook map[string]interface{}) map[string]interface{} {
+	entry := map[string]interface{}{"hooks": []interface{}{hook}}
 	setMatcher(entry, matcher)
 	return entry
+}
+
+func setPreToolUseTimeout(hook map[string]interface{}) bool {
+	if seconds, ok := hook["timeout"].(float64); ok && seconds >= preToolUseTimeoutSeconds && math.Trunc(seconds) == seconds {
+		return false
+	}
+	hook["timeout"] = preToolUseTimeoutSeconds
+	return true
 }
 
 func setMatcher(item map[string]interface{}, matcher string) {
@@ -436,6 +471,9 @@ func managedHookCommand(existing, desired string) bool {
 		}
 	}
 	base := strings.TrimSuffix(existing, subcommand)
+	if subcommand == "" {
+		base = strings.TrimSuffix(base, " "+AntigravityHookFlag)
+	}
 	base = strings.Trim(base, `"'`)
 	base = strings.ReplaceAll(base, `\`, "/")
 	name := filepath.Base(base)
