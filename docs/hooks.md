@@ -15,7 +15,7 @@ Contents:
 
 The default `PreToolUse` matchers cover the tools listed in the examples below. To gate selected MCP calls, add their exact `mcp__server__tool` names to the jev-guard `PreToolUse` matcher for your harness. The gate treats those calls as potential network egress, including calls to local servers. See [Egress policy](security-model.md#threat-injected-instructions-in-the-prompt).
 
-Managed `PreToolUse` hooks have a harness timeout of at least 20 seconds. The gate gives itself 10 seconds and caps each hook payload at 8 MiB. Deadline, input, and recoverable evaluation failures return the harness's hold response. Claude Code is configured to block when the hook itself fails. Codex and Antigravity use their own hook error handling when jev-guard cannot return a verdict.
+Managed `PreToolUse` hooks have a harness timeout of at least 20 seconds. The gate gives itself 10 seconds and caps each hook payload at 8 MiB. Deadline, input, and recoverable evaluation failures return the harness's hold response. Claude Code 2.1.295 and later blocks on hook failure with the installed `onFailure: "block"` setting. Codex and Antigravity use their own hook error handling when jev-guard cannot return a verdict.
 
 Run `jev-guard init` again to update existing managed hook commands and timeouts. In Codex, approve the updated hook in `/hooks`.
 

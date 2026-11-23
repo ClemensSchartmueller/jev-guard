@@ -183,7 +183,9 @@ The policy uses these thresholds:
 - `destructive_potential` above 1.2 is a moderate blast radius, which asks (`ASK`) unless the user explicitly requested the action. Above 2.5 it is catastrophic.
 - `is_workspace_contained` below 0.85 asks (source `policy_jev_containment`).
 
-Fail-safe: if the API key is missing, the endpoint is unsafe, the response is not HTTP 200, a 200 response is malformed or incomplete (including invalid answer types, ranges, or categories), or the request times out, `jev-guard` asks for confirmation (`ASK` / `force_ask`, source `policy_failsafe`). An unparseable hook payload produces `ASK` (source `fatal_error`).
+Fail-safe: if the API key is missing, the endpoint is unsafe, the response is not HTTP 200, a 200 response is malformed or incomplete (including invalid answer types, ranges, or categories), or the request times out, `jev-guard` asks for confirmation (`ASK` / `force_ask`, source `policy_failsafe`).
+
+The hook holds pending calls when stdin cannot be read or parsed, the payload exceeds 8 MiB, evaluation panics, or the gate's 10-second deadline expires. The deadline includes reading stdin, loading configuration, filesystem checks, session work and the judge call. Managed `PreToolUse` hooks leave at least 10 additional seconds for startup and delivery. For external termination or startup failure, the managed Claude Code hook requests `onFailure: "block"` (Claude Code 2.1.295 or later). Codex and Antigravity depend on the harness when the guard cannot deliver a verdict. See [hook setup](hooks.md) for upgrading an existing installation.
 
 ## Context-aware intent
 
