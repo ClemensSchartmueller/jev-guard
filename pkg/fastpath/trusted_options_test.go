@@ -23,7 +23,7 @@ func TestBuiltInTrustedCommandOptions(t *testing.T) {
 		{"git diff --stat", true},
 		{"git diff --unknown", false},
 		{`git diff "--unknown"`, false},
-		{"git diff -- --example", true},
+		{"git diff -- --example", false},
 		{"git log --oneline -5", true},
 		{"git log -5a", false},
 		{"git log -", false},
@@ -36,6 +36,12 @@ func TestBuiltInTrustedCommandOptions(t *testing.T) {
 		{"pwd", true},
 		{"whoami", true},
 		{"which git", true},
+		{"dir --unknown", false},
+		{"pwd example", false},
+		{"whoami example", false},
+		{"which --unknown", false},
+		{"where.exe --unknown", false},
+		{"echo --unknown", false},
 		{"where.exe git", true},
 		{"node -v", true},
 		{"node -v extra", false},
@@ -46,6 +52,8 @@ func TestBuiltInTrustedCommandOptions(t *testing.T) {
 		{"echo %EXAMPLE%", false},
 		{"echo !EXAMPLE!", false},
 		{"echo a^b", false},
+		{"git status @options", false},
+		{"git status $env:OPTIONS", false},
 	} {
 		call := &harness.NormalizedToolCall{ToolName: "run_command", Command: tt.command}
 		if tt.allow {
@@ -66,4 +74,15 @@ func TestBuiltInTrustedCommandPoliciesMatchDefaults(t *testing.T) {
 			t.Errorf("missing inspection policy for %q", prefix)
 		}
 	}
+}
+
+func TestLongerUserTrustedCommandPrefix(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.TrustedCommands = append(cfg.TrustedCommands, "git status --verbose")
+	filter := NewFilter(&mockBoundaryChecker{contained: true}, cfg)
+
+	call := &harness.NormalizedToolCall{ToolName: "run_command", Command: "git status --verbose"}
+	assertTrustedAllow(t, filter, call.Command, call)
+	call.Command += " @options"
+	assertDeferred(t, filter, call.Command, call)
 }

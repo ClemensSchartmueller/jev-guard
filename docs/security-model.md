@@ -160,7 +160,7 @@ These are also not modeled, and have not been run:
 
 Safe local read tools and trusted shell inspection commands are allowed immediately (`ALLOW`) once the boundary, flag-argument, and sensitive-file checks pass. The built-in trusted commands are `git status`, `git diff`, `git log`, `git branch`, `git show`, `ls`, `dir`, `pwd`, `echo`, `whoami`, `which`, `where.exe`, `node -v`, `go version`, and `python --version`.
 
-Built-in commands accept a fixed set of inspection options. Other options go to the judge. `git branch` accepts listing options and defers calls with operands. The built-in version queries accept no trailing arguments. These checks apply to the command line and do not inspect Git's configured helpers or shell aliases.
+Built-in commands accept a fixed set of inspection options. Unsupported options, including dash-prefixed arguments after Git’s `--` separator, go to the judge unless a longer user-owned prefix explicitly covers them. `git branch` accepts listing options and defers calls with operands. The built-in version queries accept no trailing arguments. These checks apply to the command line and do not inspect Git's configured helpers or shell aliases.
 
 A trusted command is still not trusted if any argument starts with `~`, contains `:` (other than a Windows drive letter), uses `-o` or `--output`, or names a path outside the workspace.
 
@@ -170,6 +170,7 @@ These always go to TypeSafe AI for semantic evaluation instead:
 
 - Chained commands (`;`, `&&`, `&`, `|`, `>`, `<`, `` ` ``, or newlines).
 - cmd.exe expansion and escape markers (`%`, `!`, `^`), regardless of the host OS.
+- PowerShell splatting arguments such as `@options`.
 - PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`).
 - Outbound network fetches (`read_url_content`, `WebFetch`, `WebSearch`).
 

@@ -633,7 +633,14 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 		prefix := strings.ToLower(trusted)
 		args := strings.TrimSpace(suffix)
 		contained, err := f.areCommandArgsContained(args, prefix, call)
-		return contained && allowsTrustedCommandArgs(prefix, args), err
+		if err != nil || !contained {
+			return false, err
+		}
+		if allowsTrustedCommandArgs(prefix, args) {
+			return true, nil
+		}
+		// A longer user-owned prefix can explicitly opt in after a built-in
+		// option check fails. Shell and boundary checks still apply.
 	}
 	return false, nil
 }
@@ -869,7 +876,17 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 var gitReflogReference = regexp.MustCompile(`@\{(?:-?[0-9]+|u|upstream|push)\}`)
 
 func containsUntrustedShellSyntax(cmd string) bool {
-	return strings.ContainsAny(cmd, ";&|><`$(){}\n\r%!^")
+	if strings.ContainsAny(cmd, ";&|><`$(){}\n\r%!^") {
+		return true
+	}
+	if strings.Contains(cmd, "@") {
+		for _, word := range powerShellWords(cmd) {
+			if strings.HasPrefix(word, "@") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isURL(p string) bool {

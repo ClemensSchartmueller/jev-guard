@@ -8,11 +8,11 @@ import (
 )
 
 type trustedCommandSpec struct {
-	options       []string
-	allowOperands bool
-	gitPathspecs  bool
-	nameOnly      bool
-	extraOption   func(string) bool
+	options        []string
+	allowOperands  bool
+	allowSeparator bool
+	nameOnly       bool
+	extraOption    func(string) bool
 }
 
 var defaultTrustedPrefixes = config.DefaultTrustedCommands()
@@ -20,15 +20,15 @@ var defaultTrustedPrefixes = config.DefaultTrustedCommands()
 var trustedInspectionCommands = map[string]trustedCommandSpec{
 	"git status": {
 		options:       []string{"-s", "--short", "-b", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2"},
-		allowOperands: true, gitPathspecs: true,
+		allowOperands: true, allowSeparator: true,
 	},
 	"git diff": {
 		options:       []string{"-p", "--patch", "--stat", "--numstat", "--shortstat", "--name-only", "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv"},
-		allowOperands: true, gitPathspecs: true,
+		allowOperands: true, allowSeparator: true,
 	},
 	"git log": {
 		options:       []string{"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--graph", "--decorate", "--no-decorate", "--all", "--no-ext-diff", "--no-textconv"},
-		allowOperands: true, gitPathspecs: true, extraOption: gitLogCountOption,
+		allowOperands: true, allowSeparator: true, extraOption: gitLogCountOption,
 	},
 	"git branch": {
 		// A bare operand can create a branch without any options.
@@ -36,7 +36,7 @@ var trustedInspectionCommands = map[string]trustedCommandSpec{
 	},
 	"git show": {
 		options:       []string{"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--no-ext-diff", "--no-textconv"},
-		allowOperands: true, gitPathspecs: true,
+		allowOperands: true, allowSeparator: true,
 	},
 	"ls":               {allowOperands: true, nameOnly: true, extraOption: listingOption},
 	"dir":              {allowOperands: true, nameOnly: true, extraOption: listingOption},
@@ -59,9 +59,10 @@ func allowsTrustedCommandArgs(prefix, args string) bool {
 
 	for _, words := range [][]string{posixWords(args), powerShellWords(args), cmdWords(args)} {
 		for _, word := range words {
-			if spec.gitPathspecs && word == "--" {
-				// Git treats the remaining words as pathspecs.
-				break
+			if spec.allowSeparator && word == "--" {
+				// Some shells may consume the separator. Check later
+				// tokens as potential options as well.
+				continue
 			}
 			if spec.allowOperands && !strings.HasPrefix(word, "-") {
 				continue
