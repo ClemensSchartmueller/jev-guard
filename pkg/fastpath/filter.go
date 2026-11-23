@@ -608,7 +608,8 @@ func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) (bool, err
 }
 
 func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error) {
-	trimmedCmd := strings.TrimSpace(strings.ToLower(call.Command))
+	rawCmd := strings.TrimSpace(call.Command)
+	trimmedCmd := strings.ToLower(rawCmd)
 	if trimmedCmd == "" {
 		return false, nil
 	}
@@ -617,30 +618,34 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 	if strings.HasPrefix(trimmedCmd, "git diff ") || strings.HasPrefix(trimmedCmd, "git log ") {
 		chainText = gitReflogReference.ReplaceAllString(chainText, "reflog")
 	}
-	if containsChainingOperators(chainText) {
+	if containsUntrustedShellSyntax(chainText) {
 		return false, nil
 	}
 
-	matched := false
-	var matchedPrefix string
 	for _, trusted := range f.trustedCommands {
-		trustedLower := strings.ToLower(trusted)
-		if trimmedCmd == trustedLower || strings.HasPrefix(trimmedCmd, trustedLower+" ") {
-			matched = true
-			matchedPrefix = trustedLower
-			break
+		if len(rawCmd) < len(trusted) || !strings.EqualFold(rawCmd[:len(trusted)], trusted) {
+			continue
 		}
+		suffix := rawCmd[len(trusted):]
+		if suffix != "" && suffix[0] != ' ' {
+			continue
+		}
+		prefix := strings.ToLower(trusted)
+		args := strings.TrimSpace(suffix)
+		contained, err := f.areCommandArgsContained(args, prefix, call)
+		if err != nil || !contained {
+			return false, err
+		}
+		if allowsTrustedCommandArgs(prefix, args) {
+			return true, nil
+		}
+		// A longer user-owned prefix can explicitly opt in after a built-in
+		// option check fails. Shell and boundary checks still apply.
 	}
-
-	if !matched {
-		return false, nil
-	}
-
-	return f.areCommandArgsContained(trimmedCmd, matchedPrefix, call)
+	return false, nil
 }
 
-func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harness.NormalizedToolCall) (bool, error) {
-	argsStr := strings.TrimSpace(strings.TrimPrefix(cmd, trustedPrefix))
+func (f *Filter) areCommandArgsContained(argsStr, trustedPrefix string, call *harness.NormalizedToolCall) (bool, error) {
 	if argsStr == "" {
 		return true, nil
 	}
@@ -649,14 +654,13 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if trustedPrefix == "git diff" {
 		// Inspect the union of shell readings, preserving filesystem case. Git can
 		// implicitly compare paths regardless of repository metadata or environment.
-		rawArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
 		existing := map[string]struct{}{}
 		// Read the operands twice: once with reflog selectors masked, so alternate
 		// shell forms cannot split one revision into several filesystem operands,
 		// and once unmasked, so a real directory whose name contains a selector
 		// (for example "x@{1}") is still counted. Extra fragments only matter if
 		// they exist on disk, which makes the second pass fail toward deferral.
-		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(rawArgs, "\x00"), rawArgs} {
+		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(argsStr, "\x00"), argsStr} {
 			pathsOnly := false
 			for _, arg := range shellWords(pathArgs) {
 				if strings.ContainsRune(arg, 0) {
@@ -686,7 +690,7 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 			return false, nil
 		}
 	}
-	if !nameOnlyTrustedCommand(trustedPrefix) && commandArgsMayExpand(argsStr) {
+	if !trustedInspectionCommands[trustedPrefix].nameOnly && commandArgsMayExpand(argsStr) {
 		return false, nil
 	}
 
@@ -771,16 +775,6 @@ func gitOperandMayExist(candidate string) bool {
 			return false
 		}
 	}
-}
-
-// nameOnlyTrustedCommand lists built-in commands that cannot print file contents.
-// Their arguments still pass through the flag and workspace boundary checks.
-func nameOnlyTrustedCommand(command string) bool {
-	switch command {
-	case "ls", "dir", "pwd", "echo", "whoami", "which", "where.exe", "node -v", "go version", "python --version":
-		return true
-	}
-	return false
 }
 
 // commandArgsMayExpand uses the shared shell reader for unquoted expansions.
@@ -881,11 +875,15 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 // Git reflog selectors are literal arguments, rather than shell brace syntax.
 var gitReflogReference = regexp.MustCompile(`@\{(?:-?[0-9]+|u|upstream|push)\}`)
 
-func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
-	for _, op := range operators {
-		if strings.Contains(cmd, op) {
-			return true
+func containsUntrustedShellSyntax(cmd string) bool {
+	if strings.ContainsAny(cmd, ";&|><`$(){}\n\r%!^") {
+		return true
+	}
+	if strings.Contains(cmd, "@") {
+		for _, word := range powerShellWords(cmd) {
+			if strings.HasPrefix(word, "@") {
+				return true
+			}
 		}
 	}
 	return false

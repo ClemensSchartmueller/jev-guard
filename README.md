@@ -160,7 +160,7 @@ The most common changes:
 
 - **`mode`**: `"enforcing"` (default) or `"audit"` (log only, never block).
 - **`sensitive_files`**: extra file patterns that always need confirmation.
-- **`trusted_commands`**: command prefixes allowed instantly without a network call.
+- **`trusted_commands`**: command prefixes eligible for the fast path. Built-in prefixes accept only supported inspection options.
 - **`audit_log_path`**: write every decision to a JSONL log.
 - **`taint_mode`**: `"off"`, `"audit"` (default) or `"enforce"`, for sessions that read web or MCP output.
 

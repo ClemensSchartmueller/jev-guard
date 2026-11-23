@@ -90,7 +90,7 @@ The endpoint must use HTTPS. HTTP is accepted only for localhost or loopback IPs
 | **Antigravity transcript intent** | `antigravity_transcript_intent` | — | `false` | Opt-in. Read Antigravity prompt intent from the conversation transcript at `PreToolUse`, and run the transcript guard for every agent. An agent with shell access can still forge a transcript, so turning this on trusts your agents not to. See [Intent per agent](security-model.md#intent-per-agent). Codex and Claude Code intent do not depend on it. User config only |
 | **Audit log** | `audit_log_path` | — | `""` | Destination path for JSONL audit logging. Relative paths are anchored to `~/.jevguard` |
 | **Sensitive files** | `sensitive_files` | — | *(built-in defaults)* | User config adds patterns; a trusted project config can only add more |
-| **Trusted commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes allowed without a network call; merged with the built-in defaults, same as sensitive files |
+| **Trusted commands** | `trusted_commands` | — | *(built-in defaults)* | User-owned command prefixes eligible for the fast path. Built-in prefixes accept supported inspection options. User entries merge with the built-in defaults. |
 
 **Invalid values.** If the user config is not valid JSON, it is ignored entirely and the enforcing built-in defaults apply. An invalid `mode` or `base_url` is ignored and also forces `mode` to `enforcing` as a safe fallback. An out-of-range `intent_ttl_minutes` (must be 1–1440) is ignored and the default `30` is used. An `antigravity_transcript_intent` that is not `true` or `false` means off. Problems are printed to stderr as `jev-guard: ...` diagnostics and reported by `jev-guard doctor`.
 
