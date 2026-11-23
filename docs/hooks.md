@@ -13,6 +13,8 @@ Contents:
 - [Codex CLI](#codex-cli-codexhooksjson)
 - [Antigravity](#antigravity-agentshooksjson)
 
+The default `PreToolUse` matchers cover the tools listed in the examples below. To gate selected MCP calls, add their exact `mcp__server__tool` names to the jev-guard `PreToolUse` matcher for your harness. The gate treats those calls as potential network egress, including calls to local servers. See [Egress policy](security-model.md#threat-injected-instructions-in-the-prompt).
+
 ## Claude Code (`.claude/settings.json`)
 
 Add hooks to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
