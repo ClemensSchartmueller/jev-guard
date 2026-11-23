@@ -39,7 +39,7 @@ func isUntrustedTool(toolName string) bool {
 	case "WebFetch", "WebSearch":
 		return true
 	}
-	return strings.HasPrefix(toolName, "mcp__")
+	return harness.IsMCPTool(toolName)
 }
 
 // parsePostToolUseEnvelope returns a minimal call for a PostToolUse payload,

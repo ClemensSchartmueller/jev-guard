@@ -39,6 +39,10 @@ func TestIsEgressCall(t *testing.T) {
 		{"antigravity run_command", &harness.NormalizedToolCall{ToolName: "run_command", Command: "curl x"}, true},
 		{"WebFetch", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com/?k=secret"}, true},
 		{"read_url_content", &harness.NormalizedToolCall{ToolName: "read_url_content"}, true},
+		{"mixed-case MCP tool without arguments", &harness.NormalizedToolCall{ToolName: "MCP__Server__Tool"}, true},
+		{"single underscore", &harness.NormalizedToolCall{ToolName: "mcp_search"}, false},
+		{"embedded MCP prefix", &harness.NormalizedToolCall{ToolName: "my_mcp__tool"}, false},
+		{"bare MCP name", &harness.NormalizedToolCall{ToolName: "mcp"}, false},
 
 		{"cat env", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .env"}, false},
 		{"sed env", &harness.NormalizedToolCall{ToolName: "Bash", Command: "sed -i 's/PORT=.*/PORT=3000/' .env"}, false},
@@ -58,15 +62,22 @@ func TestIsEgressCall(t *testing.T) {
 }
 
 func TestIsEgressCallMCPPayloads(t *testing.T) {
-	for name, payload := range map[string]string{
-		"Claude Code": `{"tool_name":"mcp__server__search","tool_input":{"query":"example"}}`,
-		"Codex":       `{"tool_name":"mcp__server__search","turn_id":"turn-1","tool_input":{"query":"example"}}`,
-		"Antigravity": `{"toolCall":{"name":"mcp__server__search","args":{"query":"example"}}}`,
+	for _, tt := range []struct {
+		name        string
+		payload     string
+		wantHarness harness.HarnessType
+	}{
+		{"Claude Code", `{"tool_name":"mcp__server__search","tool_input":{"query":"example"}}`, harness.HarnessClaudeCode},
+		{"Codex", `{"tool_name":"mcp__server__search","turn_id":"turn-1","tool_input":{"query":"example"}}`, harness.HarnessCodex},
+		{"Antigravity", `{"toolCall":{"name":"mcp__server__search","args":{"query":"example"}}}`, harness.HarnessAntigravity},
 	} {
-		t.Run(name, func(t *testing.T) {
-			call, err := harness.ParsePayload([]byte(payload))
+		t.Run(tt.name, func(t *testing.T) {
+			call, err := harness.ParsePayload([]byte(tt.payload))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if call.Harness != tt.wantHarness {
+				t.Fatalf("harness = %q, want %q", call.Harness, tt.wantHarness)
 			}
 			if !IsEgressCall(call) {
 				t.Error("MCP call should count as potential egress")

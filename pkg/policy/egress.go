@@ -54,9 +54,8 @@ func IsEgressCall(call *harness.NormalizedToolCall) bool {
 	if call == nil {
 		return false
 	}
-	tool := strings.ToLower(call.ToolName)
 	// MCP servers may forward any argument off the machine.
-	if outboundTools[tool] || strings.HasPrefix(tool, "mcp__") {
+	if IsOutboundTool(call.ToolName) || harness.IsMCPTool(call.ToolName) {
 		return true
 	}
 	target := strings.ToLower(strings.TrimSpace(call.TargetPath))

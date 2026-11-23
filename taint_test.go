@@ -51,6 +51,7 @@ func TestRunPostToolUse(t *testing.T) {
 	}{
 		{"audit taints web fetch silently", config.TaintModeAudit, "WebFetch", true, false},
 		{"audit taints mcp", config.TaintModeAudit, "mcp__github__get_issue", true, false},
+		{"audit taints mixed-case MCP", config.TaintModeAudit, "MCP__Server__Tool", true, false},
 		{"enforce warns the model", config.TaintModeEnforce, "WebSearch", true, true},
 		{"trusted tool is ignored", config.TaintModeEnforce, "Read", false, false},
 		{"off records nothing", config.TaintModeOff, "WebFetch", false, false},

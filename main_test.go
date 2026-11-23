@@ -555,6 +555,8 @@ func TestGateIntentHardening(t *testing.T) {
 			harness.DecisionAsk, "policy_intent_egress_cap"},
 		{"WebFetch capped", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://example.com/?k=x", Cwd: ws, RawArgs: map[string]interface{}{"url": "https://example.com/?k=x"}},
 			harness.DecisionAsk, "policy_intent_egress_cap"},
+		{"MCP egress capped", &harness.NormalizedToolCall{ToolName: "mcp__server__search", Cwd: ws, RawArgs: map[string]interface{}{"query": "example"}},
+			harness.DecisionAsk, "policy_intent_egress_cap"},
 		{"local cat .env still allowed", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat .env", Cwd: ws},
 			harness.DecisionAllow, "policy_jev_intent_allow"},
 		{"Read .env still allowed", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: ".env", Cwd: ws, RawArgs: map[string]interface{}{"file_path": ".env"}},
