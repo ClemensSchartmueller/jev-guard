@@ -22,7 +22,7 @@ This page describes what `jev-guard` checks, in what order, and why. For a short
 | **Codex CLI** | `Bash`, `exec_command`, `apply_patch`, `view_file`, `read_file`, `list_dir` |
 | **Antigravity** | `run_command`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_resource`, `read_url_content` |
 
-MCP tools (`mcp__*`) are not in the default matcher and are not gated by jev-guard.
+The default `PreToolUse` matchers omit `mcp__*`. To gate selected MCP tools, add their names to the harness’s `PreToolUse` matcher. Calls routed to jev-guard with an `mcp__` prefix count as potential network egress, including tools served locally.
 
 ## Local fast path
 
@@ -233,7 +233,7 @@ Instructions hidden in a fetched web page, a search result or an MCP tool respon
 While a session is tainted, the gate checks every `ALLOW`, from both the fast path and the policy, for:
 
 - an `ALLOW` produced only by the `explicitly_requested` intent upgrade (source `policy_jev_intent_allow`),
-- network egress (`WebFetch`, `WebSearch`, URL targets, `curl`/`wget`/`ssh`/`scp`/`nc` and similar, `git push`, package `publish`),
+- network egress (`WebFetch`, `WebSearch`, gated `mcp__*` calls, URL targets, `curl`/`wget`/`ssh`/`scp`/`nc` and similar, `git push`, package `publish`),
 - sensitive file access (the `sensitive_files` patterns),
 - writes to execution-sensitive paths (the list above, such as `.claude/`, `.github/`, `CLAUDE.md`, `AGENTS.md` and `.husky/`). A shell command that names such a path counts too.
 
@@ -253,7 +253,7 @@ Session writes (ingest, taint, end-turn) take a per-session OS file lock (`flock
 
 The taint fails closed. Before taking the lock, the `PostToolUse` hook creates its own marker file next to the session file (`<session>.json.taint.<event id>`). The gate treats the session as tainted while a fresh marker exists, even if the lock timed out or the session file could not be written. An abort prompt that cannot be saved writes an `<session>.json.abort.<event id>` marker in the same way, which holds the session until the next prompt. Only the writers that clear a signal (the next ingested prompt, `end-turn`, `clear-intent`) remove markers, and only the markers that existed when they took the lock. A taint or abort published while an older write is in progress therefore survives it. A delayed taint whose marker was already removed by the next prompt or `end-turn` is discarded instead of re-tainting the new turn. `status` applies markers the same way as the gate, so it also lists a session that exists only as a marker. In `audit` mode a marker-only taint behaves like any other taint: it adds audit notes and changes no verdict. If neither the marker nor the session file can be written (the sessions directory is unwritable), the hook reports the lost taint on stderr. In `enforce` mode it still warns the model.
 
-Limits: only Claude Code is covered (see [Manual hook setup](hooks.md)). The taint ends with the reply, even though the injected text can stay in the model's context for later turns. The egress check is a token heuristic over the command.
+Limits: only Claude Code is covered (see [Manual hook setup](hooks.md)). The taint ends with the reply, even though the injected text can stay in the model's context for later turns. The egress check uses tool names, URL targets, and shell command tokens.
 
 ## Intent policy matrix
 
@@ -302,6 +302,7 @@ Instead, intent's power is kept narrow by deterministic limits that hold whateve
 A call counts as network-capable when any of these hold:
 
 - The tool is an outbound fetch tool (`WebFetch`, `WebSearch`, `read_url_content`), or its target is an HTTP(S) URL.
+- The tool name starts with `mcp__`. Classification does not depend on the arguments or transport.
 - The shell command contains a network program as any command word, for example `curl`, `wget`, `nc`, `socat`, `ssh`, `scp`, `sftp`, `ftp`, `rsync`, `rclone`, `http`, `gh`, `aws`, `gsutil`, `gcloud`, `az`, `mail`, `sendmail`, `Invoke-WebRequest`, `Invoke-RestMethod`, `iwr`, `irm`, or `bitsadmin` (paths and `.exe` are stripped).
 - It contains `git push`, `git send-email`, or a publish subcommand for `npm`, `pnpm`, `yarn`, or `cargo`.
 - It contains a network marker: `://`, `/dev/tcp/`, `/dev/udp/`, `socket`, `urllib`, `requests.`, `http.client`, `fetch(`, `net/http`, `Net.WebClient`, `System.Net.`, or `-urlcache`.
@@ -310,7 +311,7 @@ The same heuristic is used for the credential-egress cap and session taint. It i
 
 **Limits.** These rules are local and deterministic, not a complete defense:
 
-- The egress heuristic matches command text. A command that hides the network call (an interpreter script file, a base64-decoded payload, a compiled helper, or a program not in the list) is not recognized, and a `credential_leak` with intent then gets `ALLOW` as before. Without intent, every `credential_leak` still asks.
+- For shell calls, the egress heuristic matches command text. A command that hides the network call (an interpreter script file, a base64-decoded payload, a compiled helper, or a program not in the list) is not recognized, and a `credential_leak` with intent then gets `ALLOW` as before. Without intent, every `credential_leak` still asks.
 - The cap applies only to `credential_leak`. A moderate-risk action injected into a pasted block, scored between 1.2 and 2.5 and judged `explicitly_requested`, is still allowed.
 - jev-guard does not detect pasted or quoted blocks in the prompt, and it does not ask the model whether the prompt contains third-party instructions. Fences are easy to omit and legitimate prompts ("here is the stack trace, fix it") are long, and models are weakest at exactly this question.
 - Intent is a trust channel. If you submit a prompt you did not read, jev-guard treats its instructions as yours. For sessions that routinely handle untrusted pasted content, consider setting `"context_awareness_enabled": false`, which removes the intent channel entirely.

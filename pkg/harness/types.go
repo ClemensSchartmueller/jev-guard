@@ -18,6 +18,11 @@ const (
 	HarnessUnknown     HarnessType = "unknown"
 )
 
+// IsMCPTool reports whether the tool name has the MCP namespace prefix.
+func IsMCPTool(toolName string) bool {
+	return strings.HasPrefix(strings.ToLower(toolName), "mcp__")
+}
+
 // Decision represents the final tool gating policy verdict.
 type Decision string
 
