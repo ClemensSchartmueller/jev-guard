@@ -346,7 +346,7 @@ func TestFastPath_ReadTools_InsideWorkspace(t *testing.T) {
 		{"read_file", "README.md"},
 		{"list_dir", "pkg"},
 		{"LS", "pkg/harness"},
-		{"grep_search", "pkg"},
+		{"grep_search", "filter.go"}, // one file: a directory needs a file filter
 		{"find_by_name", "pkg"},
 		{"glob", "pkg"},
 	}

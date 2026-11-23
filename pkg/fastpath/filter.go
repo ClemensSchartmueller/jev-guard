@@ -111,6 +111,24 @@ func (f *Filter) Evaluate(call *harness.NormalizedToolCall) *harness.EvaluationR
 		}
 	}
 
+	reason, broad, err := f.checkSearchFilters(call)
+	if err != nil {
+		return boundaryLimitResult("Search filter cannot be verified within workspace: ", err)
+	}
+	if reason != "" {
+		return &harness.EvaluationResult{
+			Decision:   harness.DecisionAsk,
+			Reason:     reason,
+			Source:     "fastpath_boundary",
+			Confidence: 1.0,
+		}
+	}
+	if broad {
+		// The filter could reach a sensitive file the checks above never saw: no local
+		// ALLOW, the judge decides.
+		return nil
+	}
+
 	trusted, err := f.isTrustedOperation(call)
 	if err != nil {
 		return boundaryLimitResult("Command argument cannot be verified within workspace: ", err)
@@ -157,6 +175,10 @@ func (f *Filter) SensitiveReason(call *harness.NormalizedToolCall) string {
 // boundary.ErrResolutionLimit when a path could not be resolved to check it.
 func (f *Filter) checkSensitive(call *harness.NormalizedToolCall) (string, error) {
 	if reason := f.checkResolvedXDGConfig(call); reason != "" {
+		return reason, nil
+	}
+
+	if reason := f.checkSensitiveFilters(call); reason != "" {
 		return reason, nil
 	}
 

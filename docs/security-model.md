@@ -50,6 +50,22 @@ A tool's path and working-directory arguments are checked exactly as given, beca
 
 A `file://` URI is parsed as a URI. The authority must be empty or `localhost` (any case); the path is percent-decoded, and a Windows drive path (`file:///C:/x`) loses its leading slash. Both the decoded path and, when it differs, the escaped spelling are checked for sensitive names and containment, since a consumer that does not decode would open the literal name. A URI that does not parse, names another host, carries a port, user info, a query, a fragment or a NUL, decodes to an empty path or one with surrounding whitespace, or names a drive without a separator (`file:///C:x`, which is drive-relative) is unverifiable and asked about in the same way, also with `fastpath_enabled` false. So is a `file:` target without `//` (`file:/x`), which URI parsers read as an absolute path.
 
+### Search and list filters
+
+Search and list tools pick files with filter arguments as well as with their directory argument: `Grep`'s `glob` and `type`, `Glob`'s `pattern`, `grep_search`'s `Includes`, and `find_by_name`'s `Pattern` and `Extensions` (an extension `env` is read as `*.env`). Before such a tool gets the trusted `ALLOW`, its filters are checked case-insensitively, after `{a,b}` alternatives are expanded:
+
+- A filter that names a sensitive pattern once glob escapes and brackets are removed (`.env*`, `.[e]nv`, `**/*.pem`, `*.{env,key}`) counts as access to that sensitive file: `ASK` (source `fastpath_sensitive`), or the judge when a user intent is present. Tainted sessions treat it the same way.
+- A filter that starts with `~`, has a `..` segment (with `/` or `\` as separator), or is absolute is boundary-checked: the part of an absolute filter before its first wildcard must lie inside the workspace, or the call gets `ASK` (source `fastpath_boundary`). On Windows, a drive (`C:\`) or a leading `\` also makes a filter absolute.
+- Any other filter that could still match a sensitive file name gets no fast-path verdict, so the judge decides. A filter could match one when its last segment matches a sensitive name or that name with text around it (`.env`, `.env.a`, `a.env`), or when a directory segment other than a bare `*` or `**` matches a sensitive directory such as `.ssh`. So `*`, `**/*`, `.en?`, and `*.json` (which matches `credentials.json`) go to the judge, while `*.go`, `src/**/*.ts`, and `*.{ts,tsx}` keep the fast path. A filter value that is not a string, or a `Grep` `type` outside a list of ripgrep code types whose globs cannot match a sensitive name (`go`, `ts`, `py`, `rust`, `md`, and similar; not `json`, `sh`, `config`, or `tf`), also goes to the judge. `find_by_name`'s `Pattern` and `Extensions` apply together, so the call goes to the judge only when both could match a sensitive name.
+
+Exclusion filters (`Excludes`, `LS`'s `ignore`) only narrow a search and are not checked. Content patterns (`Grep`'s `pattern`, `grep_search`'s `Query`) select lines, not files, and are not checked either.
+
+A content search (`Grep`, `grep_search`) over a directory with no file filter reads every file below it, so it also goes to the judge. A filter list made only of exclusions counts as no filter. Searching one named file keeps the fast path, since that file is the checked target. Listing tools (`LS`, `list_dir`, and `Glob` or `find_by_name` with a narrow filter) return names, not contents, and keep the fast path.
+
+Several globs in one value (`*.go *.md`, `*.go,!*_test.go`) are checked one by one as well as whole. A glob starting with `!` is an exclusion and selects no file.
+
+Known limit: a ripgrep type redefined in the user's ripgrep configuration is read with its built-in globs.
+
 ### Workspace boundary enforcement
 
 Path traversals and directory escapes (`../../`) are resolved locally for write and read operations. This prevents access to, or exfiltration of, files outside the workspace, such as `/etc/shadow` or `C:\Windows\system.ini`. Path case is preserved on Linux and matched case-insensitively on Windows. If a path cannot be resolved, the check fails closed.
