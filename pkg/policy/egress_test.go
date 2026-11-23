@@ -56,3 +56,24 @@ func TestIsEgressCall(t *testing.T) {
 		})
 	}
 }
+
+func TestIsEgressCallMCPPayloads(t *testing.T) {
+	for name, payload := range map[string]string{
+		"Claude Code": `{"tool_name":"mcp__server__search","tool_input":{"query":"example"}}`,
+		"Codex":       `{"tool_name":"mcp__server__search","turn_id":"turn-1","tool_input":{"query":"example"}}`,
+		"Antigravity": `{"toolCall":{"name":"mcp__server__search","args":{"query":"example"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			call, err := harness.ParsePayload([]byte(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !IsEgressCall(call) {
+				t.Error("MCP call should count as potential egress")
+			}
+			if IsOutboundTool(call.ToolName) {
+				t.Error("MCP tool should not count as URL-only")
+			}
+		})
+	}
+}

