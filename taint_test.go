@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -266,7 +267,9 @@ func runGateWithStdin(t *testing.T, input string, initErr error) int {
 	old := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = old; _ = r.Close() }()
-	return runGate(harness.HarnessUnknown, func() error { return initErr })
+	ctx, cancel := context.WithTimeout(context.Background(), gateDeadline)
+	defer cancel()
+	return runGate(ctx, harness.HarnessUnknown, func() error { return initErr }, hookStreams{os.Stdin, os.Stdout, os.Stderr})
 }
 
 // Review R4: a PostToolUse envelope with malformed arguments, or a gate run

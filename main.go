@@ -26,22 +26,24 @@ import (
 func main() {
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == cli.AntigravityHookFlag {
-		os.Exit(runGate(harness.HarnessAntigravity, config.EnsureUserConfig))
+		os.Exit(executeGate(harness.HarnessAntigravity))
 	}
-	if len(args) == 0 && !cli.DefaultIsTerminal() {
-		os.Exit(runGate(harness.HarnessUnknown, config.EnsureUserConfig))
-	}
-
-	if err := config.EnsureUserConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
-		if len(args) > 0 {
-			os.Exit(2)
+	isTerminal := cli.DefaultIsTerminal()
+	if len(args) > 0 || isTerminal {
+		if err := config.EnsureUserConfig(); err != nil {
+			fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
+			if len(args) > 0 {
+				os.Exit(2)
+			}
 		}
 	}
-	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
+	runner := cli.NewRunner(os.Stdout, os.Stderr, func() bool { return isTerminal })
 	runner.Eval = runEval
 	runner.Explain = runExplain
-	_, exitCode := runner.EvaluateArgs(args)
+	action, exitCode := runner.EvaluateArgs(args)
+	if action == cli.ActionExecuteGate {
+		exitCode = executeGate(harness.HarnessUnknown)
+	}
 	os.Exit(exitCode)
 }
 
@@ -54,82 +56,111 @@ const (
 // deliberately not overridable through the environment.
 var gateLoadConfig = config.LoadConfigForCall
 
-// hookReply is written only by the caller of awaitHookReply. The worker never
-// writes a verdict directly because a timeout can win while it is still running.
+// hookReply is delivered only by the gate supervisor. The worker may
+// still be unwinding when the supervisor returns a deadline hold.
 type hookReply struct {
-	exitCode int
-	output   []byte
+	exitCode   int
+	output     []byte
+	diagnostic string
 }
 
-func runGate(expectedHarness harness.HarnessType, initialize func() error) int {
+type hookStreams struct {
+	input          io.Reader
+	output, stderr io.Writer
+}
+
+func executeGate(expectedHarness harness.HarnessType) int {
 	ctx, cancel := context.WithTimeout(context.Background(), gateDeadline)
 	defer cancel()
+	return runGate(ctx, expectedHarness, config.EnsureUserConfig, hookStreams{os.Stdin, os.Stdout, os.Stderr})
+}
+
+const postToolUseProtocol harness.HarnessType = "post_tool_use"
+
+func runGate(ctx context.Context, expectedHarness harness.HarnessType, initialize func() error, streams hookStreams) (code int) {
 	var protocol atomic.Value
 	protocol.Store(expectedHarness)
-	var postToolUse atomic.Bool
 	failure := func(reason string) hookReply {
-		if postToolUse.Load() {
-			fmt.Fprintln(os.Stderr, "jev-guard:", reason)
-			return hookReply{}
+		current := protocol.Load().(harness.HarnessType)
+		if current == postToolUseProtocol {
+			return hookReply{diagnostic: reason}
 		}
-		return formatHookReply(&harness.NormalizedToolCall{Harness: protocol.Load().(harness.HarnessType)}, harness.EvaluationResult{
+		return formatHookReply(&harness.NormalizedToolCall{Harness: current}, harness.EvaluationResult{
 			Decision: harness.DecisionAsk,
 			Reason:   reason,
 			Source:   "fatal_error",
 		})
 	}
 
+	defer func() {
+		if recover() != nil {
+			code = deliverHookReply(streams, failure(hookInternalError))
+		}
+	}()
 	reply := awaitHookReply(ctx, failure, func() hookReply {
-		input, err := readStandardInput(os.Stdin)
-		if err != nil {
-			return failure("Failed to read standard input: " + err.Error())
-		}
-
-		// Dispatch a legacy PostToolUse hook from its envelope before parsing
-		// tool arguments. The explicit Antigravity entry point is PreToolUse.
-		if expectedHarness == harness.HarnessUnknown {
-			if post := parsePostToolUseEnvelope(input); post != nil {
-				postToolUse.Store(true)
-				if err := initialize(); err != nil {
-					fmt.Fprintf(os.Stderr, "jev-guard: cannot initialize user config: %v\n", err)
-				}
-				var output bytes.Buffer
-				code := runPostToolUse(post, loadHookConfig(post), &output, os.Stderr)
-				return hookReply{exitCode: code, output: output.Bytes()}
-			}
-		}
-
-		call, err := harness.ParsePayload(input)
-		if err != nil {
-			return failure("Failed to parse tool call payload: " + err.Error())
-		}
-		if expectedHarness != harness.HarnessUnknown && call.Harness != expectedHarness {
-			return failure("Unexpected hook payload format")
-		}
-		protocol.Store(call.Harness)
-		if err := initialize(); err != nil {
-			return failure("Cannot initialize user config: " + err.Error())
-		}
-		return evaluateHook(ctx, call)
+		return evaluateHookInput(ctx, streams, initialize, &protocol, failure)
 	})
+	return deliverHookReply(streams, reply)
+}
 
+func evaluateHookInput(ctx context.Context, streams hookStreams, initialize func() error, protocol *atomic.Value, failure func(string) hookReply) hookReply {
+	input, err := readStandardInput(streams.input)
+	if err != nil {
+		return failure("Failed to read standard input: " + err.Error())
+	}
+
+	// Dispatch PostToolUse from its envelope before parsing tool arguments.
+	// The explicit Antigravity entry point handles PreToolUse only.
+	expected := protocol.Load().(harness.HarnessType)
+	if expected == harness.HarnessUnknown {
+		if post := parsePostToolUseEnvelope(input); post != nil {
+			protocol.Store(postToolUseProtocol)
+			if err := initialize(); err != nil {
+				fmt.Fprintf(streams.stderr, "jev-guard: cannot initialize user config: %v\n", err)
+			}
+			var output bytes.Buffer
+			code := runPostToolUse(post, loadHookConfig(post, streams.stderr), &output, streams.stderr)
+			return hookReply{exitCode: code, output: output.Bytes()}
+		}
+	}
+
+	call, err := harness.ParsePayload(input)
+	if err != nil {
+		return failure("Failed to parse tool call payload: " + err.Error())
+	}
+	if expected != harness.HarnessUnknown && call.Harness != expected {
+		return failure("Unexpected hook payload format")
+	}
+	protocol.Store(call.Harness)
+	if err := initialize(); err != nil {
+		return failure("Cannot initialize user config: " + err.Error())
+	}
+	return evaluateHook(ctx, call, streams.stderr)
+}
+
+func deliverHookReply(streams hookStreams, reply hookReply) int {
 	if reply.exitCode == 2 {
-		fmt.Fprintln(os.Stderr, string(reply.output))
+		fmt.Fprintln(streams.stderr, string(reply.output))
 	} else if len(reply.output) > 0 {
-		if _, err := os.Stdout.Write(reply.output); err != nil {
-			fmt.Fprintf(os.Stderr, "jev-guard: cannot write hook response: %v\n", err)
+		if _, err := streams.output.Write(reply.output); err != nil {
+			fmt.Fprintf(streams.stderr, "jev-guard: cannot write hook response: %v\n", err)
 			return 2
 		}
 	}
+	if reply.diagnostic != "" {
+		fmt.Fprintln(streams.stderr, "jev-guard:", reply.diagnostic)
+	}
 	return reply.exitCode
 }
+
+const hookInternalError = "jev-guard hook encountered an internal error"
 
 func awaitHookReply(ctx context.Context, failure func(string) hookReply, work func() hookReply) hookReply {
 	done := make(chan hookReply, 1)
 	go func() {
 		defer func() {
 			if recover() != nil {
-				done <- failure("jev-guard hook encountered an internal error")
+				done <- failure(hookInternalError)
 			}
 		}()
 		done <- work()
@@ -144,21 +175,21 @@ func awaitHookReply(ctx context.Context, failure func(string) hookReply, work fu
 	return failure("jev-guard hook exceeded its evaluation deadline")
 }
 
-func loadHookConfig(call *harness.NormalizedToolCall) *config.Config {
+func loadHookConfig(call *harness.NormalizedToolCall, stderr io.Writer) *config.Config {
 	cfg := gateLoadConfig(call)
 	for _, diagnostic := range cfg.Diagnostics {
-		fmt.Fprintf(os.Stderr, "jev-guard: %s\n", diagnostic)
+		fmt.Fprintf(stderr, "jev-guard: %s\n", diagnostic)
 	}
 	return cfg
 }
 
-func evaluateHook(ctx context.Context, call *harness.NormalizedToolCall) hookReply {
-	cfg := loadHookConfig(call)
+func evaluateHook(ctx context.Context, call *harness.NormalizedToolCall, stderr io.Writer) hookReply {
+	cfg := loadHookConfig(call, stderr)
 	defer boundary.BeginEvaluation()()
 
-	if hold := gateHold(call, cfg, os.Stderr); hold != nil {
+	if hold := gateHold(call, cfg, stderr); hold != nil {
 		if auditErr := cfg.LogAudit(call, hold); auditErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
+			fmt.Fprintf(stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 		}
 		return formatHookReply(call, *applyAuditMode(hold, cfg.Mode))
 	}
@@ -166,10 +197,10 @@ func evaluateHook(ctx context.Context, call *harness.NormalizedToolCall) hookRep
 	trace := traceGateEvaluationWithContext(ctx, call, cfg, false)
 	result := trace.Final
 	if result.TaintNote != "" {
-		fmt.Fprintf(os.Stderr, "jev-guard: taint %s\n", result.TaintNote)
+		fmt.Fprintf(stderr, "jev-guard: taint %s\n", result.TaintNote)
 	}
 	if auditErr := cfg.LogAuditWithModel(call, result, trace.JudgedModel()); auditErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to write audit entry: %v\n", auditErr)
+		fmt.Fprintf(stderr, "Warning: failed to write audit entry: %v\n", auditErr)
 	}
 	return formatHookReply(call, *result)
 }
@@ -585,16 +616,14 @@ func applyAuditMode(result *harness.EvaluationResult, mode string) *harness.Eval
 
 func formatHookReply(call *harness.NormalizedToolCall, result harness.EvaluationResult) hookReply {
 	exitCode, output, err := harness.FormatResponseForCall(call, result)
-	if err != nil {
-		if call.Harness == harness.HarnessAntigravity {
-			return hookReply{output: []byte("{\"decision\":\"force_ask\",\"reason\":\"Failed to format hook response\"}\n")}
-		}
-		return hookReply{exitCode: 2, output: []byte("Failed to format hook response")}
-	}
 	if exitCode == 0 {
 		output = append(output, '\n')
 	}
-	return hookReply{exitCode: exitCode, output: output}
+	reply := hookReply{exitCode: exitCode, output: output}
+	if err != nil {
+		reply.diagnostic = err.Error()
+	}
+	return reply
 }
 
 func resolveUserIntent(callTurnID, sessionTurnID int, callTurnKey, sessionTurnKey, sessionPrompt string) string {

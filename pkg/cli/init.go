@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -226,12 +227,12 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 	}
 	if agent == "claude" || agent == "codex" {
-		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", nil)
+		c, err := ensureHook(section, "UserPromptSubmit", ".*", command+" ingest", false, nil)
 		if err != nil {
 			return false, err
 		}
 		changed = changed || c
-		c, err = ensureHook(section, "Stop", "", command+" end-turn", nil)
+		c, err = ensureHook(section, "Stop", "", command+" end-turn", false, nil)
 		if err != nil {
 			return false, err
 		}
@@ -239,7 +240,7 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 	}
 	if agent == "claude" {
 		// PostToolUse taints the session after untrusted output (web, MCP) enters it.
-		c, err := ensureHook(section, "PostToolUse", claudePostToolUseMatcher, command, nil)
+		c, err := ensureHook(section, "PostToolUse", claudePostToolUseMatcher, command, false, nil)
 		if err != nil {
 			return false, err
 		}
@@ -254,18 +255,25 @@ func installAgentHooks(path, agent, command string) (bool, error) {
 		}
 		changed = changed || c
 	}
-	matcher := map[string]string{
-		"claude":      "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
-		"codex":       "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
-		"antigravity": "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
+	preToolUse := map[string]struct {
+		matcher, commandSuffix, onFailure string
+	}{
+		"claude": {
+			matcher:   "Bash|PowerShell|Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|WebFetch|WebSearch|View|ReadLocalFile|LS",
+			onFailure: "block",
+		},
+		"codex": {
+			matcher: "Bash|exec_command|apply_patch|view_file|read_file|list_dir",
+		},
+		"antigravity": {
+			matcher:       "run_command|write_to_file|replace_file_content|multi_replace_file_content|view_file|list_dir|grep_search|find_by_name|read_resource|read_url_content",
+			commandSuffix: " " + AntigravityHookFlag,
+		},
 	}[agent]
-	if agent == "antigravity" {
-		command += " " + AntigravityHookFlag
-	}
-	c, err := ensureHook(section, "PreToolUse", matcher, command, func(hook map[string]interface{}) bool {
+	c, err := ensureHook(section, "PreToolUse", preToolUse.matcher, command+preToolUse.commandSuffix, false, func(hook map[string]interface{}) bool {
 		changed := setPreToolUseTimeout(hook)
-		if agent == "claude" && hook["onFailure"] != "block" {
-			hook["onFailure"] = "block"
+		if preToolUse.onFailure != "" && hook["onFailure"] != preToolUse.onFailure {
+			hook["onFailure"] = preToolUse.onFailure
 			changed = true
 		}
 		return changed
@@ -324,7 +332,7 @@ func childObject(root map[string]interface{}, key string) (map[string]interface{
 	return child, nil
 }
 
-func ensureHook(section map[string]interface{}, event, matcher, command string, configure func(map[string]interface{}) bool) (bool, error) {
+func ensureHook(section map[string]interface{}, event, matcher, command string, direct bool, configure func(map[string]interface{}) bool) (bool, error) {
 	var entries []interface{}
 	if value, ok := section[event]; ok {
 		var ok bool
@@ -336,6 +344,16 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 	for _, entry := range entries {
 		item, ok := entry.(map[string]interface{})
 		if !ok {
+			continue
+		}
+		if direct {
+			if old, ok := item["command"].(string); ok && managedHookCommand(old, command) {
+				if old == command {
+					return false, nil
+				}
+				item["command"] = command
+				return true, nil
+			}
 			continue
 		}
 		hooks, ok := item["hooks"].([]interface{})
@@ -374,7 +392,11 @@ func ensureHook(section map[string]interface{}, event, matcher, command string, 
 	if configure != nil {
 		configure(hook)
 	}
-	section[event] = append(entries, newHookEntry(matcher, hook))
+	if direct {
+		section[event] = append(entries, hook)
+	} else {
+		section[event] = append(entries, newHookEntry(matcher, hook))
+	}
 	return true, nil
 }
 
@@ -386,7 +408,7 @@ func newHookEntry(matcher string, hook map[string]interface{}) map[string]interf
 }
 
 func setPreToolUseTimeout(hook map[string]interface{}) bool {
-	if seconds, ok := hook["timeout"].(float64); ok && seconds >= preToolUseTimeoutSeconds {
+	if seconds, ok := hook["timeout"].(float64); ok && seconds >= preToolUseTimeoutSeconds && math.Trunc(seconds) == seconds {
 		return false
 	}
 	hook["timeout"] = preToolUseTimeoutSeconds

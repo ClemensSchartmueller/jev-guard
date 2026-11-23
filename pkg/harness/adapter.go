@@ -277,14 +277,29 @@ func FormatResponseForCall(call *NormalizedToolCall, result EvaluationResult) (i
 		harnessType = call.Harness
 	}
 
+	var code int
+	var output []byte
+	var err error
 	switch harnessType {
 	case HarnessAntigravity:
-		return formatAntigravityResponse(call, result)
+		code, output, err = formatAntigravityResponse(call, result)
 	case HarnessClaudeCode, HarnessCodex:
-		return formatClaudeResponse(result)
+		code, output, err = formatClaudeResponse(result)
 	default:
-		return formatDefaultResponse(result)
+		code, output, err = formatDefaultResponse(result)
 	}
+	return holdOnFormatError(harnessType, code, output, err)
+}
+
+// holdOnFormatError preserves the failure protocol even if verdict encoding fails.
+func holdOnFormatError(harnessType HarnessType, code int, output []byte, err error) (int, []byte, error) {
+	if err == nil {
+		return code, output, nil
+	}
+	if harnessType == HarnessAntigravity {
+		return 0, []byte(`{"decision":"force_ask","reason":"Failed to format hook response"}`), err
+	}
+	return 2, []byte("Failed to format hook response"), err
 }
 
 func formatAntigravityResponse(call *NormalizedToolCall, result EvaluationResult) (int, []byte, error) {

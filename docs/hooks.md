@@ -15,7 +15,11 @@ Contents:
 
 The default `PreToolUse` matchers cover the tools listed in the examples below. To gate selected MCP calls, add their exact `mcp__server__tool` names to the jev-guard `PreToolUse` matcher for your harness. The gate treats those calls as potential network egress, including calls to local servers. See [Egress policy](security-model.md#threat-injected-instructions-in-the-prompt).
 
-Managed `PreToolUse` hooks have a harness timeout of at least 20 seconds. The gate gives itself 10 seconds and caps each hook payload at 8 MiB. Deadline, input, and recoverable evaluation failures return the harness's hold response. Claude Code 2.1.295 and later blocks on hook failure with the installed `onFailure: "block"` setting. Codex and Antigravity use their own hook error handling when jev-guard cannot return a verdict.
+Managed `PreToolUse` hooks have a harness timeout of at least 20 seconds. The gate gives itself 10 seconds and caps each hook payload at 8 MiB. Deadline, input, and recoverable evaluation failures return the harness's hold response.
+
+- Claude Code blocks `PreToolUse` on exit code 2. With the installed `onFailure: "block"` setting, Claude Code 2.1.295 and later also blocks when a command hook fails to start, crashes, or times out. [Claude Code hooks reference](https://code.claude.com/docs/en/hooks#exit-code-output)
+- Codex blocks `PreToolUse` on exit code 2. Its documented default timeout for most command hooks is 600 seconds. The documentation does not specify a blocking guarantee for a crashed or timed-out `PreToolUse` process. [Codex hooks reference](https://developers.openai.com/codex/hooks)
+- Antigravity uses a JSON decision on stdout. Its native hook reference describes a 30-second default timeout. Its plugin hook documentation says it treats nonzero exits as hook errors and ignores them. The native reference does not specify a blocking guarantee for a crashed or timed-out process. [Antigravity hooks reference](https://antigravity.google/docs/hooks#hook-handler-configuration) · [Antigravity plugin development](https://antigravity.google/docs/build-plugins#lifecycle-hooks)
 
 Run `jev-guard init` again to update existing managed hook commands and timeouts. In Codex, approve the updated hook in `/hooks`.
 

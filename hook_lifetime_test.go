@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"os"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -11,93 +13,118 @@ import (
 	"jev-guard/pkg/harness"
 )
 
-func TestReadStandardInputBound(t *testing.T) {
+func TestReadStandardInputAtLimit(t *testing.T) {
+	data, err := readStandardInput(strings.NewReader(strings.Repeat(" ", maxHookInput)))
+	if err != nil || len(data) != maxHookInput {
+		t.Fatalf("read %d bytes, err = %v", len(data), err)
+	}
+}
+
+func TestRunGateHoldsOnFailures(t *testing.T) {
+	const antigravityInput = `{"toolCall":{"name":"view_file","args":{}}}`
+	const claudeInput = `{"tool_name":"Read","tool_input":{}}`
+
 	for _, tc := range []struct {
-		name      string
-		size      int
-		wantError bool
+		name, input, reason string
+		protocol            harness.HarnessType
+		initialize          func() error
+		deadline            time.Duration
 	}{
-		{"at limit", maxHookInput, false},
-		{"above limit", maxHookInput + 1, true},
+		{
+			name: "oversized Antigravity input", input: strings.Repeat(" ", maxHookInput+1),
+			reason: "hook payload exceeds", protocol: harness.HarnessAntigravity,
+		},
+		{
+			name: "invalid Antigravity input", input: "{",
+			reason: "Failed to parse", protocol: harness.HarnessAntigravity,
+		},
+		{
+			name: "panic in Antigravity evaluation", input: antigravityInput,
+			reason: hookInternalError, protocol: harness.HarnessAntigravity,
+			initialize: func() error { panic("internal detail") },
+		},
+		{
+			name: "panic in Claude evaluation", input: claudeInput,
+			reason: hookInternalError, protocol: harness.HarnessUnknown,
+			initialize: func() error { panic("internal detail") },
+		},
+		{
+			name: "Antigravity deadline", input: antigravityInput,
+			reason: "exceeded its evaluation deadline", protocol: harness.HarnessAntigravity,
+			deadline: 30 * time.Millisecond,
+		},
+		{
+			name: "Claude deadline", input: claudeInput,
+			reason: "exceeded its evaluation deadline", protocol: harness.HarnessUnknown,
+			deadline: 30 * time.Millisecond,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data, err := readStandardInput(strings.NewReader(strings.Repeat(" ", tc.size)))
-			if tc.wantError {
-				if err == nil || data != nil {
-					t.Fatal("oversized input was accepted")
+			ctx := context.Background()
+			initialize := tc.initialize
+			if tc.deadline != 0 {
+				deadlineCtx, cancel := context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+				ctx = deadlineCtx
+				release := make(chan struct{})
+				defer close(release)
+				initialize = func() error {
+					<-release
+					return errors.New("late initialization error")
 				}
-			} else if err != nil || len(data) != tc.size {
-				t.Fatalf("read %d bytes, err = %v", len(data), err)
+			} else if initialize == nil {
+				initialize = func() error { return errors.New("invalid input reached config initialization") }
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := runGate(ctx, tc.protocol, initialize, hookStreams{strings.NewReader(tc.input), &stdout, &stderr})
+			if tc.protocol == harness.HarnessAntigravity {
+				var verdict struct {
+					Decision, Reason string
+				}
+				err := json.Unmarshal(stdout.Bytes(), &verdict)
+				if code != 0 || err != nil || verdict.Decision != "force_ask" || !strings.Contains(verdict.Reason, tc.reason) {
+					t.Fatalf("exit = %d, verdict = %q, err = %v", code, stdout.String(), err)
+				}
+				return
+			}
+			if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), tc.reason) {
+				t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
 		})
 	}
 }
 
-func TestAwaitHookReplyHoldsOnDeadline(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	release := make(chan struct{})
-	defer close(release)
-
-	reply := awaitHookReply(ctx, blockingHookReply, func() hookReply {
-		<-release
-		return hookReply{exitCode: 0, output: []byte("late verdict")}
-	})
-	if reply.exitCode != 2 || !strings.Contains(string(reply.output), "deadline") {
-		t.Fatalf("got %+v, want a deadline hold", reply)
+func TestRunGateRecoversPanicDuringReplyDelivery(t *testing.T) {
+	for _, protocol := range []harness.HarnessType{harness.HarnessAntigravity, harness.HarnessUnknown} {
+		var output bytes.Buffer
+		sink := &panicOnceWriter{Writer: &output}
+		code := runGate(context.Background(), protocol, func() error { return nil }, hookStreams{
+			input: strings.NewReader("{"), output: sink, stderr: sink,
+		})
+		want := 2
+		if protocol == harness.HarnessAntigravity {
+			want = 0
+		}
+		if code != want {
+			t.Fatalf("%s exit = %d, want %d", protocol, code, want)
+		}
+		if !strings.Contains(output.String(), hookInternalError) {
+			t.Fatalf("%s reply = %q, want internal error hold", protocol, output.String())
+		}
 	}
 }
 
-func TestAwaitHookReplyHoldsOnPanic(t *testing.T) {
-	reply := awaitHookReply(context.Background(), blockingHookReply, func() hookReply {
-		panic("internal detail")
-	})
-	if reply.exitCode != 2 || string(reply.output) != "jev-guard hook encountered an internal error" {
-		t.Fatalf("got %+v, want a generic internal error hold", reply)
-	}
+type panicOnceWriter struct {
+	io.Writer
+	panicked bool
 }
 
-func blockingHookReply(reason string) hookReply {
-	return formatHookReply(&harness.NormalizedToolCall{Harness: harness.HarnessClaudeCode}, harness.EvaluationResult{
-		Decision: harness.DecisionAsk,
-		Reason:   reason,
-	})
-}
-
-func TestAntigravityHookHoldsOnInputError(t *testing.T) {
-	input, err := os.CreateTemp(t.TempDir(), "hook-input")
-	if err != nil {
-		t.Fatal(err)
+func (w *panicOnceWriter) Write(data []byte) (int, error) {
+	if !w.panicked {
+		w.panicked = true
+		panic("write failure")
 	}
-	defer input.Close()
-	if _, err := input.WriteString("{"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := input.Seek(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	output, err := os.CreateTemp(t.TempDir(), "hook-output")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer output.Close()
-	stdin, stdout := os.Stdin, os.Stdout
-	os.Stdin, os.Stdout = input, output
-	defer func() { os.Stdin, os.Stdout = stdin, stdout }()
-
-	if code := runGate(harness.HarnessAntigravity, func() error {
-		t.Error("invalid input reached config initialization")
-		return nil
-	}); code != 0 {
-		t.Fatalf("exit code = %d, want 0 with a JSON hold", code)
-	}
-	if _, err := output.Seek(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	var verdict struct {
-		Decision string
-	}
-	if err := json.NewDecoder(output).Decode(&verdict); err != nil || verdict.Decision != "force_ask" {
-		t.Fatalf("decision = %q, err = %v, want force_ask", verdict.Decision, err)
-	}
+	return w.Writer.Write(data)
 }
