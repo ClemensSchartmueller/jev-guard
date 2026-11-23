@@ -3,62 +3,88 @@ package fastpath
 import (
 	"slices"
 	"strings"
+
+	"jev-guard/pkg/config"
 )
 
-var trustedInspectionOptions = map[string][]string{
-	"git status": {"-s", "--short", "-b", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2"},
-	"git diff":   {"-p", "--patch", "--stat", "--numstat", "--shortstat", "--name-only", "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv"},
-	"git log":    {"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--graph", "--decorate", "--no-decorate", "--all", "--no-ext-diff", "--no-textconv"},
-	"git branch": {"--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose"},
-	"git show":   {"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--no-ext-diff", "--no-textconv"},
-	"ls":         {"--all", "--almost-all", "--human-readable", "--color"},
-	"dir":        {"--all", "--almost-all", "--human-readable", "--color"},
-	"pwd":        {"-L", "-P"},
-	"echo":       {"-n"},
-	"whoami":     {},
-	"which":      {"-a"},
-	"where.exe":  {},
+type trustedCommandSpec struct {
+	options       []string
+	allowOperands bool
+	gitPathspecs  bool
+	nameOnly      bool
+	extraOption   func(string) bool
 }
 
-func trustedCommandOptions(prefix, args string) bool {
-	if args == "" {
-		return true
-	}
-	switch prefix {
-	case "node -v", "go version", "python --version":
-		return false
-	}
-	options, builtIn := trustedInspectionOptions[prefix]
+var defaultTrustedPrefixes = config.DefaultTrustedCommands()
+
+var trustedInspectionCommands = map[string]trustedCommandSpec{
+	"git status": {
+		options:       []string{"-s", "--short", "-b", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2"},
+		allowOperands: true, gitPathspecs: true,
+	},
+	"git diff": {
+		options:       []string{"-p", "--patch", "--stat", "--numstat", "--shortstat", "--name-only", "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv"},
+		allowOperands: true, gitPathspecs: true,
+	},
+	"git log": {
+		options:       []string{"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--graph", "--decorate", "--no-decorate", "--all", "--no-ext-diff", "--no-textconv"},
+		allowOperands: true, gitPathspecs: true, extraOption: gitLogCountOption,
+	},
+	"git branch": {
+		// A bare operand can create a branch without any options.
+		options: []string{"--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose"},
+	},
+	"git show": {
+		options:       []string{"-p", "--patch", "--oneline", "--stat", "--name-only", "--name-status", "--no-ext-diff", "--no-textconv"},
+		allowOperands: true, gitPathspecs: true,
+	},
+	"ls":               {allowOperands: true, nameOnly: true, extraOption: listingOption},
+	"dir":              {allowOperands: true, nameOnly: true, extraOption: listingOption},
+	"pwd":              {nameOnly: true, options: []string{"-L", "-P"}},
+	"echo":             {allowOperands: true, nameOnly: true, options: []string{"-n"}},
+	"whoami":           {nameOnly: true},
+	"which":            {allowOperands: true, nameOnly: true, options: []string{"-a"}},
+	"where.exe":        {allowOperands: true, nameOnly: true},
+	"node -v":          {nameOnly: true},
+	"go version":       {nameOnly: true},
+	"python --version": {nameOnly: true},
+}
+
+func allowsTrustedCommandArgs(prefix, args string) bool {
+	spec, builtIn := trustedInspectionCommands[prefix]
 	if !builtIn {
-		// User-configured command prefixes retain their existing argument checks.
-		return true
+		// Preserve user opt-ins, and require an explicit policy for every default.
+		return !slices.Contains(defaultTrustedPrefixes, prefix)
 	}
 
 	for _, words := range [][]string{posixWords(args), powerShellWords(args), cmdWords(args)} {
-		pathsOnly := false
 		for _, word := range words {
-			if pathsOnly {
+			if spec.gitPathspecs && word == "--" {
+				// Git treats the remaining words as pathspecs.
+				break
+			}
+			if spec.allowOperands && !strings.HasPrefix(word, "-") {
 				continue
 			}
-			switch {
-			case word == "--" && prefix != "git branch" && strings.HasPrefix(prefix, "git "):
-				pathsOnly = true
-			case slices.Contains(options, word):
-			case prefix == "git branch":
-				// A bare operand can create a branch without any options.
-				return false
-			case !strings.HasPrefix(word, "-"):
-			case (prefix == "ls" || prefix == "dir") && listingOption(word):
-			case prefix == "git log" && len(word) > 1 && strings.Trim(word[1:], "0123456789") == "":
-			default:
-				return false
+			if slices.Contains(spec.options, word) || (spec.extraOption != nil && spec.extraOption(word)) {
+				continue
 			}
+			return false
 		}
 	}
 	return true
 }
 
+func gitLogCountOption(word string) bool {
+	return strings.HasPrefix(word, "-") && len(word) > 1 && strings.Trim(word[1:], "0123456789") == ""
+}
+
 func listingOption(word string) bool {
-	return strings.HasPrefix(word, "--color=") ||
-		(len(word) > 1 && strings.Trim(word[1:], "aAdFhilrSt") == "")
+	switch word {
+	case "--all", "--almost-all", "--human-readable", "--color", "--color=auto", "--color=always", "--color=never":
+		return true
+	}
+	// Accept bundles of short flags for listing format, sorting, and visibility.
+	const shortListingOptions = "aAdFhilrSt"
+	return strings.HasPrefix(word, "-") && len(word) > 1 && strings.Trim(word[1:], shortListingOptions) == ""
 }

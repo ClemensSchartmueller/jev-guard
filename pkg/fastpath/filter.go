@@ -618,7 +618,7 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 	if strings.HasPrefix(trimmedCmd, "git diff ") || strings.HasPrefix(trimmedCmd, "git log ") {
 		chainText = gitReflogReference.ReplaceAllString(chainText, "reflog")
 	}
-	if containsChainingOperators(chainText) || strings.ContainsAny(rawCmd, "%!^") {
+	if containsUntrustedShellSyntax(chainText) {
 		return false, nil
 	}
 
@@ -632,10 +632,8 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 		}
 		prefix := strings.ToLower(trusted)
 		args := strings.TrimSpace(suffix)
-		if !trustedCommandOptions(prefix, args) {
-			return false, nil
-		}
-		return f.areCommandArgsContained(args, prefix, call)
+		contained, err := f.areCommandArgsContained(args, prefix, call)
+		return contained && allowsTrustedCommandArgs(prefix, args), err
 	}
 	return false, nil
 }
@@ -685,7 +683,7 @@ func (f *Filter) areCommandArgsContained(argsStr, trustedPrefix string, call *ha
 			return false, nil
 		}
 	}
-	if !nameOnlyTrustedCommand(trustedPrefix) && commandArgsMayExpand(argsStr) {
+	if !trustedInspectionCommands[trustedPrefix].nameOnly && commandArgsMayExpand(argsStr) {
 		return false, nil
 	}
 
@@ -770,16 +768,6 @@ func gitOperandMayExist(candidate string) bool {
 			return false
 		}
 	}
-}
-
-// nameOnlyTrustedCommand lists built-in commands that cannot print file contents.
-// Their arguments still pass through the flag and workspace boundary checks.
-func nameOnlyTrustedCommand(command string) bool {
-	switch command {
-	case "ls", "dir", "pwd", "echo", "whoami", "which", "where.exe", "node -v", "go version", "python --version":
-		return true
-	}
-	return false
 }
 
 // commandArgsMayExpand uses the shared shell reader for unquoted expansions.
@@ -880,14 +868,8 @@ func hasUnambiguousReadTarget(call *harness.NormalizedToolCall) bool {
 // Git reflog selectors are literal arguments, rather than shell brace syntax.
 var gitReflogReference = regexp.MustCompile(`@\{(?:-?[0-9]+|u|upstream|push)\}`)
 
-func containsChainingOperators(cmd string) bool {
-	operators := []string{";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r"}
-	for _, op := range operators {
-		if strings.Contains(cmd, op) {
-			return true
-		}
-	}
-	return false
+func containsUntrustedShellSyntax(cmd string) bool {
+	return strings.ContainsAny(cmd, ";&|><`$(){}\n\r%!^")
 }
 
 func isURL(p string) bool {
