@@ -75,7 +75,12 @@ func searchFilters(call *harness.NormalizedToolCall) []searchFilter {
 			}
 			switch kind {
 			case "extension":
-				value = "*." + strings.TrimPrefix(value, ".")
+				ext := strings.TrimPrefix(strings.TrimSpace(value), ".")
+				if ext == "" {
+					out = append(out, searchFilter{key: key, group: group})
+					continue
+				}
+				value = "*." + ext
 			case "type":
 				globs, known := narrowRipgrepTypes[strings.ToLower(value)]
 				if !known {
@@ -123,7 +128,7 @@ func filterArgValues(raw interface{}) ([]string, bool) {
 // a user's ripgrep config redefines is outside what the gate can see.
 var narrowRipgrepTypes = map[string][]string{
 	"c":        {"*.[chh]", "*.[chh].in", "*.cats"},
-	"cpp":      {"*.[chh]", "*.[ch]pp", "*.[ch]xx", "*.cc", "*.hh", "*.inl"},
+	"cpp":      {"*.[chh]", "*.[chh].in", "*.[ch]pp", "*.[ch]pp.in", "*.[ch]xx", "*.[ch]xx.in", "*.cc", "*.cc.in", "*.hh", "*.hh.in", "*.inl"},
 	"cs":       {"*.cs"},
 	"csharp":   {"*.cs"},
 	"css":      {"*.css", "*.scss"},
@@ -137,10 +142,10 @@ var narrowRipgrepTypes = map[string][]string{
 	"lua":      {"*.lua"},
 	"markdown": {"*.markdown", "*.md", "*.mdown", "*.mdwn", "*.mdx", "*.mkd", "*.mkdn"},
 	"md":       {"*.markdown", "*.md", "*.mdown", "*.mdwn", "*.mdx", "*.mkd", "*.mkdn"},
-	"php":      {"*.php", "*.phtml"},
+	"php":      {"*.php", "*.php3", "*.php4", "*.php5", "*.php7", "*.php8", "*.pht", "*.phtml"},
 	"protobuf": {"*.proto"},
 	"py":       {"*.py", "*.pyi"},
-	"ruby":     {"*.gemspec", "*.rb", "*.rbw", "gemfile", "rakefile"},
+	"ruby":     {"*.gemspec", "*.rb", "*.rbw", ".irbrc", "gemfile", "rakefile", "config.ru"},
 	"rust":     {"*.rs"},
 	"scala":    {"*.sbt", "*.scala"},
 	"sql":      {"*.psql", "*.sql"},
@@ -148,7 +153,7 @@ var narrowRipgrepTypes = map[string][]string{
 	"toml":     {"*.toml", "cargo.lock"},
 	"ts":       {"*.cts", "*.mts", "*.ts", "*.tsx"},
 	"txt":      {"*.txt"},
-	"xml":      {"*.xml", "*.xsd", "*.xsl", "*.xslt", "*.xhtml"},
+	"xml":      {"*.dtd", "*.rng", "*.sch", "*.xhtml", "*.xjb", "*.xml", "*.xml.dist", "*.xsd", "*.xsl", "*.xslt"},
 	"yaml":     {"*.yaml", "*.yml"},
 	"zig":      {"*.zig"},
 }
@@ -210,19 +215,29 @@ func (f *Filter) checkSearchFilters(call *harness.NormalizedToolCall) (reason st
 	}
 	samples, dirSamples := f.sensitiveSampleNames()
 	// A group is broad when any of its values is; groups apply together, so the call is broad
-	// only when every group is. Treating each group on its own is a superset of the files a
-	// file must match in all of them.
+	// only when every group is. Unverifiable filters (non-string, overlong, or too many brace
+	// alternatives to boundary-check) cannot be overruled by another narrow group.
 	groupBroad := map[string]bool{}
+	unverifiable := false
 	for _, filter := range filters {
 		if !filter.ok || len(filter.value) > maxPathLikeBytes {
+			unverifiable = true
 			groupBroad[filter.group] = true
 			continue
 		}
-		reason, err := f.checkFilterBoundary(call, filter)
+		reason, expandedOK, err := f.checkFilterBoundary(call, filter)
 		if reason != "" || err != nil {
 			return reason, false, err
 		}
+		if !expandedOK {
+			unverifiable = true
+			groupBroad[filter.group] = true
+			continue
+		}
 		groupBroad[filter.group] = groupBroad[filter.group] || filterMayMatchSensitive(filter.value, samples, dirSamples)
+	}
+	if unverifiable {
+		return "", true, nil
 	}
 	for _, b := range groupBroad {
 		if !b {
@@ -232,12 +247,31 @@ func (f *Filter) checkSearchFilters(call *harness.NormalizedToolCall) (reason st
 	return "", true, nil
 }
 
-// checkFilterBoundary boundary-checks a filter that is absolute, starts with "~", or has a ".."
-// segment. A relative filter is read below the tool's directory argument, which the boundary
-// check already covers.
-func (f *Filter) checkFilterBoundary(call *harness.NormalizedToolCall, filter searchFilter) (string, error) {
-	value := filter.value
-	outside := fmt.Sprintf("Search filter %s escapes workspace boundaries: %s", filter.key, value)
+// checkFilterBoundary boundary-checks a filter (including its {a,b} brace alternatives) that is
+// absolute, starts with "~", or has a ".." segment. A relative filter is read below the tool's
+// directory argument, which the boundary check already covers. expandedOK is false when brace
+// expansion exceeds maxPatternExpansions and the filter cannot be fully verified.
+func (f *Filter) checkFilterBoundary(call *harness.NormalizedToolCall, filter searchFilter) (reason string, expandedOK bool, err error) {
+	expansions, ok := expandBraces(filter.value, maxPatternExpansions)
+	candidates := []string{filter.value}
+	if ok {
+		for _, expanded := range expansions {
+			if expanded != filter.value {
+				candidates = append(candidates, expanded)
+			}
+		}
+	}
+	for _, value := range candidates {
+		reason, err := f.checkSingleFilterBoundary(call, filter.key, value)
+		if reason != "" || err != nil {
+			return reason, ok, err
+		}
+	}
+	return "", ok, nil
+}
+
+func (f *Filter) checkSingleFilterBoundary(call *harness.NormalizedToolCall, key, value string) (string, error) {
+	outside := fmt.Sprintf("Search filter %s escapes workspace boundaries: %s", key, value)
 	if strings.HasPrefix(value, "~") {
 		return outside, nil
 	}
@@ -256,7 +290,7 @@ func (f *Filter) checkFilterBoundary(call *harness.NormalizedToolCall, filter se
 	}
 	checker := f.resolveBoundaryChecker(call)
 	if checker == nil {
-		return fmt.Sprintf("Workspace boundaries cannot be resolved for search filter %s: %s", filter.key, value), nil
+		return fmt.Sprintf("Workspace boundaries cannot be resolved for search filter %s: %s", key, value), nil
 	}
 	prefix := staticGlobPrefix(slashed)
 	contained, err := checker.IsPathContained(filepath.FromSlash(prefix), call.Cwd)
@@ -296,7 +330,7 @@ func filterMayMatchSensitive(value string, samples, dirSamples []string) bool {
 	for _, expanded := range expansions {
 		// Read "\" as a glob escape and as a Windows separator.
 		for _, reading := range []string{expanded, normalizePathSeparators(expanded)} {
-			segments := strings.Split(strings.TrimSuffix(reading, "/"), "/")
+			segments := strings.Split(strings.TrimRight(reading, "/"), "/")
 			last := len(segments) - 1
 			for i, segment := range segments {
 				names := dirSamples
@@ -373,13 +407,13 @@ func searchesDirectoryContents(call *harness.NormalizedToolCall) bool {
 	return false
 }
 
-// splitGlobList returns each value together with the globs it may hold as a list: tools
-// accept several globs in one argument, separated by whitespace or by commas outside braces
-// ("*.go .env", "*.go,*.md"). The whole value is kept too, so nothing is checked less.
+// splitGlobList returns each value's globs as a list: tools accept several globs in one argument,
+// separated by whitespace or by commas outside braces ("*.go .env", "*.go,*.md"). Values that hold
+// no non-empty glob or only "!" exclusions are skipped so they never count as a positive filter.
+// When multiple globs are present, the whole value is kept too so nothing is checked less.
 func splitGlobList(values []string) []string {
 	var out []string
 	for _, value := range values {
-		out = append(out, value)
 		depth, start := 0, 0
 		var parts []string
 		for i := 0; i <= len(value); i++ {
@@ -404,9 +438,23 @@ func splitGlobList(values []string) []string {
 			}
 			start = i + 1
 		}
-		if len(parts) > 1 {
-			out = append(out, parts...)
+		if len(parts) == 0 {
+			continue
 		}
+		hasPositive := false
+		for _, part := range parts {
+			if !strings.HasPrefix(part, "!") {
+				hasPositive = true
+				break
+			}
+		}
+		if !hasPositive {
+			continue
+		}
+		if len(parts) > 1 && !strings.HasPrefix(strings.TrimLeft(value, " \t\r\n,"), "!") {
+			out = append(out, value)
+		}
+		out = append(out, parts...)
 	}
 	return out
 }

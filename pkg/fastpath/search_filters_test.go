@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"jev-guard/pkg/harness"
@@ -74,9 +75,18 @@ func TestSearchFilterThatCanSelectSensitiveFileIsNotAllowed(t *testing.T) {
 		"Grep glob list space":      claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "*.go .en?"}),
 		"Grep glob list comma":      claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "*.go,*"}),
 		"Grep no filter":            claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root}),
+		"Grep empty glob":           claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": ""}),
+		"Grep whitespace glob":      claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "   "}),
+		"Grep comma glob":           claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": ","}),
+		"Grep padded star":          claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": " *"}),
+		"Grep comma star":           claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": ",*"}),
 		"Grep exclude only":         claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "!*.md"}),
+		"Grep padded exclude":       claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": " !*.md"}),
+		"Grep double slash star":    claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "*//"}),
+		"Grep double slash glob":    claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "**//"}),
 		"Grep missing path":         claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": filepath.Join(root, "nope")}),
 		"grep_search no Includes":   antigravitySearchCall(t, root, "grep_search", map[string]interface{}{"SearchPath": root, "Query": "KEY"}),
+		"grep_search empty Include": antigravitySearchCall(t, root, "grep_search", map[string]interface{}{"SearchPath": root, "Query": "KEY", "Includes": []interface{}{""}}),
 		"grep_search Excludes only": antigravitySearchCall(t, root, "grep_search", map[string]interface{}{"SearchPath": root, "Query": "KEY", "Excludes": []interface{}{"*.md"}}),
 		"Grep glob non-string":      claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": []interface{}{"*.go", 7}}),
 		"Glob pattern .env*":        claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": ".env*", "path": root}),
@@ -86,6 +96,12 @@ func TestSearchFilterThatCanSelectSensitiveFileIsNotAllowed(t *testing.T) {
 		"grep_search Includes star": antigravitySearchCall(t, root, "grep_search", map[string]interface{}{"SearchPath": root, "Query": "KEY", "Includes": []interface{}{"*"}}),
 		"find_by_name Pattern":      antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "*.pem"}),
 		"find_by_name Extensions":   antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "*", "Extensions": []interface{}{"env"}}),
+		"find_by_name padded ext":   antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "*", "Extensions": []interface{}{" env"}}),
+		"find_by_name empty ext":    antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "*", "Extensions": []interface{}{""}}),
+		"find_by_name dot ext":      antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "*", "Extensions": []interface{}{"."}}),
+		"find_by_name nonstr pat":   antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": 123, "Extensions": []interface{}{"go"}}),
+		"find_by_name overlong pat": antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "../../" + strings.Repeat("a", maxPathLikeBytes), "Extensions": []interface{}{"go"}}),
+		"find_by_name many braces":  antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": strings.Repeat("{a,b}", 7) + "/*.go", "Extensions": []interface{}{"go"}}),
 		"find_by_name ext only":     antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Extensions": []interface{}{"key"}}),
 	}
 	for name, call := range cases {
@@ -125,13 +141,21 @@ func TestSearchPatternOutsideWorkspaceIsNotAllowed(t *testing.T) {
 	outside := filepath.ToSlash(filepath.Join(t.TempDir(), "*.go"))
 	cases := map[string]*harness.NormalizedToolCall{
 		"Glob absolute outside":     claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": outside, "path": root}),
+		"Glob padded absolute":      claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": " " + outside, "path": root}),
 		"Glob root":                 claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "/*.go", "path": root}),
 		"Glob parent":               claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "../*.go", "path": root}),
+		"Glob padded parent":        claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": " ../*.go", "path": root}),
+		"Glob brace parent":         claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "{..,src}/*.go", "path": root}),
+		"Glob brace split dots":     claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": ".{.,a}/**/*.go", "path": root}),
+		"Glob brace absolute":       claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "{" + outside + ",src/*.go}", "path": root}),
+		"Glob brace home":           claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "{~,src}/*.go", "path": root}),
 		"Glob nested parent":        claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "src/../../*.go", "path": root}),
 		"Glob home":                 claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": "~/*.go", "path": root}),
+		"Glob padded home":          claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": " ~/*.go", "path": root}),
 		"Grep glob parent":          claudeSearchCall(t, root, "Grep", map[string]interface{}{"pattern": "KEY", "path": root, "glob": "../**/*.go"}),
 		"grep_search Includes abs":  antigravitySearchCall(t, root, "grep_search", map[string]interface{}{"SearchPath": root, "Query": "KEY", "Includes": []interface{}{outside}}),
 		"find_by_name Pattern home": antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "~/*.go"}),
+		"find_by_name brace parent": antigravitySearchCall(t, root, "find_by_name", map[string]interface{}{"SearchDirectory": root, "Pattern": "{..,src}/*.go", "Extensions": []interface{}{"go"}}),
 	}
 	if runtime.GOOS == "windows" {
 		cases["Glob drive"] = claudeSearchCall(t, root, "Glob", map[string]interface{}{"pattern": `C:\*.go`, "path": root})
