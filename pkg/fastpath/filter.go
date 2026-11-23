@@ -608,7 +608,8 @@ func (f *Filter) isTrustedOperation(call *harness.NormalizedToolCall) (bool, err
 }
 
 func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error) {
-	trimmedCmd := strings.TrimSpace(strings.ToLower(call.Command))
+	rawCmd := strings.TrimSpace(call.Command)
+	trimmedCmd := strings.ToLower(rawCmd)
 	if trimmedCmd == "" {
 		return false, nil
 	}
@@ -617,30 +618,29 @@ func (f *Filter) isTrustedCommand(call *harness.NormalizedToolCall) (bool, error
 	if strings.HasPrefix(trimmedCmd, "git diff ") || strings.HasPrefix(trimmedCmd, "git log ") {
 		chainText = gitReflogReference.ReplaceAllString(chainText, "reflog")
 	}
-	if containsChainingOperators(chainText) {
+	if containsChainingOperators(chainText) || strings.ContainsAny(rawCmd, "%!^") {
 		return false, nil
 	}
 
-	matched := false
-	var matchedPrefix string
 	for _, trusted := range f.trustedCommands {
-		trustedLower := strings.ToLower(trusted)
-		if trimmedCmd == trustedLower || strings.HasPrefix(trimmedCmd, trustedLower+" ") {
-			matched = true
-			matchedPrefix = trustedLower
-			break
+		if len(rawCmd) < len(trusted) || !strings.EqualFold(rawCmd[:len(trusted)], trusted) {
+			continue
 		}
+		suffix := rawCmd[len(trusted):]
+		if suffix != "" && suffix[0] != ' ' {
+			continue
+		}
+		prefix := strings.ToLower(trusted)
+		args := strings.TrimSpace(suffix)
+		if !trustedCommandOptions(prefix, args) {
+			return false, nil
+		}
+		return f.areCommandArgsContained(args, prefix, call)
 	}
-
-	if !matched {
-		return false, nil
-	}
-
-	return f.areCommandArgsContained(trimmedCmd, matchedPrefix, call)
+	return false, nil
 }
 
-func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harness.NormalizedToolCall) (bool, error) {
-	argsStr := strings.TrimSpace(strings.TrimPrefix(cmd, trustedPrefix))
+func (f *Filter) areCommandArgsContained(argsStr, trustedPrefix string, call *harness.NormalizedToolCall) (bool, error) {
 	if argsStr == "" {
 		return true, nil
 	}
@@ -649,14 +649,13 @@ func (f *Filter) areCommandArgsContained(cmd, trustedPrefix string, call *harnes
 	if trustedPrefix == "git diff" {
 		// Inspect the union of shell readings, preserving filesystem case. Git can
 		// implicitly compare paths regardless of repository metadata or environment.
-		rawArgs := strings.TrimSpace(strings.TrimSpace(call.Command)[len(trustedPrefix):])
 		existing := map[string]struct{}{}
 		// Read the operands twice: once with reflog selectors masked, so alternate
 		// shell forms cannot split one revision into several filesystem operands,
 		// and once unmasked, so a real directory whose name contains a selector
 		// (for example "x@{1}") is still counted. Extra fragments only matter if
 		// they exist on disk, which makes the second pass fail toward deferral.
-		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(rawArgs, "\x00"), rawArgs} {
+		for _, pathArgs := range []string{gitReflogReference.ReplaceAllString(argsStr, "\x00"), argsStr} {
 			pathsOnly := false
 			for _, arg := range shellWords(pathArgs) {
 				if strings.ContainsRune(arg, 0) {

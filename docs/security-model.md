@@ -160,6 +160,8 @@ These are also not modeled, and have not been run:
 
 Safe local read tools and trusted shell inspection commands are allowed immediately (`ALLOW`) once the boundary, flag-argument, and sensitive-file checks pass. The built-in trusted commands are `git status`, `git diff`, `git log`, `git branch`, `git show`, `ls`, `dir`, `pwd`, `echo`, `whoami`, `which`, `where.exe`, `node -v`, `go version`, and `python --version`.
 
+Built-in commands accept a fixed set of inspection options. Other options go to the judge. `git branch` accepts listing options and defers calls with operands. The built-in version queries accept no trailing arguments. These checks apply to the command line and do not inspect Git's configured helpers or shell aliases.
+
 A trusted command is still not trusted if any argument starts with `~`, contains `:` (other than a Windows drive letter), uses `-o` or `--output`, or names a path outside the workspace.
 
 Shell glob and brace patterns also defer, as do quoted wildcards (`*?[]`) that Git can interpret as pathspecs. Name-only built-ins such as `ls`, `dir`, `echo`, and `which` are exempt from glob deferral, but still undergo workspace boundary checks. Escaped arguments are checked under POSIX, PowerShell, and cmd.exe escape rules regardless of the host OS; a sensitive decoded name stops the fast path. cmd.exe readings remove carets before applying the target program’s Windows argument quote and backslash rules, so caret-escaped quotes cannot hide sensitive or protected names. Literal Git reflog braces such as `HEAD@{1}` do not count as brace expansion. `git diff` defers when two or more non-option operands exist as filesystem paths relative to the call's working directory, using the union of shell-decoded readings. Files and directories count, and stat errors other than not-exist count conservatively. This rule is independent of repository metadata, ownership, and Git environment variables because Git can fall back to recursive path comparisons. Revisions such as `HEAD~1`, `main...HEAD`, and reflog selectors (`@{-1}`, `@{u}`, `main@{push}`) remain eligible when they are not filesystem paths. Content-reading trusted commands also defer on decoded backslashes, since Git pathspec escapes can hide sensitive names; the conservative rule also defers Windows-style relative paths such as `a\b`. All `git diff --no-index` calls defer because directory comparisons can recursively print sensitive descendants, and operand types can change. Deferred commands incur the judge's latency and cost.
@@ -167,6 +169,7 @@ Shell glob and brace patterns also defer, as do quoted wildcards (`*?[]`) that G
 These always go to TypeSafe AI for semantic evaluation instead:
 
 - Chained commands (`;`, `&&`, `&`, `|`, `>`, `<`, `` ` ``, or newlines).
+- cmd.exe expansion and escape markers (`%`, `!`, `^`), regardless of the host OS.
 - PowerShell subexpression operators (`(`, `)`, `{`, `}`, `$`, `@(`).
 - Outbound network fetches (`read_url_content`, `WebFetch`, `WebSearch`).
 
