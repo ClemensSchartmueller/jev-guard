@@ -576,6 +576,39 @@ func TestGateIntentHardening(t *testing.T) {
 	}
 }
 
+func TestTraceGateEvaluation_TaintedMCPEgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"answers":{
+			"is_workspace_contained":{"type":"noul","noul":0.99},
+			"destructive_potential":{"type":"score","score":0.1,"confidence":0.9},
+			"violation_category":{"type":"choice","choice":"none","confidence":0.9}
+		}}`)
+	}))
+	defer server.Close()
+
+	cfg := taintConfig(config.TaintModeEnforce)
+	cfg.APIKey, cfg.BaseURL = "test-key", server.URL
+	call := &harness.NormalizedToolCall{
+		ToolName: "mcp__server__search",
+		Harness:  harness.HarnessClaudeCode,
+		Cwd:      t.TempDir(),
+		RawArgs:  map[string]interface{}{"query": "example"},
+	}
+
+	final := traceGateEvaluation(call, cfg, false).Final
+	if final == nil || final.Decision != harness.DecisionAllow || final.Source != "policy_jev_allow" {
+		t.Fatalf("untainted verdict = %+v, want policy allow", final)
+	}
+
+	call.Taint = &session.TaintSource{ToolName: "WebFetch"}
+	final = traceGateEvaluation(call, cfg, false).Final
+	if final == nil || final.Decision != harness.DecisionAsk || final.Source != sourceSessionTainted ||
+		!strings.Contains(final.TaintNote, "network egress") {
+		t.Fatalf("tainted verdict = %+v, want session taint ask for network egress", final)
+	}
+}
+
 func writeTranscript(t *testing.T, convID, lastUser string) (home, path string) {
 	t.Helper()
 	home = t.TempDir()
