@@ -421,3 +421,57 @@ func TestInstallAgentHooksCodexUpgradesIntentHooksInPlace(t *testing.T) {
 		t.Fatalf("hooks not upgraded: %s", data)
 	}
 }
+
+func TestInstallAgentHooksConfiguresPreToolUseDeadline(t *testing.T) {
+	for _, agent := range initAgents {
+		t.Run(agent, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hooks.json")
+			key, command := "hooks", "jev-guard"
+			if agent == "antigravity" {
+				key = "jev-guard"
+				command += " --antigravity-hook"
+			}
+			original := `{"` + key + `":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"jev-guard","timeout":2}]}]}}`
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := installAgentHooks(path, agent, "jev-guard"); err != nil || !changed {
+				t.Fatalf("migration: changed=%v err=%v", changed, err)
+			}
+			if changed, err := installAgentHooks(path, agent, "jev-guard"); err != nil || changed {
+				t.Fatalf("second init: changed=%v err=%v", changed, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var root map[string]struct {
+				PreToolUse []struct {
+					Hooks []struct {
+						Command   string
+						Timeout   int
+						OnFailure string
+					}
+				}
+			}
+			if err := json.Unmarshal(data, &root); err != nil {
+				t.Fatal(err)
+			}
+			entries := root[key].PreToolUse
+			if len(entries) != 1 || len(entries[0].Hooks) != 1 {
+				t.Fatalf("expected one managed hook, got %+v", entries)
+			}
+			hook := entries[0].Hooks[0]
+			if hook.Command != command || hook.Timeout != 20 {
+				t.Fatalf("hook = %+v, want %q with timeout 20", hook, command)
+			}
+			wantOnFailure := ""
+			if agent == "claude" {
+				wantOnFailure = "block"
+			}
+			if hook.OnFailure != wantOnFailure {
+				t.Fatalf("onFailure = %q, want %q", hook.OnFailure, wantOnFailure)
+			}
+		})
+	}
+}

@@ -266,7 +266,7 @@ func runGateWithStdin(t *testing.T, input string, initErr error) int {
 	old := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = old; _ = r.Close() }()
-	return runGate(initErr)
+	return runGate(harness.HarnessUnknown, func() error { return initErr })
 }
 
 // Review R4: a PostToolUse envelope with malformed arguments, or a gate run
