@@ -38,7 +38,7 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	runner := cli.NewRunner(os.Stdout, os.Stderr, func() bool { return true })
+	runner := cli.NewRunner(os.Stdout, os.Stderr, cli.DefaultIsTerminal)
 	runner.Eval = runEval
 	runner.Explain = runExplain
 	_, exitCode := runner.EvaluateArgs(args)
